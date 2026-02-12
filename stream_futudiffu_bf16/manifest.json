@@ -1,0 +1,831 @@
+{
+  "source": "futudiffu",
+  "config": {
+    "prompt": "ahem.\n*ting ting ting ting ting*\nthe query model for this is a LARGE LANGUAGE MODEL, specifically QWEN-3-4B, a GENERAL PURPOSE SEMANTIC PARSER which is able to WRITE SENTENCES AT A TIME when they are participating in dialogue. however, in this situation, they are being used as a hidden state generator to steer an *image generation model*, z-image.\n\nqwen-3-4b, draw me an \"enormous laser shark for the sega saturn\".",
+    "seed": 91849188298864,
+    "steps": 30,
+    "cfg": 4.0,
+    "width": 1280,
+    "height": 832
+  },
+  "stages": [
+    {
+      "name": "text_encoder_pos",
+      "filename": "text_encoder_pos.pt",
+      "shape": [
+        1,
+        113,
+        2560
+      ],
+      "dtype": "torch.bfloat16",
+      "elapsed": 19.125
+    },
+    {
+      "name": "text_encoder_neg",
+      "filename": "text_encoder_neg.pt",
+      "shape": [
+        1,
+        8,
+        2560
+      ],
+      "dtype": "torch.bfloat16",
+      "elapsed": 19.171999999321997
+    },
+    {
+      "name": "noise",
+      "filename": "noise.pt",
+      "shape": [
+        1,
+        16,
+        104,
+        160
+      ],
+      "dtype": "torch.bfloat16",
+      "elapsed": 19.218999999575317
+    },
+    {
+      "name": "sigmas",
+      "filename": "sigmas.pt",
+      "shape": [
+        31
+      ],
+      "dtype": "torch.float32",
+      "elapsed": 19.234999999403954
+    },
+    {
+      "name": "euler_step_00",
+      "filename": "euler_step_00.pt",
+      "shape": {
+        "x": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "denoised": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "sigma": "scalar"
+      },
+      "dtype": {
+        "x": "torch.bfloat16",
+        "denoised": "torch.bfloat16",
+        "sigma": "float"
+      },
+      "elapsed": 44.09399999957532
+    },
+    {
+      "name": "euler_step_01",
+      "filename": "euler_step_01.pt",
+      "shape": {
+        "x": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "denoised": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "sigma": "scalar"
+      },
+      "dtype": {
+        "x": "torch.float32",
+        "denoised": "torch.bfloat16",
+        "sigma": "float"
+      },
+      "elapsed": 45.14099999982864
+    },
+    {
+      "name": "euler_step_02",
+      "filename": "euler_step_02.pt",
+      "shape": {
+        "x": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "denoised": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "sigma": "scalar"
+      },
+      "dtype": {
+        "x": "torch.float32",
+        "denoised": "torch.bfloat16",
+        "sigma": "float"
+      },
+      "elapsed": 46.15699999965727
+    },
+    {
+      "name": "euler_step_03",
+      "filename": "euler_step_03.pt",
+      "shape": {
+        "x": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "denoised": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "sigma": "scalar"
+      },
+      "dtype": {
+        "x": "torch.float32",
+        "denoised": "torch.bfloat16",
+        "sigma": "float"
+      },
+      "elapsed": 47.188000000081956
+    },
+    {
+      "name": "euler_step_04",
+      "filename": "euler_step_04.pt",
+      "shape": {
+        "x": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "denoised": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "sigma": "scalar"
+      },
+      "dtype": {
+        "x": "torch.float32",
+        "denoised": "torch.bfloat16",
+        "sigma": "float"
+      },
+      "elapsed": 48.21899999957532
+    },
+    {
+      "name": "euler_step_05",
+      "filename": "euler_step_05.pt",
+      "shape": {
+        "x": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "denoised": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "sigma": "scalar"
+      },
+      "dtype": {
+        "x": "torch.float32",
+        "denoised": "torch.bfloat16",
+        "sigma": "float"
+      },
+      "elapsed": 49.25
+    },
+    {
+      "name": "euler_step_06",
+      "filename": "euler_step_06.pt",
+      "shape": {
+        "x": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "denoised": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "sigma": "scalar"
+      },
+      "dtype": {
+        "x": "torch.float32",
+        "denoised": "torch.bfloat16",
+        "sigma": "float"
+      },
+      "elapsed": 50.28199999965727
+    },
+    {
+      "name": "euler_step_07",
+      "filename": "euler_step_07.pt",
+      "shape": {
+        "x": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "denoised": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "sigma": "scalar"
+      },
+      "dtype": {
+        "x": "torch.float32",
+        "denoised": "torch.bfloat16",
+        "sigma": "float"
+      },
+      "elapsed": 51.313000000081956
+    },
+    {
+      "name": "euler_step_08",
+      "filename": "euler_step_08.pt",
+      "shape": {
+        "x": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "denoised": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "sigma": "scalar"
+      },
+      "dtype": {
+        "x": "torch.float32",
+        "denoised": "torch.bfloat16",
+        "sigma": "float"
+      },
+      "elapsed": 52.35999999940395
+    },
+    {
+      "name": "euler_step_09",
+      "filename": "euler_step_09.pt",
+      "shape": {
+        "x": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "denoised": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "sigma": "scalar"
+      },
+      "dtype": {
+        "x": "torch.float32",
+        "denoised": "torch.bfloat16",
+        "sigma": "float"
+      },
+      "elapsed": 53.39099999982864
+    },
+    {
+      "name": "euler_step_10",
+      "filename": "euler_step_10.pt",
+      "shape": {
+        "x": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "denoised": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "sigma": "scalar"
+      },
+      "dtype": {
+        "x": "torch.float32",
+        "denoised": "torch.bfloat16",
+        "sigma": "float"
+      },
+      "elapsed": 54.421999999322
+    },
+    {
+      "name": "euler_step_11",
+      "filename": "euler_step_11.pt",
+      "shape": {
+        "x": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "denoised": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "sigma": "scalar"
+      },
+      "dtype": {
+        "x": "torch.float32",
+        "denoised": "torch.bfloat16",
+        "sigma": "float"
+      },
+      "elapsed": 55.45299999974668
+    },
+    {
+      "name": "euler_step_12",
+      "filename": "euler_step_12.pt",
+      "shape": {
+        "x": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "denoised": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "sigma": "scalar"
+      },
+      "dtype": {
+        "x": "torch.float32",
+        "denoised": "torch.bfloat16",
+        "sigma": "float"
+      },
+      "elapsed": 56.5
+    },
+    {
+      "name": "euler_step_13",
+      "filename": "euler_step_13.pt",
+      "shape": {
+        "x": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "denoised": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "sigma": "scalar"
+      },
+      "dtype": {
+        "x": "torch.float32",
+        "denoised": "torch.bfloat16",
+        "sigma": "float"
+      },
+      "elapsed": 57.53199999965727
+    },
+    {
+      "name": "euler_step_14",
+      "filename": "euler_step_14.pt",
+      "shape": {
+        "x": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "denoised": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "sigma": "scalar"
+      },
+      "dtype": {
+        "x": "torch.float32",
+        "denoised": "torch.bfloat16",
+        "sigma": "float"
+      },
+      "elapsed": 58.563000000081956
+    },
+    {
+      "name": "euler_step_15",
+      "filename": "euler_step_15.pt",
+      "shape": {
+        "x": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "denoised": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "sigma": "scalar"
+      },
+      "dtype": {
+        "x": "torch.float32",
+        "denoised": "torch.bfloat16",
+        "sigma": "float"
+      },
+      "elapsed": 59.60999999940395
+    },
+    {
+      "name": "euler_step_16",
+      "filename": "euler_step_16.pt",
+      "shape": {
+        "x": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "denoised": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "sigma": "scalar"
+      },
+      "dtype": {
+        "x": "torch.float32",
+        "denoised": "torch.bfloat16",
+        "sigma": "float"
+      },
+      "elapsed": 60.64099999982864
+    },
+    {
+      "name": "euler_step_17",
+      "filename": "euler_step_17.pt",
+      "shape": {
+        "x": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "denoised": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "sigma": "scalar"
+      },
+      "dtype": {
+        "x": "torch.float32",
+        "denoised": "torch.bfloat16",
+        "sigma": "float"
+      },
+      "elapsed": 61.671999999322
+    },
+    {
+      "name": "euler_step_18",
+      "filename": "euler_step_18.pt",
+      "shape": {
+        "x": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "denoised": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "sigma": "scalar"
+      },
+      "dtype": {
+        "x": "torch.float32",
+        "denoised": "torch.bfloat16",
+        "sigma": "float"
+      },
+      "elapsed": 62.70299999974668
+    },
+    {
+      "name": "euler_step_19",
+      "filename": "euler_step_19.pt",
+      "shape": {
+        "x": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "denoised": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "sigma": "scalar"
+      },
+      "dtype": {
+        "x": "torch.float32",
+        "denoised": "torch.bfloat16",
+        "sigma": "float"
+      },
+      "elapsed": 63.75
+    },
+    {
+      "name": "euler_step_20",
+      "filename": "euler_step_20.pt",
+      "shape": {
+        "x": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "denoised": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "sigma": "scalar"
+      },
+      "dtype": {
+        "x": "torch.float32",
+        "denoised": "torch.bfloat16",
+        "sigma": "float"
+      },
+      "elapsed": 64.78199999965727
+    },
+    {
+      "name": "euler_step_21",
+      "filename": "euler_step_21.pt",
+      "shape": {
+        "x": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "denoised": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "sigma": "scalar"
+      },
+      "dtype": {
+        "x": "torch.float32",
+        "denoised": "torch.bfloat16",
+        "sigma": "float"
+      },
+      "elapsed": 65.82799999974668
+    },
+    {
+      "name": "euler_step_22",
+      "filename": "euler_step_22.pt",
+      "shape": {
+        "x": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "denoised": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "sigma": "scalar"
+      },
+      "dtype": {
+        "x": "torch.float32",
+        "denoised": "torch.bfloat16",
+        "sigma": "float"
+      },
+      "elapsed": 66.85999999940395
+    },
+    {
+      "name": "euler_step_23",
+      "filename": "euler_step_23.pt",
+      "shape": {
+        "x": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "denoised": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "sigma": "scalar"
+      },
+      "dtype": {
+        "x": "torch.float32",
+        "denoised": "torch.bfloat16",
+        "sigma": "float"
+      },
+      "elapsed": 67.89099999982864
+    },
+    {
+      "name": "euler_step_24",
+      "filename": "euler_step_24.pt",
+      "shape": {
+        "x": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "denoised": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "sigma": "scalar"
+      },
+      "dtype": {
+        "x": "torch.float32",
+        "denoised": "torch.bfloat16",
+        "sigma": "float"
+      },
+      "elapsed": 68.921999999322
+    },
+    {
+      "name": "euler_step_25",
+      "filename": "euler_step_25.pt",
+      "shape": {
+        "x": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "denoised": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "sigma": "scalar"
+      },
+      "dtype": {
+        "x": "torch.float32",
+        "denoised": "torch.bfloat16",
+        "sigma": "float"
+      },
+      "elapsed": 69.96899999957532
+    },
+    {
+      "name": "euler_step_26",
+      "filename": "euler_step_26.pt",
+      "shape": {
+        "x": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "denoised": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "sigma": "scalar"
+      },
+      "dtype": {
+        "x": "torch.float32",
+        "denoised": "torch.bfloat16",
+        "sigma": "float"
+      },
+      "elapsed": 71.01599999982864
+    },
+    {
+      "name": "euler_step_27",
+      "filename": "euler_step_27.pt",
+      "shape": {
+        "x": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "denoised": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "sigma": "scalar"
+      },
+      "dtype": {
+        "x": "torch.float32",
+        "denoised": "torch.bfloat16",
+        "sigma": "float"
+      },
+      "elapsed": 72.046999999322
+    },
+    {
+      "name": "euler_step_28",
+      "filename": "euler_step_28.pt",
+      "shape": {
+        "x": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "denoised": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "sigma": "scalar"
+      },
+      "dtype": {
+        "x": "torch.float32",
+        "denoised": "torch.bfloat16",
+        "sigma": "float"
+      },
+      "elapsed": 73.07799999974668
+    },
+    {
+      "name": "euler_step_29",
+      "filename": "euler_step_29.pt",
+      "shape": {
+        "x": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "denoised": [
+          1,
+          16,
+          104,
+          160
+        ],
+        "sigma": "scalar"
+      },
+      "dtype": {
+        "x": "torch.float32",
+        "denoised": "torch.bfloat16",
+        "sigma": "float"
+      },
+      "elapsed": 74.125
+    },
+    {
+      "name": "final_latent",
+      "filename": "final_latent.pt",
+      "shape": [
+        1,
+        16,
+        104,
+        160
+      ],
+      "dtype": "torch.float32",
+      "elapsed": 74.125
+    },
+    {
+      "name": "vae_output",
+      "filename": "vae_output.pt",
+      "shape": [
+        1,
+        3,
+        832,
+        1280
+      ],
+      "dtype": "torch.bfloat16",
+      "elapsed": 75.45299999974668
+    }
+  ],
+  "total_elapsed": 75.5
+}
