@@ -1,8 +1,9 @@
-"""VAE decoder ported from ComfyUI.
+"""VAE encoder/decoder ported from ComfyUI.
 
 Sources:
 - comfy/ldm/models/autoencoder.py (AutoencoderKL, AutoencodingEngineLegacy)
-- comfy/ldm/modules/diffusionmodules/model.py (Decoder, ResnetBlock, AttnBlock, Upsample)
+- comfy/ldm/modules/diffusionmodules/model.py (Decoder, Encoder, ResnetBlock, AttnBlock, Upsample, Downsample)
+- comfy/ldm/modules/distributions/distributions.py (DiagonalGaussianDistribution)
 - comfy/sd.py (VAE class, config detection)
 - comfy/diffusers_convert.py (diffusers-to-SD key conversion)
 
@@ -149,6 +150,24 @@ class Upsample(nn.Module):
         x = F.interpolate(x, scale_factor=2.0, mode="nearest")
         if self.with_conv:
             x = self.conv(x)
+        return x
+
+
+class Downsample(nn.Module):
+    def __init__(self, in_channels: int, with_conv: bool):
+        super().__init__()
+        self.with_conv = with_conv
+        if self.with_conv:
+            # Asymmetric padding: ComfyUI pads (0,1,0,1) then uses stride=2, no padding in conv
+            self.conv = nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=2, padding=0)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.with_conv:
+            pad = (0, 1, 0, 1)
+            x = F.pad(x, pad, mode="constant", value=0)
+            x = self.conv(x)
+        else:
+            x = F.avg_pool2d(x, kernel_size=2, stride=2)
         return x
 
 
@@ -310,34 +329,149 @@ class Decoder(nn.Module):
         return h
 
 
+# --- Encoder ---
+
+class Encoder(nn.Module):
+    def __init__(self, *, ch: int, out_ch: int, ch_mult: tuple[int, ...],
+                 num_res_blocks: int, attn_resolutions: list[int],
+                 dropout: float = 0.0, resamp_with_conv: bool = True,
+                 in_channels: int, resolution: int, z_channels: int,
+                 double_z: bool = True, **kwargs):
+        super().__init__()
+        self.ch = ch
+        self.temb_ch = 0
+        self.num_resolutions = len(ch_mult)
+        self.num_res_blocks = num_res_blocks
+        self.resolution = resolution
+        self.in_channels = in_channels
+
+        # downsampling
+        self.conv_in = nn.Conv2d(in_channels, self.ch, kernel_size=3, stride=1, padding=1)
+
+        curr_res = resolution
+        in_ch_mult = (1,) + tuple(ch_mult)
+        self.down = nn.ModuleList()
+        for i_level in range(self.num_resolutions):
+            block = nn.ModuleList()
+            attn = nn.ModuleList()
+            block_in = ch * in_ch_mult[i_level]
+            block_out = ch * ch_mult[i_level]
+            for i_block in range(self.num_res_blocks):
+                block.append(ResnetBlock(in_channels=block_in, out_channels=block_out,
+                                         temb_channels=self.temb_ch, dropout=dropout))
+                block_in = block_out
+                if curr_res in attn_resolutions:
+                    attn.append(AttnBlock(block_in))
+            down = nn.Module()
+            down.block = block
+            down.attn = attn
+            if i_level != self.num_resolutions - 1:
+                down.downsample = Downsample(block_in, resamp_with_conv)
+                curr_res = curr_res // 2
+            self.down.append(down)
+
+        # middle
+        self.mid = nn.Module()
+        self.mid.block_1 = ResnetBlock(in_channels=block_in, out_channels=block_in,
+                                       temb_channels=self.temb_ch, dropout=dropout)
+        self.mid.attn_1 = AttnBlock(block_in)
+        self.mid.block_2 = ResnetBlock(in_channels=block_in, out_channels=block_in,
+                                       temb_channels=self.temb_ch, dropout=dropout)
+
+        # end
+        self.norm_out = Normalize(block_in)
+        self.conv_out = nn.Conv2d(block_in,
+                                  2 * z_channels if double_z else z_channels,
+                                  kernel_size=3, stride=1, padding=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        temb = None
+
+        # downsampling
+        h = self.conv_in(x)
+        for i_level in range(self.num_resolutions):
+            for i_block in range(self.num_res_blocks):
+                h = self.down[i_level].block[i_block](h, temb)
+                if len(self.down[i_level].attn) > 0:
+                    h = self.down[i_level].attn[i_block](h)
+            if i_level != self.num_resolutions - 1:
+                h = self.down[i_level].downsample(h)
+
+        # middle
+        h = self.mid.block_1(h, temb)
+        h = self.mid.attn_1(h)
+        h = self.mid.block_2(h, temb)
+
+        # end
+        h = self.norm_out(h)
+        h = nonlinearity(h)
+        h = self.conv_out(h)
+        return h
+
+
 # --- AutoencoderKL ---
 
 class AutoencoderKL(nn.Module):
-    """AutoencoderKL with only the decode path needed.
+    """AutoencoderKL with encode and decode paths.
 
-    When post_quant_conv weights are missing from the state dict (as with the
-    Z-Image VAE), the conv is initialized as an identity 1x1 convolution so
-    decode() still passes through correctly.  If the state dict DOES contain
-    post_quant_conv weights, load_state_dict will overwrite the identity init.
+    When post_quant_conv / quant_conv weights are missing from the state dict
+    (as with the Z-Image VAE), the convs are initialized as identity 1x1
+    convolutions so encode()/decode() still pass through correctly.  If the
+    state dict DOES contain these weights, load_state_dict will overwrite
+    the identity init.
     """
 
     def __init__(self, ddconfig: dict, embed_dim: int):
         super().__init__()
+        self.encoder = Encoder(**ddconfig)
         self.decoder = Decoder(**ddconfig)
         z_channels = ddconfig["z_channels"]
+        double_z = ddconfig.get("double_z", True)
+
+        # quant_conv: encoder output -> latent space
+        # Input channels: 2*z_channels if double_z (mean+logvar), else z_channels
+        # Output channels: 2*embed_dim if double_z, else embed_dim
+        quant_in = (2 * z_channels) if double_z else z_channels
+        quant_out = (2 * embed_dim) if double_z else embed_dim
+        self.quant_conv = nn.Conv2d(quant_in, quant_out, 1)
+
+        # post_quant_conv: latent space -> decoder input
         self.post_quant_conv = nn.Conv2d(embed_dim, z_channels, 1)
         self.embed_dim = embed_dim
 
-        # Initialize post_quant_conv as identity when embed_dim == z_channels.
-        # This makes the conv a no-op if the state dict has no post_quant_conv
+        # Initialize quant_conv as identity when dimensions match.
+        # This makes the conv a no-op if the state dict has no quant_conv
         # weights (loaded with strict=False, so missing keys are simply skipped).
+        if quant_in == quant_out:
+            self._init_identity_conv(self.quant_conv, quant_in)
+
+        # Initialize post_quant_conv as identity when embed_dim == z_channels.
         if embed_dim == z_channels:
-            with torch.no_grad():
-                nn.init.zeros_(self.post_quant_conv.bias)
-                # Set weight to identity: (out, in, 1, 1) with eye on (out, in)
-                nn.init.zeros_(self.post_quant_conv.weight)
-                for i in range(z_channels):
-                    self.post_quant_conv.weight[i, i, 0, 0] = 1.0
+            self._init_identity_conv(self.post_quant_conv, z_channels)
+
+    @staticmethod
+    def _init_identity_conv(conv: nn.Conv2d, channels: int) -> None:
+        """Initialize a 1x1 conv as identity (no-op passthrough)."""
+        with torch.no_grad():
+            nn.init.zeros_(conv.bias)
+            nn.init.zeros_(conv.weight)
+            for i in range(channels):
+                conv.weight[i, i, 0, 0] = 1.0
+
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        """Encode image to latent space (deterministic, returns mean).
+
+        Args:
+            x: (B, C, H, W) image tensor (already in [-1, 1] range).
+
+        Returns:
+            (B, embed_dim, H//8, W//8) latent tensor (mean of posterior).
+        """
+        h = self.encoder(x)
+        h = self.quant_conv(h)
+        # DiagonalGaussianDistribution: chunk into mean + logvar, return mean
+        mean, _logvar = torch.chunk(h, 2, dim=1)
+        return mean
 
     def decode(self, z: torch.Tensor) -> torch.Tensor:
         z = self.post_quant_conv(z)
@@ -437,19 +571,21 @@ def load_vae(
         log.info("Detected diffusers-format VAE keys, converting to SD format")
         remapped = convert_vae_state_dict(remapped)
 
-    # Only keep decoder + post_quant_conv keys (drop encoder, quant_conv, etc.)
-    decode_keys = {k: v for k, v in remapped.items()
-                   if k.startswith("decoder.") or k.startswith("post_quant_conv.")}
+    # Keep encoder, decoder, quant_conv, and post_quant_conv keys
+    model_keys = {k: v for k, v in remapped.items()
+                  if k.startswith("encoder.") or k.startswith("decoder.")
+                  or k.startswith("quant_conv.") or k.startswith("post_quant_conv.")}
 
-    ddconfig, embed_dim = detect_vae_config(decode_keys)
+    # detect_vae_config needs decoder keys
+    ddconfig, embed_dim = detect_vae_config(model_keys)
 
     model = AutoencoderKL(ddconfig, embed_dim)
-    missing, unexpected = model.load_state_dict(decode_keys, strict=False, assign=True)
+    missing, unexpected = model.load_state_dict(model_keys, strict=False, assign=True)
 
     if missing:
-        log.debug("VAE load missing keys: %s", missing)
+        log.debug("VAE load missing keys (%d): %s", len(missing), missing)
     if unexpected:
-        log.debug("VAE load unexpected keys: %s", unexpected)
+        log.debug("VAE load unexpected keys (%d): %s", len(unexpected), unexpected)
 
     model = model.to(device=device, dtype=dtype)
     model.eval()
@@ -479,3 +615,28 @@ def vae_decode(model: AutoencoderKL, latent: torch.Tensor) -> torch.Tensor:
     # SD process_output: clamp((image + 1) / 2, 0, 1)
     image = torch.clamp((decoded + 1.0) / 2.0, min=0.0, max=1.0)
     return image
+
+
+def vae_encode(model: AutoencoderKL, image: torch.Tensor) -> torch.Tensor:
+    """Encode image to latent space.
+
+    Applies SD process_input before encode, and Flux process_in after.
+
+    Args:
+        model: Loaded AutoencoderKL.
+        image: (B, 3, H, W) image tensor in [0, 1] range, bfloat16.
+
+    Returns:
+        (B, 16, H//8, W//8) latent tensor in Flux-scaled space, bfloat16.
+    """
+    from .sampling import flux_process_in
+
+    # SD process_input: image * 2.0 - 1.0  (maps [0,1] -> [-1,1])
+    x = image * 2.0 - 1.0
+
+    with torch.inference_mode():
+        latent = model.encode(x)
+
+    # Apply Flux latent format process_in: (latent - shift) * scale
+    latent = flux_process_in(latent)
+    return latent

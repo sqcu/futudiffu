@@ -1,0 +1,12 @@
+{
+  "type": "i2i",
+  "seed": 946785248,
+  "prompt": "crude wireframe sketch of an extremely wide-bodied humanoid figure with thin angular limbs and blocky feet, in the palette and style of a faded retro VHS screenshot",
+  "n_steps": 30,
+  "denoise": 0.862,
+  "image_file": "widemeister.png",
+  "precision": "sdpa",
+  "batch_idx": 0,
+  "output_width": 512,
+  "output_height": 512
+}

@@ -41,6 +41,7 @@ def sdpa_attention(
     heads: int,
     mask: Tensor | None = None,
     skip_reshape: bool = False,
+    block_mask=None,
 ) -> Tensor:
     """Scaled dot-product attention via PyTorch SDPA.
 
@@ -49,6 +50,9 @@ def sdpa_attention(
         heads: Number of attention heads.
         mask: Optional attention mask.
         skip_reshape: If True, input is already (B, heads, seq, dim).
+        block_mask: Optional FlexAttention BlockMask for packed batch inference.
+            When provided, FlexAttention is used unconditionally (ignoring the
+            attention backend setting and the mask parameter).
 
     Returns:
         Output tensor (B, seq, heads*dim).
@@ -59,6 +63,14 @@ def sdpa_attention(
         b, _, dim_head = q.shape
         dim_head //= heads
         q, k, v = (t.view(b, -1, heads, dim_head).transpose(1, 2) for t in (q, k, v))
+
+    # FlexAttention dispatch for packed batch inference.
+    # Takes priority over all other backends when block_mask is provided.
+    if block_mask is not None:
+        from torch.nn.attention.flex_attention import flex_attention
+        out = flex_attention(q, k, v, block_mask=block_mask)
+        out = out.transpose(1, 2).reshape(b, -1, heads * dim_head)
+        return out
 
     # Dispatch to SageAttention when mask=None and backend is sage/auto.
     # Text encoder always passes mask != None, so it always uses PyTorch SDPA.

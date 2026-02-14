@@ -130,7 +130,8 @@ def sample_euler_train(
     sigmas: torch.Tensor,
     s_churn: float = 0.0,
     callback=None,
-) -> tuple[torch.Tensor, list[torch.Tensor]]:
+    return_denoised: bool = False,
+) -> tuple[torch.Tensor, list[torch.Tensor]] | tuple[torch.Tensor, list[torch.Tensor], list[torch.Tensor]]:
     """Euler sampler with gradient flow for QAT / LoRA training.
 
     Same euler integration as sample_euler but without inference_mode, so
@@ -148,16 +149,19 @@ def sample_euler_train(
         s_churn: Stochastic churn amount. 0 = deterministic (identical to
             standard euler).
         callback: Optional callback(dict) per step.
+        return_denoised: If True, also return per-step denoised predictions
+            for DRGRPO log-ratio computation.
 
     Returns:
-        Tuple of:
-            - Final latent tensor, retaining its gradient graph back through
-              the checkpointed steps.
-            - List of detached x tensors at each step boundary [x_0, ..., x_T]
-              for sparse step attribution in REINFORCE.
+        If return_denoised is False:
+            (final_x, checkpoints) where checkpoints is [x_0, ..., x_T].
+        If return_denoised is True:
+            (final_x, checkpoints, denoised_list) where denoised_list is
+            [denoised_0, ..., denoised_{T-1}], each detached.
     """
     s_in = x.new_ones([x.shape[0]])
     checkpoints: list[torch.Tensor] = []
+    denoised_list: list[torch.Tensor] = []
     n_steps = len(sigmas) - 1
 
     for i in range(n_steps):
@@ -184,6 +188,9 @@ def sample_euler_train(
             use_reentrant=False,
         )
 
+        if return_denoised:
+            denoised_list.append(denoised.detach().clone())
+
         d = to_d(x, sigma_hat, denoised)
 
         if callback is not None:
@@ -195,6 +202,8 @@ def sample_euler_train(
     # Final boundary checkpoint
     checkpoints.append(x.detach().clone())
 
+    if return_denoised:
+        return x, checkpoints, denoised_list
     return x, checkpoints
 
 

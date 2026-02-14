@@ -1,0 +1,9 @@
+{
+  "type": "t2i",
+  "seed": 3224995600,
+  "prompt_idx": 0,
+  "prompt": "ahem.\n*ting ting ting ting ting*\nthe query model for this is a LARGE LANGUAGE MODEL, specifically QWEN-3-4B, a GENERAL PURPOSE SEMANTIC PARSER which is able to WRITE SENTENCES AT A TIME when they are participating in dialogue. however, in this situation, they are being used as a hidden state generator to steer an *image generation model*, z-image.\n\nqwen-3-4b, draw me an \"enormous laser shark for the sega saturn\".",
+  "n_steps": 16,
+  "precision": "sage",
+  "batch_idx": 3
+}

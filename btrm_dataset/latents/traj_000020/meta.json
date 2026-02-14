@@ -1,0 +1,9 @@
+{
+  "type": "t2i",
+  "seed": 2783290795,
+  "prompt_idx": 21,
+  "prompt": "A double exposure photograph combining a wolf portrait with a pine forest landscape.",
+  "n_steps": 19,
+  "precision": "sdpa",
+  "batch_idx": 2
+}

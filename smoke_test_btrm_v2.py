@@ -1,4 +1,4 @@
-"""smoke_test_btrm_v2.py — BTRM + policy with proper paired training data.
+"""smoke_test_btrm_v2.py -- BTRM + policy with proper paired training data.
 
 Phase 1: Generate paired data (5 seeds x {SDPA, Sage} x 30-step euler)
   - SDPA renders = positive (full-precision attention)
@@ -16,6 +16,9 @@ Phase 3: Policy optimization with stacked adapters
   - "ptheta" adapter: scale=1, trainable (active during policy forward)
   - BTRM head reads hidden states from policy-adapted model
   - Gradient checkpointing on all layers always
+
+Uses canonical training_utils for HiddenCapture, forward_checkpointed,
+prepare_conditioning, prepare_latent_state, and logging helpers.
 """
 
 import math
@@ -30,7 +33,15 @@ sys.path.insert(0, r"F:\dox\repos\ai\futudiffu\src")
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.checkpoint import checkpoint as grad_ckpt
+
+from futudiffu.training_utils import (
+    HiddenCapture,
+    build_cfg_model_fn,
+    forward_checkpointed,
+    log_section,
+    prepare_conditioning,
+    prepare_latent_state,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -79,12 +90,6 @@ POLICY_STEPS = 5
 GRAD_CLIP = 1.0
 
 
-def log_section(title: str) -> None:
-    print(f"\n{'=' * 70}")
-    print(f"  {title}")
-    print(f"{'=' * 70}\n")
-
-
 # ---------------------------------------------------------------------------
 # Model loading
 # ---------------------------------------------------------------------------
@@ -98,7 +103,6 @@ def load_all():
     )
     from futudiffu.fp8 import replace_linear_with_fp8
     from safetensors.torch import load_file
-    from futudiffu.sampling import build_sigmas, simple_scheduler
 
     print("[load] Text encoder...")
     tokenizer = create_tokenizer(TOKENIZER_PATH)
@@ -114,6 +118,7 @@ def load_all():
 
     pos_cond = pos_cond.clone()
     neg_cond = neg_cond.clone()
+    pos_cond, neg_cond, num_tokens = prepare_conditioning(pos_cond, neg_cond)
 
     print("[load] Diffusion model (FP8)...")
     diff_sd = load_file(DIFF_MODEL_PATH, device=str(DEVICE))
@@ -134,21 +139,10 @@ def load_all():
     model = model.to(DEVICE)
     model.eval()
 
-    sigma_table = build_sigmas(shift=SAMPLING_SHIFT, multiplier=MULTIPLIER * 1000)
-    sigmas = simple_scheduler(sigma_table, STEPS).to(device=DEVICE, dtype=DTYPE)
-
-    max_len = max(pos_cond.shape[1], neg_cond.shape[1])
-    if pos_cond.shape[1] < max_len:
-        pos_cond = F.pad(pos_cond, (0, 0, 0, max_len - pos_cond.shape[1]))
-    if neg_cond.shape[1] < max_len:
-        neg_cond = F.pad(neg_cond, (0, 0, 0, max_len - neg_cond.shape[1]))
-    num_tokens = max_len
-
-    padded_h = LATENT_H + ((-LATENT_H) % model.patch_size)
-    padded_w = LATENT_W + ((-LATENT_W) % model.patch_size)
-    rope_cache = model.prepare_rope_cache(padded_h, padded_w, num_tokens, DEVICE)
-    rope_cache = {k: v.clone() if isinstance(v, torch.Tensor) else v
-                  for k, v in rope_cache.items()}
+    rope_cache, sigmas, _, _ = prepare_latent_state(
+        model, WIDTH, HEIGHT, num_tokens, DEVICE, DTYPE,
+        sampling_shift=SAMPLING_SHIFT, multiplier=MULTIPLIER, steps=STEPS,
+    )
 
     print(f"[load] Done. dim={model.dim}, {n_layers} layers, "
           f"sigmas [{sigmas[0]:.4f}..{sigmas[-1]:.4f}]")
@@ -159,28 +153,12 @@ def load_all():
 # Phase 1: Generate paired training data
 # ---------------------------------------------------------------------------
 
-def build_cfg_model_fn(model, pos_cond, neg_cond, rope_cache, num_tokens):
-    from futudiffu.sampling import const_calculate_denoised
-    cond_batch = torch.cat([pos_cond, neg_cond], dim=0)
-
-    def model_fn(x_in, sigma):
-        timestep = sigma * MULTIPLIER
-        x_batch = x_in.expand(2, -1, -1, -1)
-        t_batch = timestep.expand(2)
-        out_batch = model(x_batch, t_batch, cond_batch,
-                          num_tokens=num_tokens, rope_cache=rope_cache)
-        out_cond, out_uncond = out_batch.chunk(2, dim=0)
-        d_cond = const_calculate_denoised(sigma, out_cond, x_in)
-        d_uncond = const_calculate_denoised(sigma, out_uncond, x_in)
-        return d_uncond + (d_cond - d_uncond) * CFG
-    return model_fn
-
-
 def generate_data(model, pos_cond, neg_cond, sigmas, rope_cache, num_tokens):
     from futudiffu.attention import set_attention_backend
     from futudiffu.sage_attention import configure_sage
     from futudiffu.sampling import (
-        const_noise_scaling, const_inverse_noise_scaling, sample_euler,
+        const_noise_scaling, const_inverse_noise_scaling,
+        const_calculate_denoised, sample_euler,
     )
 
     log_section("Phase 1: Generating Paired Training Data")
@@ -192,7 +170,6 @@ def generate_data(model, pos_cond, neg_cond, sigmas, rope_cache, num_tokens):
     print(f"  Checkpoint steps: {CKPT_STEPS}")
 
     compiled_model = torch.compile(model, mode="reduce-overhead")
-    from futudiffu.sampling import const_calculate_denoised
     cond_batch = torch.cat([pos_cond, neg_cond], dim=0)
 
     def compiled_model_fn(x_in, sigma):
@@ -273,114 +250,11 @@ def generate_data(model, pos_cond, neg_cond, sigmas, rope_cache, num_tokens):
 
 
 # ---------------------------------------------------------------------------
-# Gradient-checkpointed forward (used by both Phase 2 and 3)
-# ---------------------------------------------------------------------------
-
-def forward_checkpointed(model, x, timesteps, context, num_tokens, rope_cache):
-    """Forward pass with gradient checkpointing on ALL 30 main layers.
-
-    Embedding + refiners run in no_grad (no trainable params there).
-    Each main layer is individually checkpointed.
-    Returns (-img, last_hidden_after_layer_29).
-    """
-    from futudiffu.diffusion_model import pad_to_patch_size, pad_zimage
-
-    with torch.no_grad():
-        t = 1 - timesteps
-        bs, c, h, w = x.shape
-        x_padded = pad_to_patch_size(x, (model.patch_size, model.patch_size))
-        t_emb = model.t_embedder(t * model.time_scale, dtype=x.dtype)
-        adaln_input = t_emb
-        bsz = x_padded.shape[0]
-        pH = pW = model.patch_size
-
-        cap_feats_embedded = model.cap_embedder(context)
-        if model.pad_tokens_multiple is not None:
-            cap_feats_embedded, _ = pad_zimage(
-                cap_feats_embedded, model.cap_pad_token, model.pad_tokens_multiple)
-        B, C, H, W = x_padded.shape
-        x_patches = model.x_embedder(
-            x_padded.view(B, C, H // pH, pH, W // pW, pW)
-            .permute(0, 2, 4, 3, 5, 1).flatten(3).flatten(1, 2))
-        if model.pad_tokens_multiple is not None:
-            x_patches, _ = pad_zimage(
-                x_patches, model.x_pad_token, model.pad_tokens_multiple)
-        img_len = x_patches.shape[1]
-
-        cap_freqs_cis = rope_cache['cap_freqs_cis']
-        x_freqs_cis = rope_cache['x_freqs_cis']
-        freqs_cis = rope_cache['freqs_cis']
-        if bsz > 1 and cap_freqs_cis.shape[0] == 1:
-            cap_freqs_cis = cap_freqs_cis.expand(bsz, -1, -1, -1, -1, -1)
-            x_freqs_cis = x_freqs_cis.expand(bsz, -1, -1, -1, -1, -1)
-            freqs_cis = freqs_cis.expand(bsz, -1, -1, -1, -1, -1)
-
-        for layer in model.context_refiner:
-            cap_feats_embedded = layer(cap_feats_embedded, None, cap_freqs_cis)
-        for layer in model.noise_refiner:
-            x_patches = layer(x_patches, None, x_freqs_cis, adaln_input)
-        embed = torch.cat([cap_feats_embedded, x_patches], dim=1)
-        l_effective_cap_len = [embed.shape[1] - img_len] * bsz
-        img_sizes = [(H, W)] * bsz
-
-    # Detach at boundary — grad flows from here forward only
-    embed = embed.detach().clone().requires_grad_(True)
-    adaln_input = adaln_input.detach().clone()
-    freqs_cis = freqs_cis.detach().clone()
-
-    # Gradient checkpointing on every layer
-    for layer in model.layers:
-        embed = grad_ckpt(layer, embed, None, freqs_cis, adaln_input,
-                          use_reentrant=False)
-
-    last_hidden = embed
-    img = model.final_layer(embed, adaln_input)
-    img = model.unpatchify(img, img_sizes, l_effective_cap_len,
-                           return_tensor=True)[:, :, :h, :w]
-    return -img, last_hidden
-
-
-# ---------------------------------------------------------------------------
-# Hidden state capture (for Phase 2 without full forward_checkpointed)
-# ---------------------------------------------------------------------------
-
-class HiddenCapture:
-    def __init__(self, model):
-        self.model = model
-        self.captured = None
-        self._handle = None
-
-    def install(self):
-        if self._handle is not None:
-            return
-        last_block = self.model.layers[-1]
-        def hook(_m, _i, output):
-            self.captured = output
-        self._handle = last_block.register_forward_hook(hook)
-
-    def remove(self):
-        if self._handle is not None:
-            self._handle.remove()
-            self._handle = None
-
-    def get(self):
-        h = self.captured
-        self.captured = None
-        assert h is not None, "Hook did not fire"
-        return h
-
-
-# ---------------------------------------------------------------------------
 # Phase 2: Train R_theta
 # ---------------------------------------------------------------------------
 
 def train_btrm(model, sigmas, rope_cache, num_tokens, pos_cond):
-    """Train R_theta = frozen backbone + LoRA("rtheta", layers 28-29) + BTRMHead.
-
-    Gradient checkpointing on all layers.  Only rtheta LoRA params (layers
-    28-29) and BTRMHead params have requires_grad=True, so backward only
-    computes gradients for those despite checkpointing all 30 layers.
-    """
+    """Train R_theta = frozen backbone + LoRA("rtheta", layers 28-29) + BTRMHead."""
     from futudiffu.attention import set_attention_backend
     from futudiffu.btrm import BTRMHead, bradley_terry_loss, logsquare_regularizer
     from futudiffu.lora import inject_lora, get_lora_params, lora_state_dict
@@ -388,7 +262,6 @@ def train_btrm(model, sigmas, rope_cache, num_tokens, pos_cond):
     log_section("Phase 2: R_theta Training (LoRA layers 28-29 + BTRMHead)")
     set_attention_backend("sdpa")
 
-    # R_theta LoRA on last 2 layers
     injected = inject_lora(model, name="rtheta", rank=LORA_RANK, alpha=LORA_ALPHA,
                            layer_indices={28, 29})
     rtheta_params = list(get_lora_params(model, adapter_name="rtheta"))
@@ -396,7 +269,6 @@ def train_btrm(model, sigmas, rope_cache, num_tokens, pos_cond):
     print(f"  R_theta LoRA: {len(injected)} adapters on layers 28-29, "
           f"{n_lora:,} params ({n_lora*2/1024**2:.1f} MB)")
 
-    # Scalar scoring head
     btrm = BTRMHead(
         hidden_dim=model.dim,
         head_names=("bit_quality", "step_quality"),
@@ -407,7 +279,6 @@ def train_btrm(model, sigmas, rope_cache, num_tokens, pos_cond):
 
     all_params = rtheta_params + list(btrm.parameters())
     optimizer = torch.optim.AdamW(all_params, lr=BTRM_LR)
-    print(f"  Total trainable: {n_lora + n_head:,} params")
 
     data_path = Path(DATA_DIR)
     seeds = [BASE_SEED + i for i in range(N_SEEDS)]
@@ -437,10 +308,6 @@ def train_btrm(model, sigmas, rope_cache, num_tokens, pos_cond):
             sigma = torch.tensor([sigma_val], device=DEVICE, dtype=DTYPE)
             timestep = sigma * MULTIPLIER
 
-            # Forward with gradient checkpointing.
-            # Layers 0-27 have no trainable params → their recompute during
-            # backward produces no param gradients.  Layers 28-29 have rtheta
-            # LoRA → gradients flow through the LoRA path.
             _, hidden_pos = forward_checkpointed(
                 model, x_pos, timestep, pos_cond,
                 num_tokens=num_tokens, rope_cache=rope_cache)
@@ -448,7 +315,6 @@ def train_btrm(model, sigmas, rope_cache, num_tokens, pos_cond):
                 model, x_neg, timestep, pos_cond,
                 num_tokens=num_tokens, rope_cache=rope_cache)
 
-            # Diagnostics
             with torch.no_grad():
                 h_cos = F.cosine_similarity(
                     hidden_pos.flatten().unsqueeze(0),
@@ -505,7 +371,6 @@ def train_btrm(model, sigmas, rope_cache, num_tokens, pos_cond):
             print(f"  step {step_idx:2d}: x_cos={avg_x:.6f} h_cos={avg_h:.6f} "
                   f"margin={avg_m:+.4f}")
 
-    # Save R_theta
     rtheta_sd = lora_state_dict(model, adapter_name="rtheta")
     rtheta_sd.update({f"btrm.{k}": v.cpu() for k, v in btrm.state_dict().items()})
     rtheta_path = os.path.join(DATA_DIR, "rtheta_weights.pt")
@@ -520,14 +385,9 @@ def train_btrm(model, sigmas, rope_cache, num_tokens, pos_cond):
 # ---------------------------------------------------------------------------
 
 def train_policy(model, btrm, pos_cond, sigmas, rope_cache, num_tokens):
-    """Train p_theta with stacked "ptheta" adapter + frozen "rtheta" reward.
-
-    Both adapters live on the same LoRALinear modules (horizontal).
-    rtheta: scale=0 (frozen, contributes nothing)
-    ptheta: scale=1 (trainable, active)
-    """
+    """Train p_theta with stacked "ptheta" adapter + frozen "rtheta" reward."""
     from futudiffu.lora import (
-        LoRALinear, LoRAAdapter, inject_lora, get_lora_params,
+        LoRALinear, inject_lora, get_lora_params,
         lora_state_dict, set_lora_scale, freeze_adapter,
     )
     from futudiffu.attention import set_attention_backend
@@ -539,13 +399,11 @@ def train_policy(model, btrm, pos_cond, sigmas, rope_cache, num_tokens):
     for p in btrm.parameters():
         p.requires_grad_(False)
 
-    # Freeze rtheta adapter and zero its scale
     n_frozen = freeze_adapter(model, "rtheta")
     set_lora_scale(model, torch.tensor([0.0], device=DEVICE, dtype=DTYPE),
                    adapter_name="rtheta")
     print(f"  rtheta: {n_frozen} adapters frozen + zeroed (scale=0)")
 
-    # Stack ptheta adapter on ALL layers (layers 28-29 get a second slot)
     injected = inject_lora(model, name="ptheta", rank=LORA_RANK, alpha=LORA_ALPHA)
     ptheta_params = list(get_lora_params(model, adapter_name="ptheta"))
     n_trainable = sum(p.numel() for p in ptheta_params)
@@ -554,14 +412,12 @@ def train_policy(model, btrm, pos_cond, sigmas, rope_cache, num_tokens):
           f"{len(injected)-n_main} refiner), "
           f"{n_trainable:,} params ({n_trainable*2/1024**2:.1f} MB)")
 
-    # Count stacked (layers that have both rtheta + ptheta)
     n_stacked = 0
     for name, mod in model.named_modules():
         if isinstance(mod, LoRALinear) and len(mod.adapters) > 1:
             n_stacked += 1
     print(f"  Stacked (rtheta+ptheta) adapters: {n_stacked}")
 
-    # Sample params for logging
     sample_params = OrderedDict()
     for name, mod in model.named_modules():
         if not isinstance(mod, LoRALinear):

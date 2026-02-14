@@ -1,0 +1,549 @@
+{
+  "schedule": [
+    {
+      "type": "i2i",
+      "count": 5,
+      "precision": "sdpa",
+      "render": 2
+    },
+    {
+      "type": "i2i",
+      "count": 5,
+      "precision": "sage",
+      "render": 2
+    }
+  ],
+  "rng_seed": 42,
+  "records": [
+    {
+      "type": "t2i",
+      "seed": 478163327,
+      "prompt_idx": 20,
+      "prompt": "Bauhaus-inspired geometric composition of primary colored shapes on a white background.",
+      "n_steps": 30,
+      "precision": "sdpa",
+      "batch_idx": 0,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000000"
+    },
+    {
+      "type": "t2i",
+      "seed": 1181241943,
+      "prompt_idx": 23,
+      "prompt": "An isometric pixel art scene of a busy medieval marketplace with at least 20 distinct characters.",
+      "n_steps": 30,
+      "precision": "sdpa",
+      "batch_idx": 0,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000001"
+    },
+    {
+      "type": "t2i",
+      "seed": 2342331444,
+      "prompt_idx": 7,
+      "prompt": "A handwritten letter on aged parchment that reads \"Dear Future Self\" in elegant cursive.",
+      "n_steps": 30,
+      "precision": "sdpa",
+      "batch_idx": 0,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000002"
+    },
+    {
+      "type": "t2i",
+      "seed": 1812140441,
+      "prompt_idx": 18,
+      "prompt": "An oil painting of a mountain lake at twilight in the style of the Hudson River School.",
+      "n_steps": 30,
+      "precision": "sdpa",
+      "batch_idx": 0,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000003"
+    },
+    {
+      "type": "t2i",
+      "seed": 402418010,
+      "prompt_idx": 0,
+      "prompt": "ahem.\n*ting ting ting ting ting*\nthe query model for this is a LARGE LANGUAGE MODEL, specifically QWEN-3-4B, a GENERAL PURPOSE SEMANTIC PARSER which is able to WRITE SENTENCES AT A TIME when they are participating in dialogue. however, in this situation, they are being used as a hidden state generator to steer an *image generation model*, z-image.\n\nqwen-3-4b, draw me an \"enormous laser shark for the sega saturn\".",
+      "n_steps": 30,
+      "precision": "sdpa",
+      "batch_idx": 0,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000004"
+    },
+    {
+      "type": "t2i",
+      "seed": 2340505846,
+      "prompt_idx": 7,
+      "prompt": "A handwritten letter on aged parchment that reads \"Dear Future Self\" in elegant cursive.",
+      "n_steps": 30,
+      "precision": "sdpa",
+      "batch_idx": 0,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000005"
+    },
+    {
+      "type": "t2i",
+      "seed": 3733616459,
+      "prompt_idx": 7,
+      "prompt": "A handwritten letter on aged parchment that reads \"Dear Future Self\" in elegant cursive.",
+      "n_steps": 30,
+      "precision": "sdpa",
+      "batch_idx": 0,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000006"
+    },
+    {
+      "type": "t2i",
+      "seed": 2998485882,
+      "prompt_idx": 5,
+      "prompt": "qwen-3-4b, draw me a \"laser shark made of chrome and glass, studio lighting, product photography\".",
+      "n_steps": 30,
+      "precision": "sdpa",
+      "batch_idx": 0,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000007"
+    },
+    {
+      "type": "t2i",
+      "seed": 1193448329,
+      "prompt_idx": 10,
+      "prompt": "A cat sitting on top of a stack of books next to a window with rain outside, warm interior lighting.",
+      "n_steps": 30,
+      "precision": "sdpa",
+      "batch_idx": 0,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000008"
+    },
+    {
+      "type": "t2i",
+      "seed": 1445662585,
+      "prompt_idx": 6,
+      "prompt": "A neon sign reading \"OPEN 24 HOURS\" above a rain-soaked Tokyo alleyway at night.",
+      "n_steps": 30,
+      "precision": "sdpa",
+      "batch_idx": 0,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000009"
+    },
+    {
+      "type": "t2i",
+      "seed": 1631775357,
+      "prompt_idx": 2,
+      "prompt": "qwen-3-4b, draw me a \"laser shark swimming through a neon cyberpunk cityscape at night\".",
+      "n_steps": 30,
+      "precision": "sage",
+      "batch_idx": 1,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000010"
+    },
+    {
+      "type": "t2i",
+      "seed": 3639960595,
+      "prompt_idx": 11,
+      "prompt": "An astronaut riding a horse across a desert under a starfield, photorealistic.",
+      "n_steps": 30,
+      "precision": "sage",
+      "batch_idx": 1,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000011"
+    },
+    {
+      "type": "t2i",
+      "seed": 3961228449,
+      "prompt_idx": 19,
+      "prompt": "A vaporwave aesthetic rendering of ancient Greek ruins with pink and cyan gradients.",
+      "n_steps": 30,
+      "precision": "sage",
+      "batch_idx": 1,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000012"
+    },
+    {
+      "type": "t2i",
+      "seed": 2370996465,
+      "prompt_idx": 2,
+      "prompt": "qwen-3-4b, draw me a \"laser shark swimming through a neon cyberpunk cityscape at night\".",
+      "n_steps": 30,
+      "precision": "sage",
+      "batch_idx": 1,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000013"
+    },
+    {
+      "type": "t2i",
+      "seed": 3701002945,
+      "prompt_idx": 20,
+      "prompt": "Bauhaus-inspired geometric composition of primary colored shapes on a white background.",
+      "n_steps": 30,
+      "precision": "sage",
+      "batch_idx": 1,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000014"
+    },
+    {
+      "type": "t2i",
+      "seed": 298737106,
+      "prompt_idx": 18,
+      "prompt": "An oil painting of a mountain lake at twilight in the style of the Hudson River School.",
+      "n_steps": 30,
+      "precision": "sage",
+      "batch_idx": 1,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000015"
+    },
+    {
+      "type": "t2i",
+      "seed": 433797840,
+      "prompt_idx": 21,
+      "prompt": "A double exposure photograph combining a wolf portrait with a pine forest landscape.",
+      "n_steps": 30,
+      "precision": "sage",
+      "batch_idx": 1,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000016"
+    },
+    {
+      "type": "t2i",
+      "seed": 3582477022,
+      "prompt_idx": 8,
+      "prompt": "A chalkboard in a classroom with the equation \"E = mc\u00b2\" written in white chalk.",
+      "n_steps": 30,
+      "precision": "sage",
+      "batch_idx": 1,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000017"
+    },
+    {
+      "type": "t2i",
+      "seed": 1589915144,
+      "prompt_idx": 5,
+      "prompt": "qwen-3-4b, draw me a \"laser shark made of chrome and glass, studio lighting, product photography\".",
+      "n_steps": 30,
+      "precision": "sage",
+      "batch_idx": 1,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000018"
+    },
+    {
+      "type": "t2i",
+      "seed": 2878380452,
+      "prompt_idx": 6,
+      "prompt": "A neon sign reading \"OPEN 24 HOURS\" above a rain-soaked Tokyo alleyway at night.",
+      "n_steps": 30,
+      "precision": "sage",
+      "batch_idx": 1,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000019"
+    },
+    {
+      "type": "t2i",
+      "seed": 2783290795,
+      "prompt_idx": 21,
+      "prompt": "A double exposure photograph combining a wolf portrait with a pine forest landscape.",
+      "n_steps": 19,
+      "precision": "sdpa",
+      "batch_idx": 2,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000020"
+    },
+    {
+      "type": "t2i",
+      "seed": 3131575764,
+      "prompt_idx": 20,
+      "prompt": "Bauhaus-inspired geometric composition of primary colored shapes on a white background.",
+      "n_steps": 17,
+      "precision": "sdpa",
+      "batch_idx": 2,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000021"
+    },
+    {
+      "type": "t2i",
+      "seed": 1629748727,
+      "prompt_idx": 14,
+      "prompt": "Macro photography of a mechanical pocket watch with visible gears, golden light.",
+      "n_steps": 10,
+      "precision": "sdpa",
+      "batch_idx": 2,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000022"
+    },
+    {
+      "type": "t2i",
+      "seed": 240251661,
+      "prompt_idx": 20,
+      "prompt": "Bauhaus-inspired geometric composition of primary colored shapes on a white background.",
+      "n_steps": 22,
+      "precision": "sdpa",
+      "batch_idx": 2,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000023"
+    },
+    {
+      "type": "t2i",
+      "seed": 3457645390,
+      "prompt_idx": 1,
+      "prompt": "qwen-3-4b, draw me a \"gigantic laser shark breaching out of the ocean at sunset\".",
+      "n_steps": 21,
+      "precision": "sdpa",
+      "batch_idx": 2,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000024"
+    },
+    {
+      "type": "t2i",
+      "seed": 284277889,
+      "prompt_idx": 8,
+      "prompt": "A chalkboard in a classroom with the equation \"E = mc\u00b2\" written in white chalk.",
+      "n_steps": 14,
+      "precision": "sdpa",
+      "batch_idx": 2,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000025"
+    },
+    {
+      "type": "t2i",
+      "seed": 1351531223,
+      "prompt_idx": 18,
+      "prompt": "An oil painting of a mountain lake at twilight in the style of the Hudson River School.",
+      "n_steps": 22,
+      "precision": "sdpa",
+      "batch_idx": 2,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000026"
+    },
+    {
+      "type": "t2i",
+      "seed": 1970753705,
+      "prompt_idx": 15,
+      "prompt": "A weathered wooden door with peeling blue paint and a rusty iron knocker, Mediterranean village.",
+      "n_steps": 18,
+      "precision": "sdpa",
+      "batch_idx": 2,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000027"
+    },
+    {
+      "type": "t2i",
+      "seed": 2510777721,
+      "prompt_idx": 4,
+      "prompt": "qwen-3-4b, draw me a \"tiny laser shark in a fishbowl on a desk, office background\".",
+      "n_steps": 12,
+      "precision": "sdpa",
+      "batch_idx": 2,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000028"
+    },
+    {
+      "type": "t2i",
+      "seed": 1715412119,
+      "prompt_idx": 18,
+      "prompt": "An oil painting of a mountain lake at twilight in the style of the Hudson River School.",
+      "n_steps": 22,
+      "precision": "sdpa",
+      "batch_idx": 2,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000029"
+    },
+    {
+      "type": "t2i",
+      "seed": 2188398760,
+      "prompt_idx": 4,
+      "prompt": "qwen-3-4b, draw me a \"tiny laser shark in a fishbowl on a desk, office background\".",
+      "n_steps": 11,
+      "precision": "sage",
+      "batch_idx": 3,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000030"
+    },
+    {
+      "type": "t2i",
+      "seed": 3698408854,
+      "prompt_idx": 1,
+      "prompt": "qwen-3-4b, draw me a \"gigantic laser shark breaching out of the ocean at sunset\".",
+      "n_steps": 9,
+      "precision": "sage",
+      "batch_idx": 3,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000031"
+    },
+    {
+      "type": "t2i",
+      "seed": 2922644564,
+      "prompt_idx": 20,
+      "prompt": "Bauhaus-inspired geometric composition of primary colored shapes on a white background.",
+      "n_steps": 10,
+      "precision": "sage",
+      "batch_idx": 3,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000032"
+    },
+    {
+      "type": "t2i",
+      "seed": 1652563013,
+      "prompt_idx": 2,
+      "prompt": "qwen-3-4b, draw me a \"laser shark swimming through a neon cyberpunk cityscape at night\".",
+      "n_steps": 17,
+      "precision": "sage",
+      "batch_idx": 3,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000033"
+    },
+    {
+      "type": "t2i",
+      "seed": 2272528809,
+      "prompt_idx": 14,
+      "prompt": "Macro photography of a mechanical pocket watch with visible gears, golden light.",
+      "n_steps": 17,
+      "precision": "sage",
+      "batch_idx": 3,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000034"
+    },
+    {
+      "type": "t2i",
+      "seed": 3224995600,
+      "prompt_idx": 0,
+      "prompt": "ahem.\n*ting ting ting ting ting*\nthe query model for this is a LARGE LANGUAGE MODEL, specifically QWEN-3-4B, a GENERAL PURPOSE SEMANTIC PARSER which is able to WRITE SENTENCES AT A TIME when they are participating in dialogue. however, in this situation, they are being used as a hidden state generator to steer an *image generation model*, z-image.\n\nqwen-3-4b, draw me an \"enormous laser shark for the sega saturn\".",
+      "n_steps": 16,
+      "precision": "sage",
+      "batch_idx": 3,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000035"
+    },
+    {
+      "type": "t2i",
+      "seed": 1461042543,
+      "prompt_idx": 20,
+      "prompt": "Bauhaus-inspired geometric composition of primary colored shapes on a white background.",
+      "n_steps": 20,
+      "precision": "sage",
+      "batch_idx": 3,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000036"
+    },
+    {
+      "type": "t2i",
+      "seed": 679282378,
+      "prompt_idx": 13,
+      "prompt": "A child building a sandcastle on a beach while enormous waves curl in the background.",
+      "n_steps": 12,
+      "precision": "sage",
+      "batch_idx": 3,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000037"
+    },
+    {
+      "type": "t2i",
+      "seed": 3919706735,
+      "prompt_idx": 23,
+      "prompt": "An isometric pixel art scene of a busy medieval marketplace with at least 20 distinct characters.",
+      "n_steps": 8,
+      "precision": "sage",
+      "batch_idx": 3,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000038"
+    },
+    {
+      "type": "t2i",
+      "seed": 2615507143,
+      "prompt_idx": 20,
+      "prompt": "Bauhaus-inspired geometric composition of primary colored shapes on a white background.",
+      "n_steps": 21,
+      "precision": "sage",
+      "batch_idx": 3,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000039"
+    },
+    {
+      "type": "i2i",
+      "seed": 1051802512,
+      "prompt": "anime character with long rabbit ears holding a polearm weapon against a dark background with magenta and teal lighting, as a stained glass window with bold lead lines",
+      "n_steps": 30,
+      "denoise": 0.878,
+      "image_file": "00500-3023556536_re_nightmode2.png",
+      "precision": "sdpa",
+      "batch_idx": 0,
+      "output_width": 832,
+      "output_height": 1280,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000040"
+    },
+    {
+      "type": "i2i",
+      "seed": 2536146025,
+      "prompt": "cartoon face with large round eyes and small features in stark black and white 1-bit dithered pixel art, in a neon-lit cyberpunk aesthetic with glowing accents",
+      "n_steps": 30,
+      "denoise": 0.778,
+      "image_file": "1bit redraw.png",
+      "precision": "sdpa",
+      "batch_idx": 0,
+      "output_width": 496,
+      "output_height": 544,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000041"
+    },
+    {
+      "type": "i2i",
+      "seed": 2585650756,
+      "prompt": "cartoon face with large round eyes and small features in stark black and white 1-bit dithered pixel art, with dramatic chiaroscuro lighting in the style of Caravaggio",
+      "n_steps": 30,
+      "denoise": 0.756,
+      "image_file": "1bit redraw.png",
+      "precision": "sdpa",
+      "batch_idx": 0,
+      "output_width": 496,
+      "output_height": 544,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000042"
+    },
+    {
+      "type": "i2i",
+      "seed": 946785248,
+      "prompt": "crude wireframe sketch of an extremely wide-bodied humanoid figure with thin angular limbs and blocky feet, in the palette and style of a faded retro VHS screenshot",
+      "n_steps": 30,
+      "denoise": 0.862,
+      "image_file": "widemeister.png",
+      "precision": "sdpa",
+      "batch_idx": 0,
+      "output_width": 512,
+      "output_height": 512,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000043"
+    },
+    {
+      "type": "i2i",
+      "seed": 2998485882,
+      "prompt": "anime character with long rabbit ears holding a polearm weapon against a dark background with magenta and teal lighting, rendered in cel-shaded animation with clean flat colors",
+      "n_steps": 30,
+      "denoise": 0.868,
+      "image_file": "00500-3023556536_re_nightmode2.png",
+      "precision": "sdpa",
+      "batch_idx": 0,
+      "output_width": 832,
+      "output_height": 1280,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000044"
+    },
+    {
+      "type": "i2i",
+      "seed": 1445662585,
+      "prompt": "standing figure with voluminous curly hair and crossed arms in minimal zine-style line drawing, with dramatic chiaroscuro lighting in the style of Caravaggio",
+      "n_steps": 30,
+      "denoise": 0.818,
+      "image_file": "bubblegum-zinesona-4.png",
+      "precision": "sage",
+      "batch_idx": 1,
+      "output_width": 512,
+      "output_height": 512,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000045"
+    },
+    {
+      "type": "i2i",
+      "seed": 3639960595,
+      "prompt": "cartoon face with large round eyes and small features in stark black and white 1-bit dithered pixel art, as a bold pop art piece with halftone dots and primary colors",
+      "n_steps": 30,
+      "denoise": 0.769,
+      "image_file": "1bit redraw.png",
+      "precision": "sage",
+      "batch_idx": 1,
+      "output_width": 496,
+      "output_height": 544,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000046"
+    },
+    {
+      "type": "i2i",
+      "seed": 2303082117,
+      "prompt": "anime character with long rabbit ears holding a polearm weapon against a dark background with magenta and teal lighting, as a mosaic made of small colored tiles",
+      "n_steps": 30,
+      "denoise": 0.871,
+      "image_file": "00500-3023556536_re_nightmode2.png",
+      "precision": "sage",
+      "batch_idx": 1,
+      "output_width": 832,
+      "output_height": 1280,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000047"
+    },
+    {
+      "type": "i2i",
+      "seed": 2370996465,
+      "prompt": "purple cartoon bird creature wearing a red santa hat with yellow beak and feet and a white belly, bold outlines, in a neon-lit cyberpunk aesthetic with glowing accents",
+      "n_steps": 30,
+      "denoise": 0.945,
+      "image_file": "offhand_pleometric.png",
+      "precision": "sage",
+      "batch_idx": 1,
+      "output_width": 512,
+      "output_height": 512,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000048"
+    },
+    {
+      "type": "i2i",
+      "seed": 2479708607,
+      "prompt": "clean lineart of a witch character wearing a large pointed hat sitting atop a coiled serpent body in anime style, as a bold pop art piece with halftone dots and primary colors",
+      "n_steps": 30,
+      "denoise": 0.916,
+      "image_file": "snek-heavy.png",
+      "precision": "sage",
+      "batch_idx": 1,
+      "output_width": 512,
+      "output_height": 512,
+      "traj_dir": "F:\\dox\\repos\\ai\\futudiffu\\btrm_dataset\\latents\\traj_000049"
+    }
+  ]
+}

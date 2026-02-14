@@ -1,0 +1,9 @@
+{
+  "type": "t2i",
+  "seed": 1812140441,
+  "prompt_idx": 18,
+  "prompt": "An oil painting of a mountain lake at twilight in the style of the Hudson River School.",
+  "n_steps": 30,
+  "precision": "sdpa",
+  "batch_idx": 0
+}

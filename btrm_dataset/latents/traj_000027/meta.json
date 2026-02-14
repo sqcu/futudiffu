@@ -1,0 +1,9 @@
+{
+  "type": "t2i",
+  "seed": 1970753705,
+  "prompt_idx": 15,
+  "prompt": "A weathered wooden door with peeling blue paint and a rusty iron knocker, Mediterranean village.",
+  "n_steps": 18,
+  "precision": "sdpa",
+  "batch_idx": 2
+}

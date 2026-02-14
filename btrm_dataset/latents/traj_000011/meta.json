@@ -1,0 +1,9 @@
+{
+  "type": "t2i",
+  "seed": 3639960595,
+  "prompt_idx": 11,
+  "prompt": "An astronaut riding a horse across a desert under a starfield, photorealistic.",
+  "n_steps": 30,
+  "precision": "sage",
+  "batch_idx": 1
+}

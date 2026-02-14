@@ -1,0 +1,12 @@
+{
+  "type": "i2i",
+  "seed": 2585650756,
+  "prompt": "cartoon face with large round eyes and small features in stark black and white 1-bit dithered pixel art, with dramatic chiaroscuro lighting in the style of Caravaggio",
+  "n_steps": 30,
+  "denoise": 0.756,
+  "image_file": "1bit redraw.png",
+  "precision": "sdpa",
+  "batch_idx": 0,
+  "output_width": 496,
+  "output_height": 544
+}

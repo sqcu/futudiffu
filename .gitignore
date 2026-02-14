@@ -1,2 +1,28 @@
 .venv
 uv.lock
+__pycache__
+
+# rendered images (decode your own tensors)
+btrm_dataset/renders/
+
+# i2i source images (copyrighted/personal art)
+i2i_off_policies/
+
+# validation tensor dumps
+stream_comfyui/
+stream_futudiffu/
+stream_futudiffu_bf16/
+stream_futudiffu_f16te/
+stream_compat_bf16/
+
+# test artifacts
+lora_dumps_test/
+lora_roundtrip_test/
+
+# benchmark runs
+throughput_study/
+throughput_study_v2/
+bench_results.txt
+
+# model weights / lora checkpoints (use your own)
+*.safetensors

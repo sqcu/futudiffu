@@ -1,0 +1,12 @@
+{
+  "type": "i2i",
+  "seed": 2479708607,
+  "prompt": "clean lineart of a witch character wearing a large pointed hat sitting atop a coiled serpent body in anime style, as a bold pop art piece with halftone dots and primary colors",
+  "n_steps": 30,
+  "denoise": 0.916,
+  "image_file": "snek-heavy.png",
+  "precision": "sage",
+  "batch_idx": 1,
+  "output_width": 512,
+  "output_height": 512
+}

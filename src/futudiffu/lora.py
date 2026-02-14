@@ -1,34 +1,33 @@
-"""LoRA (Low-Rank Adaptation) for NextDiT Z-Image diffusion model.
+"""LoRA (Low-Rank Adaptation) — horizontal multi-adapter via Triton sparse kernel.
 
-Horizontal multi-adapter design: each LoRALinear holds N named adapter
-slots.  All adapters read the same input x, compute independently, and
-sum their contributions to the base output::
+Each LoRALinear holds N named adapter slots.  All adapters read the same
+input x, and their contributions are summed into the base output::
 
-    output = base(x) + Σ_i adapter_i(x)
-    adapter_i(x) = scale_i * (α_i/r_i) * (x @ A_i^T) @ B_i^T
+    output = base(x) + Σ_i scale_i * (α_i/r_i) * (x @ A_i^T) @ B_i^T
 
-Each adapter has its own rank, alpha, A/B parameters, and per-batch-element
-scale tensor.  scale=0 disables an adapter (zero contribution, no graph
-mutation, compile-safe).  This is fine-grained MoE with explicit routing:
-each adapter is a rank-r micro-expert, the scale tensor is the router.
+Multi-adapter forward dispatches to the Triton sparse kernel in
+lora_kernels.py which:
+  - Takes scale_all (B, N_ADAPTERS) as an explicit tensor operand
+  - Skips zero-scaled adapters entirely (zero warp divergence)
+  - Is registered as a custom_op with register_fake + register_autograd
 
-Designed for QAT with separate R_theta (reward) and p_theta (policy)
-adapters on the same layers.
+Per-adapter per-batch-element scale is a registered buffer on LoRAAdapter,
+which torch.compile treats as a dynamic graph input.
 """
 
 from __future__ import annotations
 
 import math
 import re
-from typing import Iterator, Optional, Sequence
+from typing import Iterator, Optional
 
 import torch
 import torch.nn as nn
 
 from .fp8 import FP8Linear
+from .lora_kernels import multi_lora_op
 
 
-# Default target module suffixes for NextDiT Z-Image.
 DEFAULT_TARGET_SUFFIXES = (
     "attention.qkv",
     "attention.out",
@@ -39,9 +38,15 @@ DEFAULT_TARGET_SUFFIXES = (
 
 
 class LoRAAdapter(nn.Module):
-    """A single low-rank adapter (A, B, scale).
+    """Single rank-r adapter: A (down-project), B (up-project), scale.
 
-    B is zero-initialized so the adapter starts as identity.
+    lora_scale is a registered buffer — torch.compile treats it as a
+    dynamic graph input whose value can change between calls without
+    recompilation (same shape) or with one recompilation (shape change).
+
+    Shape (1,) broadcasts to any batch size (default = 1.0 = active).
+    Shape (B,) gives per-batch-element routing (e.g. [1, 0] for policy ON
+    in batch[0], OFF in batch[1]).
     """
 
     def __init__(
@@ -51,6 +56,7 @@ class LoRAAdapter(nn.Module):
         in_features: int,
         out_features: int,
         device: torch.device,
+        init_b_std: float = 0.0,
     ) -> None:
         super().__init__()
         self.rank = rank
@@ -59,44 +65,37 @@ class LoRAAdapter(nn.Module):
 
         self.lora_A = nn.Parameter(
             torch.empty(rank, in_features, dtype=torch.bfloat16, device=device))
-        self.lora_B = nn.Parameter(
-            torch.zeros(out_features, rank, dtype=torch.bfloat16, device=device))
+        if init_b_std > 0:
+            self.lora_B = nn.Parameter(
+                torch.empty(out_features, rank, dtype=torch.bfloat16, device=device))
+            nn.init.normal_(self.lora_B, mean=0.0, std=init_b_std)
+        else:
+            self.lora_B = nn.Parameter(
+                torch.zeros(out_features, rank, dtype=torch.bfloat16, device=device))
         nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
 
-        # Per-batch-element scale. None = uniform 1.0.
-        # Shape (B,) when set — broadcast to (B, 1, ..., 1) in forward.
-        self._lora_scale: Optional[torch.Tensor] = None
-
-    @property
-    def lora_scale(self) -> Optional[torch.Tensor]:
-        return self._lora_scale
-
-    @lora_scale.setter
-    def lora_scale(self, value: Optional[torch.Tensor]) -> None:
-        self._lora_scale = value
+        # Registered buffer: torch.compile sees this as a graph input operand.
+        # Shape (1,) = broadcast scalar. Shape (B,) = per-batch routing.
+        self.register_buffer(
+            "lora_scale",
+            torch.ones(1, dtype=torch.bfloat16, device=device),
+        )
 
     def forward(self, x_bf16: torch.Tensor) -> torch.Tensor:
-        """Compute rank-r residual from input (already bf16)."""
-        mid = x_bf16 @ self.lora_A.t()    # (..., rank)
-        lora_out = mid @ self.lora_B.t()   # (..., out_features)
-
-        if self._lora_scale is not None:
-            n_extra = lora_out.ndim - 1
-            shape = (-1,) + (1,) * n_extra
-            return self._lora_scale.view(shape) * self.scale * lora_out
-        return self.scale * lora_out
+        """Standalone forward for single-adapter fast path."""
+        mid = x_bf16 @ self.lora_A.t()
+        lora_out = mid @ self.lora_B.t()
+        # lora_scale: (1,) broadcasts to any B, (B,) for per-batch routing.
+        n_extra = lora_out.ndim - 1
+        shape = (-1,) + (1,) * n_extra
+        return self.lora_scale.view(shape) * self.scale * lora_out
 
 
 class LoRALinear(nn.Module):
-    """Linear layer with N named low-rank adapters (horizontal multi-LoRA).
+    """Linear layer with N named low-rank adapters (fused scatter/gather).
 
-    output = base(x) + Σ adapter_i(x)
-
-    All adapters read the same input x — no serial dependencies between
-    them.  Each adapter has independent rank, alpha, scale, and parameters.
-
-    Args:
-        base: Frozen base layer (nn.Linear or FP8Linear).
+    For N=1: fast path, 2 matmuls (same as single LoRA).
+    For N>1: fused path, still 2 matmuls via concatenated A/B matrices.
     """
 
     def __init__(self, base: nn.Module) -> None:
@@ -111,7 +110,6 @@ class LoRALinear(nn.Module):
             for buf in self.base.buffers():
                 buf.requires_grad = False
 
-        # Cache device
         try:
             self._device = next(base.parameters()).device
         except StopIteration:
@@ -131,25 +129,71 @@ class LoRALinear(nn.Module):
 
     @property
     def bias(self) -> Optional[torch.Tensor]:
-        return self.base.bias
+        return getattr(self.base, 'bias', None)
 
-    def add_adapter(self, name: str, rank: int = 8, alpha: float = 16.0) -> LoRAAdapter:
-        """Add a named adapter slot. Returns the new adapter."""
+    def __getattr__(self, name: str):
+        # Forward attribute lookups to the base module for FP8-specific attrs
+        # (block_size, weight_scale, output_dtype, _transposed, etc.)
+        # that the fused FFN chain accesses.
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            return getattr(self.base, name)
+
+    def add_adapter(
+        self, name: str, rank: int = 8, alpha: float = 16.0,
+        init_b_std: float = 0.0,
+    ) -> LoRAAdapter:
         if name in self.adapters:
             raise ValueError(f"Adapter '{name}' already exists")
         adapter = LoRAAdapter(
-            rank, alpha, self.in_features, self.out_features, self._device)
+            rank, alpha, self.in_features, self.out_features, self._device,
+            init_b_std=init_b_std,
+        )
         self.adapters[name] = adapter
         return adapter
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out = self.base(x)
-        if not self.adapters:
-            return out
+        base_out = self.base(x)
+        n = len(self.adapters)
+        if n == 0:
+            return base_out
+
         x_bf16 = x.to(torch.bfloat16)
-        for adapter in self.adapters.values():
-            out = out + adapter(x_bf16).to(out.dtype)
-        return out
+        adapters = list(self.adapters.values())
+
+        # --- Fast path: single adapter, skip kernel launch overhead ---
+        if n == 1:
+            return base_out + adapters[0](x_bf16).to(base_out.dtype)
+
+        # --- Multi-adapter: dispatch to Triton sparse kernel ---
+        # Assemble stacked weight tensors and scale operand.
+        B = x.shape[0]
+        # x must be 3D (B, S, IN) for the kernel; flatten middle dims if needed
+        orig_shape = x_bf16.shape
+        if x_bf16.ndim > 3:
+            x_3d = x_bf16.view(B, -1, x_bf16.shape[-1])
+        else:
+            x_3d = x_bf16.contiguous()
+
+        A_all = torch.stack([a.lora_A for a in adapters])  # (N, R, IN)
+        B_all = torch.stack([a.lora_B for a in adapters])  # (N, OUT, R)
+
+        # Build scale_all: (B, N) float32 with alpha/rank pre-folded.
+        # Each a.lora_scale is a registered buffer: (1,) or (B,).
+        scale_parts = []
+        for a in adapters:
+            scale_parts.append(a.lora_scale.expand(B).float() * a.scale)
+        scale_all = torch.stack(scale_parts, dim=-1).contiguous()  # (B, N)
+
+        R = adapters[0].rank
+        delta = multi_lora_op(x_3d, A_all, B_all, scale_all, n, R)
+
+        # Restore shape if we flattened
+        if x_bf16.ndim > 3:
+            delta = delta.view(*orig_shape[:-1], delta.shape[-1])
+
+        return base_out + delta.to(base_out.dtype)
 
 
 # ---------------------------------------------------------------------------
@@ -163,11 +207,12 @@ def inject_lora(
     alpha: float = 16.0,
     target_modules: Optional[list[str]] = None,
     layer_indices: Optional[set[int]] = None,
+    init_b_std: float = 0.0,
 ) -> dict[str, LoRAAdapter]:
     """Add a named adapter to matching linear layers.
 
-    If a target is already a LoRALinear, adds a new adapter slot.
-    If a target is Linear/FP8Linear, wraps it in LoRALinear first.
+    If a target is already LoRALinear, adds a new adapter slot.
+    If a target is Linear/FP8Linear, wraps it first.
 
     Args:
         model: Model to inject into.
@@ -177,25 +222,25 @@ def inject_lora(
         target_modules: Suffixes to target. None = DEFAULT_TARGET_SUFFIXES.
         layer_indices: If set, only target layers.N with N in set.
             Excludes refiners when specified.
+        init_b_std: If > 0, initialize lora_B with N(0, init_b_std) instead
+            of zeros. Needed for policy gradient (zero B gives zero MSE
+            gradient at initialization).
 
     Returns:
         Dict mapping full module path -> LoRAAdapter instance.
     """
     suffixes = tuple(target_modules) if target_modules else DEFAULT_TARGET_SUFFIXES
 
-    # Phase 1: identify targets
-    candidates: list[tuple[str, str, str]] = []  # (full_path, parent_path, attr_name)
+    candidates: list[tuple[str, str, str]] = []
     for full_path, module in model.named_modules():
         if not any(full_path.endswith(s) for s in suffixes):
             continue
         if not isinstance(module, (nn.Linear, FP8Linear, LoRALinear)):
             continue
-        # Block prefix filter (default targets only)
         if target_modules is None:
             if not any(bp in full_path for bp in
                        ("layers.", "noise_refiner.", "context_refiner.")):
                 continue
-        # Layer index filter
         if layer_indices is not None:
             m = re.match(r"layers\.(\d+)\.", full_path)
             if not m or int(m.group(1)) not in layer_indices:
@@ -204,7 +249,6 @@ def inject_lora(
         parent_path, attr_name = (parts[0], parts[1]) if len(parts) == 2 else ("", parts[0])
         candidates.append((full_path, parent_path, attr_name))
 
-    # Phase 2: wrap if needed, add adapter
     module_map = dict(model.named_modules())
     injected: dict[str, LoRAAdapter] = {}
 
@@ -213,14 +257,12 @@ def inject_lora(
         child = getattr(parent, attr_name)
 
         if not isinstance(child, LoRALinear):
-            # Wrap in LoRALinear first
             wrapper = LoRALinear(child)
             setattr(parent, attr_name, wrapper)
-            # Update module map for subsequent lookups
             module_map = dict(model.named_modules())
             child = wrapper
 
-        adapter = child.add_adapter(name, rank=rank, alpha=alpha)
+        adapter = child.add_adapter(name, rank=rank, alpha=alpha, init_b_std=init_b_std)
         injected[full_path] = adapter
 
     return injected
@@ -250,11 +292,13 @@ def set_lora_scale(
     scale: torch.Tensor,
     adapter_name: Optional[str] = None,
 ) -> None:
-    """Set per-batch-element scale on adapters.
+    """Set per-batch-element scale tensor on adapter buffers.
 
-    Args:
-        scale: (B,) tensor.
-        adapter_name: If set, only affects that adapter. None = all.
+    scale shape (1,): broadcast scalar, same value for all batch elements.
+    scale shape (B,): per-batch-element routing.
+
+    Same-shape updates use in-place copy_ (no recompilation under
+    torch.compile).  Shape changes reassign the buffer (one recompilation).
     """
     for module in model.modules():
         if not isinstance(module, LoRALinear):
@@ -262,42 +306,43 @@ def set_lora_scale(
         for aname, adapter in module.adapters.items():
             if adapter_name is not None and aname != adapter_name:
                 continue
-            adapter.lora_scale = scale
+            buf = adapter.lora_scale
+            if buf.shape == scale.shape:
+                buf.copy_(scale)
+            else:
+                adapter.lora_scale = scale.to(
+                    dtype=buf.dtype, device=buf.device)
 
 
 def clear_lora_scale(
     model: nn.Module,
     adapter_name: Optional[str] = None,
 ) -> None:
-    """Clear scale (revert to uniform 1.0)."""
+    """Reset scale to broadcast 1.0 (all adapters active, uniform)."""
     for module in model.modules():
         if not isinstance(module, LoRALinear):
             continue
         for aname, adapter in module.adapters.items():
             if adapter_name is not None and aname != adapter_name:
                 continue
-            adapter.lora_scale = None
-
-
-def set_lora_enabled(model: nn.Module, enabled: bool) -> None:
-    """Enable/disable ALL adapters by setting scale to 0 or clearing it."""
-    if not enabled:
-        zero = torch.tensor([0.0], dtype=torch.bfloat16)
-        set_lora_scale(model, zero)
-    else:
-        clear_lora_scale(model)
+            buf = adapter.lora_scale
+            if buf.shape == (1,):
+                buf.fill_(1.0)
+            else:
+                adapter.lora_scale = torch.ones(
+                    1, dtype=buf.dtype, device=buf.device)
 
 
 def freeze_adapter(model: nn.Module, adapter_name: str) -> int:
-    """Freeze an adapter's parameters (requires_grad=False). Returns count."""
+    """Freeze adapter params (requires_grad=False). Returns count frozen."""
     n = 0
     for module in model.modules():
         if not isinstance(module, LoRALinear):
             continue
         if adapter_name in module.adapters:
-            adapter = module.adapters[adapter_name]
-            adapter.lora_A.requires_grad_(False)
-            adapter.lora_B.requires_grad_(False)
+            a = module.adapters[adapter_name]
+            a.lora_A.requires_grad_(False)
+            a.lora_B.requires_grad_(False)
             n += 1
     return n
 
@@ -306,14 +351,38 @@ def freeze_adapter(model: nn.Module, adapter_name: str) -> int:
 # State dict
 # ---------------------------------------------------------------------------
 
+def enumerate_adapters(model: nn.Module) -> dict[str, dict]:
+    """Return metadata for every adapter in the model.
+
+    Returns:
+        Dict mapping adapter_name -> {
+            "n_modules": int,
+            "rank": int,
+            "alpha": float,
+            "scale": float,  # current lora_scale buffer value (first element)
+        }
+    """
+    info: dict[str, dict] = {}
+    for module in model.modules():
+        if not isinstance(module, LoRALinear):
+            continue
+        for aname, adapter in module.adapters.items():
+            if aname not in info:
+                info[aname] = {
+                    "n_modules": 0,
+                    "rank": adapter.rank,
+                    "alpha": adapter.alpha,
+                    "scale": adapter.lora_scale[0].item(),
+                }
+            info[aname]["n_modules"] += 1
+    return info
+
+
 def lora_state_dict(
     model: nn.Module,
     adapter_name: Optional[str] = None,
 ) -> dict[str, torch.Tensor]:
-    """Extract LoRA weights, optionally filtered by adapter name.
-
-    Keys: "layers.0.attention.qkv.adapters.rtheta.lora_A" etc.
-    """
+    """Extract LoRA weights. Keys: "path.adapters.name.lora_A" etc."""
     sd = {}
     for path, module in model.named_modules():
         if not isinstance(module, LoRALinear):
@@ -332,7 +401,6 @@ def load_lora_state_dict(
     state_dict: dict[str, torch.Tensor],
 ) -> None:
     """Load LoRA weights. Model must already have matching adapters."""
-    # Build lookup: "path.adapters.name" -> adapter
     adapter_map: dict[str, LoRAAdapter] = {}
     for path, module in model.named_modules():
         if not isinstance(module, LoRALinear):
@@ -343,17 +411,13 @@ def load_lora_state_dict(
     loaded = set()
     for key, tensor in state_dict.items():
         if key.endswith(".lora_A"):
-            prefix = key[:-len(".lora_A")]
-            param_name = "lora_A"
+            prefix, param_name = key[:-len(".lora_A")], "lora_A"
         elif key.endswith(".lora_B"):
-            prefix = key[:-len(".lora_B")]
-            param_name = "lora_B"
+            prefix, param_name = key[:-len(".lora_B")], "lora_B"
         else:
             raise ValueError(f"Unexpected key: {key}")
-
         if prefix not in adapter_map:
             raise ValueError(f"No adapter at '{prefix}'. Available: {sorted(adapter_map)}")
-
         param = getattr(adapter_map[prefix], param_name)
         if param.shape != tensor.shape:
             raise ValueError(f"Shape mismatch {key}: {param.shape} vs {tensor.shape}")

@@ -1,0 +1,9 @@
+{
+  "type": "t2i",
+  "seed": 1193448329,
+  "prompt_idx": 10,
+  "prompt": "A cat sitting on top of a stack of books next to a window with rain outside, warm interior lighting.",
+  "n_steps": 30,
+  "precision": "sdpa",
+  "batch_idx": 0
+}

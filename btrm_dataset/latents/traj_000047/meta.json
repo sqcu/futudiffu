@@ -1,0 +1,12 @@
+{
+  "type": "i2i",
+  "seed": 2303082117,
+  "prompt": "anime character with long rabbit ears holding a polearm weapon against a dark background with magenta and teal lighting, as a mosaic made of small colored tiles",
+  "n_steps": 30,
+  "denoise": 0.871,
+  "image_file": "00500-3023556536_re_nightmode2.png",
+  "precision": "sage",
+  "batch_idx": 1,
+  "output_width": 832,
+  "output_height": 1280
+}

@@ -1,0 +1,9 @@
+{
+  "type": "t2i",
+  "seed": 679282378,
+  "prompt_idx": 13,
+  "prompt": "A child building a sandcastle on a beach while enormous waves curl in the background.",
+  "n_steps": 12,
+  "precision": "sage",
+  "batch_idx": 3
+}

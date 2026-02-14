@@ -1,0 +1,12 @@
+{
+  "type": "i2i",
+  "seed": 1445662585,
+  "prompt": "standing figure with voluminous curly hair and crossed arms in minimal zine-style line drawing, with dramatic chiaroscuro lighting in the style of Caravaggio",
+  "n_steps": 30,
+  "denoise": 0.818,
+  "image_file": "bubblegum-zinesona-4.png",
+  "precision": "sage",
+  "batch_idx": 1,
+  "output_width": 512,
+  "output_height": 512
+}

@@ -1,0 +1,12 @@
+{
+  "type": "i2i",
+  "seed": 2998485882,
+  "prompt": "anime character with long rabbit ears holding a polearm weapon against a dark background with magenta and teal lighting, rendered in cel-shaded animation with clean flat colors",
+  "n_steps": 30,
+  "denoise": 0.868,
+  "image_file": "00500-3023556536_re_nightmode2.png",
+  "precision": "sdpa",
+  "batch_idx": 0,
+  "output_width": 832,
+  "output_height": 1280
+}

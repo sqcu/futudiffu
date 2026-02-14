@@ -103,6 +103,10 @@ class BTRMHead(nn.Module):
         Returns:
             (B, N_heads) scalar scores, one per head.
         """
+        # Cast input to match model param dtype (handles bf16 server -> float32 head)
+        param_dtype = self.proj.weight.dtype
+        hidden_states = hidden_states.to(dtype=param_dtype)
+
         # Mean pool over token dimension
         pooled = hidden_states.mean(dim=1)  # (B, hidden_dim)
 
@@ -139,6 +143,23 @@ def bradley_terry_loss(pos_scores: Tensor, neg_scores: Tensor) -> Tensor:
         Scalar loss.
     """
     return -F.logsigmoid(pos_scores - neg_scores).mean()
+
+
+def bt_loss_allpairs(pos_scores: Tensor, neg_scores: Tensor) -> Tensor:
+    """BT loss over all (pos, neg) combinations.
+
+    Unlike bradley_terry_loss which requires matched-length inputs,
+    this computes loss over the full n_pos x n_neg cross-product.
+
+    Args:
+        pos_scores: (n_pos,) scores that should be higher.
+        neg_scores: (n_neg,) scores that should be lower.
+
+    Returns:
+        Scalar loss: mean -log_sigmoid(pos_i - neg_j) over all i,j.
+    """
+    diff = pos_scores.unsqueeze(1) - neg_scores.unsqueeze(0)
+    return -F.logsigmoid(diff).mean()
 
 
 def logsquare_regularizer(scores: Tensor, eps: float = 1e-6) -> Tensor:

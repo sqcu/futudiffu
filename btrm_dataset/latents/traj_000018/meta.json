@@ -1,0 +1,9 @@
+{
+  "type": "t2i",
+  "seed": 1589915144,
+  "prompt_idx": 5,
+  "prompt": "qwen-3-4b, draw me a \"laser shark made of chrome and glass, studio lighting, product photography\".",
+  "n_steps": 30,
+  "precision": "sage",
+  "batch_idx": 1
+}

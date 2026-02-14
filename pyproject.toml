@@ -10,6 +10,7 @@ dependencies = [
     "einops",
     "numpy",
     "pillow",
+    "pyzmq>=25.0",
 ]
 
 [project.optional-dependencies]

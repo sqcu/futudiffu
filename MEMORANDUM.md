@@ -250,3 +250,4 @@ If the other agent claims "all tests pass," verify WHAT tests:
 
 Tests that "pass" without CUDA are not validating the spec. The spec requires
 float-for-float CUDA tensor matching.
+

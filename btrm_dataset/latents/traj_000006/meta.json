@@ -1,0 +1,9 @@
+{
+  "type": "t2i",
+  "seed": 3733616459,
+  "prompt_idx": 7,
+  "prompt": "A handwritten letter on aged parchment that reads \"Dear Future Self\" in elegant cursive.",
+  "n_steps": 30,
+  "precision": "sdpa",
+  "batch_idx": 0
+}

@@ -243,6 +243,10 @@ def generate(config: GenerateConfig, emitter=None) -> torch.Tensor:
         diff_model = load_diffusion_model(config.diffusion_model_path, device=device, dtype=dtype)
 
     if not compat:
+        from .diffusion_model import fuse_model
+        fuse_model(diff_model)
+        # All fused Triton kernels are registered as custom_ops, so
+        # torch.compile can capture the full forward pass into CUDA graphs.
         diff_model = torch.compile(diff_model, mode="reduce-overhead")
 
     # --- Precompute RoPE cache (numerically identical, safe in both modes) ---

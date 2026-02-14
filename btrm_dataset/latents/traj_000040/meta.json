@@ -1,0 +1,12 @@
+{
+  "type": "i2i",
+  "seed": 1051802512,
+  "prompt": "anime character with long rabbit ears holding a polearm weapon against a dark background with magenta and teal lighting, as a stained glass window with bold lead lines",
+  "n_steps": 30,
+  "denoise": 0.878,
+  "image_file": "00500-3023556536_re_nightmode2.png",
+  "precision": "sdpa",
+  "batch_idx": 0,
+  "output_width": 832,
+  "output_height": 1280
+}
