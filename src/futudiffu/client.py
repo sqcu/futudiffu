@@ -25,10 +25,27 @@ class InferenceClient:
             timeout_ms: Receive timeout in ms. 0 = infinite (block forever).
         """
         self._ctx = zmq.Context()
-        self._socket = self._ctx.socket(zmq.REQ)
-        if timeout_ms > 0:
-            self._socket.setsockopt(zmq.RCVTIMEO, timeout_ms)
-        self._socket.connect(endpoint)
+        self._endpoint = endpoint
+        self._timeout_ms = timeout_ms
+        self._socket = self._make_socket()
+
+    def _make_socket(self) -> zmq.Socket:
+        """Create and connect a fresh REQ socket."""
+        sock = self._ctx.socket(zmq.REQ)
+        if self._timeout_ms > 0:
+            sock.setsockopt(zmq.RCVTIMEO, self._timeout_ms)
+        sock.connect(self._endpoint)
+        return sock
+
+    def _reset_socket(self):
+        """Destroy the poisoned socket and create a fresh one.
+
+        ZMQ REQ sockets get stuck in a broken state if recv times out
+        after send (the socket is waiting for a reply that will never come).
+        The only recovery is to close and reconnect.
+        """
+        self._socket.close(linger=0)
+        self._socket = self._make_socket()
 
     def _call(self, method: str, params: dict | None = None,
               tensors: dict[str, torch.Tensor] | None = None) -> tuple[dict[str, torch.Tensor], dict]:
@@ -40,10 +57,15 @@ class InferenceClient:
         Raises:
             RuntimeError: If server returns an error.
             zmq.Again: If timeout_ms > 0 and server doesn't respond in time.
+                The socket is automatically reset so the next call can proceed.
         """
         frames = pack_request(method, params, tensors)
         self._socket.send_multipart(frames)
-        response_frames = self._socket.recv_multipart()
+        try:
+            response_frames = self._socket.recv_multipart()
+        except zmq.Again:
+            self._reset_socket()
+            raise
         status, resp_tensors, metadata = unpack_response(response_frames)
         if status != "ok":
             raise RuntimeError(f"Server error: {metadata.get('error', 'unknown')}")
@@ -80,13 +102,15 @@ class InferenceClient:
         save_steps: list[int] | None = None,
         denoise: float = 1.0,
         clean_latent: torch.Tensor | None = None,
+        noise: torch.Tensor | None = None,
+        score_at_step: int | None = None,
     ) -> dict[str, torch.Tensor]:
-        """Run a diffusion sampling trajectory.
+        """Run a diffusion sampling trajectory with optional inline BTRM scoring.
 
         Args:
             pos_cond: Positive conditioning (1, seq, 2560).
             neg_cond: Negative conditioning (1, seq, 2560).
-            seed: RNG seed.
+            seed: RNG seed (ignored if noise is provided).
             n_steps: Number of euler steps.
             cfg: CFG scale.
             width: Image width.
@@ -97,16 +121,26 @@ class InferenceClient:
             save_steps: Steps to save intermediates. None = all.
             denoise: Denoise strength for i2i (0-1). Default 1.0 (t2i).
             clean_latent: For i2i, the encoded source image latent.
+            noise: Pre-generated noise tensor (1, 16, H/8, W/8). If provided,
+                bypasses torch.randn entirely — use for cross-version
+                reproducibility with a canonical noise tensor.
+            score_at_step: If set (and BTRM head is injected on server),
+                score this step's latent inline during the trajectory. The
+                result dict will contain a "_btrm_scores" key with
+                [[head0, head1, ...], ...] scores.
 
         Returns:
             Dict of {name: tensor} with "final" and optionally "step_NN" keys.
-            All tensors on CPU.
+            If score_at_step was set and BTRM head is available, also contains
+            "_btrm_scores" (list, not tensor). All tensors on CPU.
         """
         req_tensors = {"pos_cond": pos_cond, "neg_cond": neg_cond}
         if clean_latent is not None:
             req_tensors["clean_latent"] = clean_latent
+        if noise is not None:
+            req_tensors["noise"] = noise
 
-        tensors, _ = self._call("sample_trajectory", {
+        req_params = {
             "seed": seed,
             "n_steps": n_steps,
             "cfg": cfg,
@@ -117,7 +151,13 @@ class InferenceClient:
             "multiplier": multiplier,
             "save_steps": save_steps,
             "denoise": denoise,
-        }, req_tensors)
+        }
+        if score_at_step is not None:
+            req_params["score_at_step"] = score_at_step
+
+        tensors, metadata = self._call("sample_trajectory", req_params, req_tensors)
+        if "btrm_scores" in metadata:
+            tensors["_btrm_scores"] = metadata["btrm_scores"]
         return tensors
 
     def sample_trajectory_packed(
@@ -129,6 +169,7 @@ class InferenceClient:
         cfg: float = 4.0,
         width: int = 1280,
         height: int = 832,
+        attention_backend: str = "sdpa",
         sampling_shift: float = 1.0,
         multiplier: float = 1.0,
         save_steps: list[int] | None = None,
@@ -146,6 +187,7 @@ class InferenceClient:
             seeds: N RNG seeds.
             n_steps, cfg, width, height, sampling_shift, multiplier, denoise:
                 Shared trajectory parameters.
+            attention_backend: "sdpa" or "sage".
             save_steps: Steps to save intermediates. None = all.
             clean_latents: N optional source image latents for i2i.
 
@@ -168,6 +210,7 @@ class InferenceClient:
             "cfg": cfg,
             "width": width,
             "height": height,
+            "attention_backend": attention_backend,
             "sampling_shift": sampling_shift,
             "multiplier": multiplier,
             "save_steps": save_steps,
@@ -212,9 +255,15 @@ class InferenceClient:
         tensors, _ = self._call("vae_decode", tensors={"latent": latent})
         return tensors["image"]
 
-    def warmup(self, attention_backend: str = "sdpa") -> None:
-        """Warmup the diffusion model for a given attention backend."""
-        self._call("warmup", {"attention_backend": attention_backend})
+    def warmup(self, attention_backend: str = "sdpa",
+               width: int = 1280, height: int = 832) -> None:
+        """Warmup the diffusion model for a given attention backend and resolution."""
+        params: dict = {"attention_backend": attention_backend}
+        if width != 1280:
+            params["width"] = width
+        if height != 832:
+            params["height"] = height
+        self._call("warmup", params)
 
     def warmup_packed(self, n_images: int = 2) -> None:
         """Warmup the packed forward path (FlexAttention + torch.compile)."""
@@ -287,17 +336,21 @@ class InferenceClient:
         adapter_name: str,
         scale: float | list[float] | None = None,
         frozen: bool | None = None,
+        clear_scale: bool = False,
     ) -> None:
         """Set adapter scale and/or freeze state on the server.
 
         Args:
             adapter_name: Which adapter to configure.
-            scale: Per-batch scale value(s). None = clear scale.
-            frozen: If True, freeze the adapter.
+            scale: Per-batch scale value(s). None = don't change.
+            frozen: If True, freeze the adapter. If False, unfreeze.
+            clear_scale: If True, explicitly clear the scale (reset to 1.0).
         """
         params: dict = {"adapter_name": adapter_name}
         if scale is not None:
             params["scale"] = scale
+        elif clear_scale:
+            params["scale"] = None
         if frozen is not None:
             params["frozen"] = frozen
         self._call("set_adapter_config", params)

@@ -1,0 +1,8 @@
+{
+  "host": "user@your-instance-ip",
+  "ssh_key": "~/.ssh/your_key",
+  "remote_dir": "~/futudiffu",
+  "model_dir": "~/futudiffu/models",
+  "base_port": 5555,
+  "n_gpus": 2
+}

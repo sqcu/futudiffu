@@ -36,6 +36,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
 from futudiffu.btrm_dataset import I2I_IMAGES, PROMPT_TEMPLATES
 from futudiffu.client import InferenceClient
+from futudiffu.rendering import decode_and_save as _lib_decode_and_save
 
 
 # ---------------------------------------------------------------------------
@@ -62,10 +63,7 @@ def load_i2i_image(image_path: Path, multiple: int = 16):
 
 def decode_and_save(client, latent, path):
     """VAE decode a latent and save as PNG."""
-    pixels = client.vae_decode(latent)
-    img = pixels[0].clamp(0, 1).permute(1, 2, 0).float().cpu().numpy()
-    img = (img * 255).astype(np.uint8)
-    Image.fromarray(img).save(str(path))
+    _lib_decode_and_save(client, latent, path)
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +132,7 @@ def generate_t2i(client, prompt_idx, seed, output_dir, pos_cache, neg_cond,
 
 
 def generate_i2i(client, image_idx, image_info, seed, output_dir, neg_cond,
-                 policy_scale):
+                 policy_scale, pos_cond=None):
     """Generate one i2i trajectory."""
     filename = image_info["filename"]
     object_label = image_info["object_label"]
@@ -148,9 +146,10 @@ def generate_i2i(client, image_idx, image_info, seed, output_dir, neg_cond,
     img_tensor, crop_w, crop_h = load_i2i_image(image_path)
     clean_latent = client.vae_encode(img_tensor)
 
-    # Build prompt: object label + style transformation
+    # Use pre-encoded conditioning, or encode on-demand as fallback
     prompt = f"{object_label}, rendered with enhanced clarity and detail"
-    pos_cond = client.encode_prompt(prompt)
+    if pos_cond is None:
+        pos_cond = client.encode_prompt(prompt)
 
     result = client.sample_trajectory(
         pos_cond=pos_cond,
@@ -246,9 +245,29 @@ def main():
         print(f"\nSetting ptheta scale={args.policy_scale}")
         client.set_adapter_config("ptheta", scale=args.policy_scale)
 
-    # Encode negative prompt once
+    # Pre-encode ALL prompts before any trajectory generation to avoid
+    # TE<->diffusion lifecycle swaps (each swap is 30-90s).
     neg_cond = client.encode_prompt("")
     pos_cache = {}
+
+    # Pre-encode t2i prompts
+    if not args.skip_t2i:
+        print(f"\n  Pre-encoding {len(T2I_PROMPT_INDICES)} t2i prompts...")
+        for pidx in T2I_PROMPT_INDICES:
+            prompt = PROMPT_TEMPLATES[pidx]
+            pos_cache[prompt] = client.encode_prompt(prompt)
+
+    # Pre-encode i2i prompts
+    i2i_conds = {}
+    if not args.skip_i2i:
+        print(f"  Pre-encoding {len(I2I_IMAGES)} i2i prompts...")
+        for img_info in I2I_IMAGES:
+            prompt = f"{img_info['object_label']}, rendered with enhanced clarity and detail"
+            i2i_conds[img_info['filename']] = client.encode_prompt(prompt)
+
+    # Free TE permanently — all subsequent work is diffusion + VAE
+    client.free("te")
+    print("  TE freed after encoding all prompts.")
 
     manifest = {
         "policy_scale": args.policy_scale,
@@ -294,6 +313,7 @@ def main():
             meta, render_path = generate_i2i(
                 client, i, img_info, seed, output_dir, neg_cond,
                 args.policy_scale,
+                pos_cond=i2i_conds.get(img_info['filename']),
             )
             dt = time.time() - t0
             if meta:

@@ -1,12 +1,30 @@
 {
-  "source": "futudiffu",
+  "source": "futudiffu-bf16",
+  "generated": "2026-02-14T17:59:03",
+  "torch_version": "2.10.0+cu128",
+  "dtype_info": {
+    "sampling_loop": "bfloat16",
+    "text_encoder": "bfloat16",
+    "diffusion_model": "FP8-blockwise + bfloat16",
+    "vae": "bfloat16",
+    "noise": "torch.bfloat16",
+    "sigmas": "torch.float32"
+  },
   "config": {
     "prompt": "ahem.\n*ting ting ting ting ting*\nthe query model for this is a LARGE LANGUAGE MODEL, specifically QWEN-3-4B, a GENERAL PURPOSE SEMANTIC PARSER which is able to WRITE SENTENCES AT A TIME when they are participating in dialogue. however, in this situation, they are being used as a hidden state generator to steer an *image generation model*, z-image.\n\nqwen-3-4b, draw me an \"enormous laser shark for the sega saturn\".",
     "seed": 91849188298864,
     "steps": 30,
     "cfg": 4.0,
     "width": 1280,
-    "height": 832
+    "height": 832,
+    "sampling_shift": 1.0,
+    "multiplier": 1.0,
+    "denoise": 1.0,
+    "attention_backend": "sdpa"
+  },
+  "timing": {
+    "trajectory_seconds": 46.23,
+    "vae_decode_seconds": 0.71
   },
   "stages": [
     {
@@ -17,8 +35,7 @@
         113,
         2560
       ],
-      "dtype": "torch.bfloat16",
-      "elapsed": 5.360000000335276
+      "dtype": "torch.bfloat16"
     },
     {
       "name": "text_encoder_neg",
@@ -28,8 +45,7 @@
         8,
         2560
       ],
-      "dtype": "torch.bfloat16",
-      "elapsed": 5.391000000759959
+      "dtype": "torch.bfloat16"
     },
     {
       "name": "noise",
@@ -41,7 +57,7 @@
         160
       ],
       "dtype": "torch.bfloat16",
-      "elapsed": 5.438000000081956
+      "note": "canonical noise preserved (not overwritten)"
     },
     {
       "name": "sigmas",
@@ -49,8 +65,7 @@
       "shape": [
         31
       ],
-      "dtype": "torch.float32",
-      "elapsed": 5.438000000081956
+      "dtype": "torch.float32"
     },
     {
       "name": "euler_step_00",
@@ -67,15 +82,12 @@
           16,
           104,
           160
-        ],
-        "sigma": "scalar"
+        ]
       },
       "dtype": {
         "x": "torch.bfloat16",
-        "denoised": "torch.bfloat16",
-        "sigma": "float"
-      },
-      "elapsed": 57.67200000025332
+        "denoised": "torch.bfloat16"
+      }
     },
     {
       "name": "euler_step_01",
@@ -92,15 +104,12 @@
           16,
           104,
           160
-        ],
-        "sigma": "scalar"
+        ]
       },
       "dtype": {
-        "x": "torch.float32",
-        "denoised": "torch.bfloat16",
-        "sigma": "float"
-      },
-      "elapsed": 58.453000000678
+        "x": "torch.bfloat16",
+        "denoised": "torch.bfloat16"
+      }
     },
     {
       "name": "euler_step_02",
@@ -117,15 +126,12 @@
           16,
           104,
           160
-        ],
-        "sigma": "scalar"
+        ]
       },
       "dtype": {
-        "x": "torch.float32",
-        "denoised": "torch.bfloat16",
-        "sigma": "float"
-      },
-      "elapsed": 59.235000000335276
+        "x": "torch.bfloat16",
+        "denoised": "torch.bfloat16"
+      }
     },
     {
       "name": "euler_step_03",
@@ -142,15 +148,12 @@
           16,
           104,
           160
-        ],
-        "sigma": "scalar"
+        ]
       },
       "dtype": {
-        "x": "torch.float32",
-        "denoised": "torch.bfloat16",
-        "sigma": "float"
-      },
-      "elapsed": 60.0
+        "x": "torch.bfloat16",
+        "denoised": "torch.bfloat16"
+      }
     },
     {
       "name": "euler_step_04",
@@ -167,15 +170,12 @@
           16,
           104,
           160
-        ],
-        "sigma": "scalar"
+        ]
       },
       "dtype": {
-        "x": "torch.float32",
-        "denoised": "torch.bfloat16",
-        "sigma": "float"
-      },
-      "elapsed": 60.78100000042468
+        "x": "torch.bfloat16",
+        "denoised": "torch.bfloat16"
+      }
     },
     {
       "name": "euler_step_05",
@@ -192,15 +192,12 @@
           16,
           104,
           160
-        ],
-        "sigma": "scalar"
+        ]
       },
       "dtype": {
-        "x": "torch.float32",
-        "denoised": "torch.bfloat16",
-        "sigma": "float"
-      },
-      "elapsed": 61.54700000025332
+        "x": "torch.bfloat16",
+        "denoised": "torch.bfloat16"
+      }
     },
     {
       "name": "euler_step_06",
@@ -217,15 +214,12 @@
           16,
           104,
           160
-        ],
-        "sigma": "scalar"
+        ]
       },
       "dtype": {
-        "x": "torch.float32",
-        "denoised": "torch.bfloat16",
-        "sigma": "float"
-      },
-      "elapsed": 62.313000000081956
+        "x": "torch.bfloat16",
+        "denoised": "torch.bfloat16"
+      }
     },
     {
       "name": "euler_step_07",
@@ -242,15 +236,12 @@
           16,
           104,
           160
-        ],
-        "sigma": "scalar"
+        ]
       },
       "dtype": {
-        "x": "torch.float32",
-        "denoised": "torch.bfloat16",
-        "sigma": "float"
-      },
-      "elapsed": 63.078000000678
+        "x": "torch.bfloat16",
+        "denoised": "torch.bfloat16"
+      }
     },
     {
       "name": "euler_step_08",
@@ -267,15 +258,12 @@
           16,
           104,
           160
-        ],
-        "sigma": "scalar"
+        ]
       },
       "dtype": {
-        "x": "torch.float32",
-        "denoised": "torch.bfloat16",
-        "sigma": "float"
-      },
-      "elapsed": 63.860000000335276
+        "x": "torch.bfloat16",
+        "denoised": "torch.bfloat16"
+      }
     },
     {
       "name": "euler_step_09",
@@ -292,15 +280,12 @@
           16,
           104,
           160
-        ],
-        "sigma": "scalar"
+        ]
       },
       "dtype": {
-        "x": "torch.float32",
-        "denoised": "torch.bfloat16",
-        "sigma": "float"
-      },
-      "elapsed": 64.64100000075996
+        "x": "torch.bfloat16",
+        "denoised": "torch.bfloat16"
+      }
     },
     {
       "name": "euler_step_10",
@@ -317,15 +302,12 @@
           16,
           104,
           160
-        ],
-        "sigma": "scalar"
+        ]
       },
       "dtype": {
-        "x": "torch.float32",
-        "denoised": "torch.bfloat16",
-        "sigma": "float"
-      },
-      "elapsed": 65.40600000042468
+        "x": "torch.bfloat16",
+        "denoised": "torch.bfloat16"
+      }
     },
     {
       "name": "euler_step_11",
@@ -342,15 +324,12 @@
           16,
           104,
           160
-        ],
-        "sigma": "scalar"
+        ]
       },
       "dtype": {
-        "x": "torch.float32",
-        "denoised": "torch.bfloat16",
-        "sigma": "float"
-      },
-      "elapsed": 66.17200000025332
+        "x": "torch.bfloat16",
+        "denoised": "torch.bfloat16"
+      }
     },
     {
       "name": "euler_step_12",
@@ -367,15 +346,12 @@
           16,
           104,
           160
-        ],
-        "sigma": "scalar"
+        ]
       },
       "dtype": {
-        "x": "torch.float32",
-        "denoised": "torch.bfloat16",
-        "sigma": "float"
-      },
-      "elapsed": 66.93800000008196
+        "x": "torch.bfloat16",
+        "denoised": "torch.bfloat16"
+      }
     },
     {
       "name": "euler_step_13",
@@ -392,15 +368,12 @@
           16,
           104,
           160
-        ],
-        "sigma": "scalar"
+        ]
       },
       "dtype": {
-        "x": "torch.float32",
-        "denoised": "torch.bfloat16",
-        "sigma": "float"
-      },
-      "elapsed": 67.73500000033528
+        "x": "torch.bfloat16",
+        "denoised": "torch.bfloat16"
+      }
     },
     {
       "name": "euler_step_14",
@@ -417,15 +390,12 @@
           16,
           104,
           160
-        ],
-        "sigma": "scalar"
+        ]
       },
       "dtype": {
-        "x": "torch.float32",
-        "denoised": "torch.bfloat16",
-        "sigma": "float"
-      },
-      "elapsed": 68.5
+        "x": "torch.bfloat16",
+        "denoised": "torch.bfloat16"
+      }
     },
     {
       "name": "euler_step_15",
@@ -442,15 +412,12 @@
           16,
           104,
           160
-        ],
-        "sigma": "scalar"
+        ]
       },
       "dtype": {
-        "x": "torch.float32",
-        "denoised": "torch.bfloat16",
-        "sigma": "float"
-      },
-      "elapsed": 69.26600000075996
+        "x": "torch.bfloat16",
+        "denoised": "torch.bfloat16"
+      }
     },
     {
       "name": "euler_step_16",
@@ -467,15 +434,12 @@
           16,
           104,
           160
-        ],
-        "sigma": "scalar"
+        ]
       },
       "dtype": {
-        "x": "torch.float32",
-        "denoised": "torch.bfloat16",
-        "sigma": "float"
-      },
-      "elapsed": 70.03100000042468
+        "x": "torch.bfloat16",
+        "denoised": "torch.bfloat16"
+      }
     },
     {
       "name": "euler_step_17",
@@ -492,15 +456,12 @@
           16,
           104,
           160
-        ],
-        "sigma": "scalar"
+        ]
       },
       "dtype": {
-        "x": "torch.float32",
-        "denoised": "torch.bfloat16",
-        "sigma": "float"
-      },
-      "elapsed": 70.81300000008196
+        "x": "torch.bfloat16",
+        "denoised": "torch.bfloat16"
+      }
     },
     {
       "name": "euler_step_18",
@@ -517,15 +478,12 @@
           16,
           104,
           160
-        ],
-        "sigma": "scalar"
+        ]
       },
       "dtype": {
-        "x": "torch.float32",
-        "denoised": "torch.bfloat16",
-        "sigma": "float"
-      },
-      "elapsed": 71.578000000678
+        "x": "torch.bfloat16",
+        "denoised": "torch.bfloat16"
+      }
     },
     {
       "name": "euler_step_19",
@@ -542,15 +500,12 @@
           16,
           104,
           160
-        ],
-        "sigma": "scalar"
+        ]
       },
       "dtype": {
-        "x": "torch.float32",
-        "denoised": "torch.bfloat16",
-        "sigma": "float"
-      },
-      "elapsed": 72.34400000050664
+        "x": "torch.bfloat16",
+        "denoised": "torch.bfloat16"
+      }
     },
     {
       "name": "euler_step_20",
@@ -567,15 +522,12 @@
           16,
           104,
           160
-        ],
-        "sigma": "scalar"
+        ]
       },
       "dtype": {
-        "x": "torch.float32",
-        "denoised": "torch.bfloat16",
-        "sigma": "float"
-      },
-      "elapsed": 73.11000000033528
+        "x": "torch.bfloat16",
+        "denoised": "torch.bfloat16"
+      }
     },
     {
       "name": "euler_step_21",
@@ -592,15 +544,12 @@
           16,
           104,
           160
-        ],
-        "sigma": "scalar"
+        ]
       },
       "dtype": {
-        "x": "torch.float32",
-        "denoised": "torch.bfloat16",
-        "sigma": "float"
-      },
-      "elapsed": 73.89100000075996
+        "x": "torch.bfloat16",
+        "denoised": "torch.bfloat16"
+      }
     },
     {
       "name": "euler_step_22",
@@ -617,15 +566,12 @@
           16,
           104,
           160
-        ],
-        "sigma": "scalar"
+        ]
       },
       "dtype": {
-        "x": "torch.float32",
-        "denoised": "torch.bfloat16",
-        "sigma": "float"
-      },
-      "elapsed": 74.67200000025332
+        "x": "torch.bfloat16",
+        "denoised": "torch.bfloat16"
+      }
     },
     {
       "name": "euler_step_23",
@@ -642,15 +588,12 @@
           16,
           104,
           160
-        ],
-        "sigma": "scalar"
+        ]
       },
       "dtype": {
-        "x": "torch.float32",
-        "denoised": "torch.bfloat16",
-        "sigma": "float"
-      },
-      "elapsed": 75.43800000008196
+        "x": "torch.bfloat16",
+        "denoised": "torch.bfloat16"
+      }
     },
     {
       "name": "euler_step_24",
@@ -667,15 +610,12 @@
           16,
           104,
           160
-        ],
-        "sigma": "scalar"
+        ]
       },
       "dtype": {
-        "x": "torch.float32",
-        "denoised": "torch.bfloat16",
-        "sigma": "float"
-      },
-      "elapsed": 76.203000000678
+        "x": "torch.bfloat16",
+        "denoised": "torch.bfloat16"
+      }
     },
     {
       "name": "euler_step_25",
@@ -692,15 +632,12 @@
           16,
           104,
           160
-        ],
-        "sigma": "scalar"
+        ]
       },
       "dtype": {
-        "x": "torch.float32",
-        "denoised": "torch.bfloat16",
-        "sigma": "float"
-      },
-      "elapsed": 76.98500000033528
+        "x": "torch.bfloat16",
+        "denoised": "torch.bfloat16"
+      }
     },
     {
       "name": "euler_step_26",
@@ -717,15 +654,12 @@
           16,
           104,
           160
-        ],
-        "sigma": "scalar"
+        ]
       },
       "dtype": {
-        "x": "torch.float32",
-        "denoised": "torch.bfloat16",
-        "sigma": "float"
-      },
-      "elapsed": 77.75
+        "x": "torch.bfloat16",
+        "denoised": "torch.bfloat16"
+      }
     },
     {
       "name": "euler_step_27",
@@ -742,15 +676,12 @@
           16,
           104,
           160
-        ],
-        "sigma": "scalar"
+        ]
       },
       "dtype": {
-        "x": "torch.float32",
-        "denoised": "torch.bfloat16",
-        "sigma": "float"
-      },
-      "elapsed": 78.53100000042468
+        "x": "torch.bfloat16",
+        "denoised": "torch.bfloat16"
+      }
     },
     {
       "name": "euler_step_28",
@@ -767,15 +698,12 @@
           16,
           104,
           160
-        ],
-        "sigma": "scalar"
+        ]
       },
       "dtype": {
-        "x": "torch.float32",
-        "denoised": "torch.bfloat16",
-        "sigma": "float"
-      },
-      "elapsed": 79.31300000008196
+        "x": "torch.bfloat16",
+        "denoised": "torch.bfloat16"
+      }
     },
     {
       "name": "euler_step_29",
@@ -792,15 +720,12 @@
           16,
           104,
           160
-        ],
-        "sigma": "scalar"
+        ]
       },
       "dtype": {
-        "x": "torch.float32",
-        "denoised": "torch.bfloat16",
-        "sigma": "float"
-      },
-      "elapsed": 80.11000000033528
+        "x": "torch.bfloat16",
+        "denoised": "torch.bfloat16"
+      }
     },
     {
       "name": "final_latent",
@@ -811,8 +736,7 @@
         104,
         160
       ],
-      "dtype": "torch.float32",
-      "elapsed": 80.11000000033528
+      "dtype": "torch.bfloat16"
     },
     {
       "name": "vae_output",
@@ -823,9 +747,7 @@
         832,
         1280
       ],
-      "dtype": "torch.bfloat16",
-      "elapsed": 81.79700000025332
+      "dtype": "torch.bfloat16"
     }
-  ],
-  "total_elapsed": 81.875
+  ]
 }

@@ -1155,3 +1155,200 @@ if _HAS_TRITON:
         # Store output as BF16
         o_ptrs = o_base + offs_m[:, None] * D + offs_d[None, :]
         tl.store(o_ptrs, o_acc.to(tl.bfloat16), mask=q_mask[:, None])
+
+    # =========================================================================
+    # Block-Masked Variants: FP8/INT8 QK + BF16 PV with block-level mask
+    #
+    # These kernels accept a block_mask array of shape (BH, n_q_blocks,
+    # n_kv_blocks) with uint8 entries: 1 = compute, 0 = skip.
+    # When HAS_BLOCK_MASK=False, block_mask_ptr is ignored (zero overhead).
+    #
+    # Used for packed multi-image inference where different images must not
+    # attend to each other.
+    # =========================================================================
+
+    @triton.jit
+    def _sage_attn_fwd_fp8qk_bf16pv_masked(
+        Q, K, V, Out,
+        block_mask_ptr,  # (BH, n_q_blocks, n_kv_blocks) uint8 or None
+        stride_z,        # stride of batch*head dim (= seq_len * D)
+        stride_bm_z,     # stride of block_mask batch dim (= n_q_blocks * n_kv_blocks)
+        seq_len,
+        n_kv_blocks,     # number of KV blocks (for block_mask row stride)
+        sm_scale_log2e,
+        FP8_MAX: tl.constexpr,
+        BLOCK_M: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+        D: tl.constexpr,
+        HAS_BLOCK_MASK: tl.constexpr,
+    ):
+        """Fused flash-attention with FP8 QK^T, BF16 PV, and optional block mask.
+
+        Grid: (ceil(seq_len / BLOCK_M), batch * heads)
+
+        When HAS_BLOCK_MASK=True, block_mask_ptr points to a (BH, n_q_blocks,
+        n_kv_blocks) uint8 array. For each (pid_m, n_idx) block pair, if
+        block_mask[pid_z, pid_m, n_idx] == 0, the entire KV block is skipped.
+
+        When HAS_BLOCK_MASK=False, block_mask_ptr is ignored and the kernel
+        compiles to the same code as the unmasked variant (zero overhead).
+        """
+        pid_m = tl.program_id(0)
+        pid_z = tl.program_id(1)
+
+        q_base = Q + pid_z * stride_z
+        k_base = K + pid_z * stride_z
+        v_base = V + pid_z * stride_z
+        o_base = Out + pid_z * stride_z
+
+        offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_d = tl.arange(0, D)
+        q_mask = offs_m < seq_len
+
+        # Load Q tile and quantize to FP8 per-row
+        q_ptrs = q_base + offs_m[:, None] * D + offs_d[None, :]
+        q_f32 = tl.load(q_ptrs, mask=q_mask[:, None], other=0.0).to(tl.float32)
+
+        q_abs_max = tl.max(tl.abs(q_f32), axis=1)
+        q_inv_scale = FP8_MAX / tl.maximum(q_abs_max, 1e-12)
+        q_fp8 = (q_f32 * q_inv_scale[:, None]).to(tl.float8e4nv)
+        q_descale = (q_abs_max / FP8_MAX) * sm_scale_log2e
+
+        m_i = tl.full([BLOCK_M], float('-inf'), dtype=tl.float32)
+        l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
+        o_acc = tl.zeros([BLOCK_M, D], dtype=tl.float32)
+
+        if HAS_BLOCK_MASK:
+            bm_base = block_mask_ptr + pid_z * stride_bm_z
+
+        loop_n_blocks = tl.cdiv(seq_len, BLOCK_N)
+        for n_idx in range(loop_n_blocks):
+            if HAS_BLOCK_MASK:
+                should_compute = tl.load(bm_base + pid_m * n_kv_blocks + n_idx)
+                if should_compute == 0:
+                    continue
+
+            n_start = n_idx * BLOCK_N
+            offs_n = n_start + tl.arange(0, BLOCK_N)
+            n_mask = offs_n < seq_len
+
+            k_ptrs = k_base + offs_n[None, :] * D + offs_d[:, None]
+            k_f32 = tl.load(k_ptrs, mask=n_mask[None, :], other=0.0).to(tl.float32)
+
+            k_abs_max = tl.max(tl.abs(k_f32), axis=0)
+            k_inv_scale = FP8_MAX / tl.maximum(k_abs_max, 1e-12)
+            k_fp8 = (k_f32 * k_inv_scale[None, :]).to(tl.float8e4nv)
+            k_descale = k_abs_max / FP8_MAX
+
+            s = tl.dot(q_fp8, k_fp8, out_dtype=tl.float32)
+            s = s * q_descale[:, None] * k_descale[None, :]
+            s = tl.where(n_mask[None, :], s, float('-inf'))
+
+            m_new = tl.maximum(m_i, tl.max(s, axis=1))
+            alpha = tl.math.exp2(m_i - m_new)
+            p = tl.math.exp2(s - m_new[:, None])
+
+            l_i = alpha * l_i + tl.sum(p, axis=1)
+            o_acc = o_acc * alpha[:, None]
+
+            v_ptrs = v_base + offs_n[:, None] * D + offs_d[None, :]
+            v_tile = tl.load(v_ptrs, mask=n_mask[:, None], other=0.0)
+            o_acc += tl.dot(p.to(tl.bfloat16), v_tile, out_dtype=tl.float32)
+
+            m_i = m_new
+
+        o_acc = o_acc / l_i[:, None]
+
+        o_ptrs = o_base + offs_m[:, None] * D + offs_d[None, :]
+        tl.store(o_ptrs, o_acc.to(tl.bfloat16), mask=q_mask[:, None])
+
+    # =========================================================================
+    # Block-Masked INT8 QK + BF16 PV
+    # =========================================================================
+
+    @triton.jit
+    def _sage_attn_fwd_int8qk_bf16pv_masked(
+        Q, K, V, Out,
+        block_mask_ptr,
+        stride_z,
+        stride_bm_z,
+        seq_len,
+        n_kv_blocks,
+        sm_scale_log2e,
+        BLOCK_M: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+        D: tl.constexpr,
+        HAS_BLOCK_MASK: tl.constexpr,
+    ):
+        """Fused flash-attention with INT8 QK^T, BF16 PV, and optional block mask.
+
+        Same structure as _sage_attn_fwd_fp8qk_bf16pv_masked but with INT8
+        quantization. See that kernel's docstring for block_mask semantics.
+        """
+        pid_m = tl.program_id(0)
+        pid_z = tl.program_id(1)
+
+        q_base = Q + pid_z * stride_z
+        k_base = K + pid_z * stride_z
+        v_base = V + pid_z * stride_z
+        o_base = Out + pid_z * stride_z
+
+        offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_d = tl.arange(0, D)
+        q_mask = offs_m < seq_len
+
+        q_ptrs = q_base + offs_m[:, None] * D + offs_d[None, :]
+        q_f32 = tl.load(q_ptrs, mask=q_mask[:, None], other=0.0).to(tl.float32)
+
+        q_abs_max = tl.max(tl.abs(q_f32), axis=1)
+        q_inv_scale = 127.0 / tl.maximum(q_abs_max, 1e-12)
+        q_int8 = (q_f32 * q_inv_scale[:, None]).to(tl.int8)
+        q_descale = (q_abs_max / 127.0) * sm_scale_log2e
+
+        m_i = tl.full([BLOCK_M], float('-inf'), dtype=tl.float32)
+        l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
+        o_acc = tl.zeros([BLOCK_M, D], dtype=tl.float32)
+
+        if HAS_BLOCK_MASK:
+            bm_base = block_mask_ptr + pid_z * stride_bm_z
+
+        loop_n_blocks = tl.cdiv(seq_len, BLOCK_N)
+        for n_idx in range(loop_n_blocks):
+            if HAS_BLOCK_MASK:
+                should_compute = tl.load(bm_base + pid_m * n_kv_blocks + n_idx)
+                if should_compute == 0:
+                    continue
+
+            n_start = n_idx * BLOCK_N
+            offs_n = n_start + tl.arange(0, BLOCK_N)
+            n_mask = offs_n < seq_len
+
+            k_ptrs = k_base + offs_n[None, :] * D + offs_d[:, None]
+            k_f32 = tl.load(k_ptrs, mask=n_mask[None, :], other=0.0).to(tl.float32)
+
+            k_abs_max = tl.max(tl.abs(k_f32), axis=0)
+            k_inv_scale = 127.0 / tl.maximum(k_abs_max, 1e-12)
+            k_int8 = (k_f32 * k_inv_scale[None, :]).to(tl.int8)
+            k_descale = k_abs_max / 127.0
+
+            s = tl.dot(q_int8, k_int8, out_dtype=tl.float32)
+            s = s * q_descale[:, None] * k_descale[None, :]
+            s = tl.where(n_mask[None, :], s, float('-inf'))
+
+            m_new = tl.maximum(m_i, tl.max(s, axis=1))
+            alpha = tl.math.exp2(m_i - m_new)
+            p = tl.math.exp2(s - m_new[:, None])
+
+            l_i = alpha * l_i + tl.sum(p, axis=1)
+            o_acc = o_acc * alpha[:, None]
+
+            v_ptrs = v_base + offs_n[:, None] * D + offs_d[None, :]
+            v_tile = tl.load(v_ptrs, mask=n_mask[:, None], other=0.0)
+            o_acc += tl.dot(p.to(tl.bfloat16), v_tile, out_dtype=tl.float32)
+
+            m_i = m_new
+
+        o_acc = o_acc / l_i[:, None]
+
+        o_ptrs = o_base + offs_m[:, None] * D + offs_d[None, :]
+        tl.store(o_ptrs, o_acc.to(tl.bfloat16), mask=q_mask[:, None])

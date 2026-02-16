@@ -1,0 +1,808 @@
+{
+  "dir_a": "F:\\dox\\repos\\ai\\futudiffu\\validation_renders\\replication_test\\run_a",
+  "dir_b": "F:\\dox\\repos\\ai\\futudiffu\\validation_renders\\replication_test\\run_b",
+  "common_steps": [
+    -1,
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29
+  ],
+  "per_step": {
+    "final": {
+      "mse": 0.0,
+      "l2_residual": 0.0,
+      "l2_reference": 466.8022766113281,
+      "relative_error": 0.0,
+      "cosine_similarity": 1.0,
+      "max_abs_diff": 0.0,
+      "mean_abs_diff": 0.0,
+      "covariance": {
+        "eigenspectrum": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "effective_rank": 0.0,
+        "top_3_eigenvalues": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "trace": 0.0,
+        "per_channel_std": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "per_channel_mean": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "gaussianity": {
+        "per_channel": [
+          {
+            "channel": 0,
+            "skewness": 0.0,
+            "kurtosis": 0.0,
+            "std": 0.0,
+            "mean": 0.0
+          },
+          {
+            "channel": 1,
+            "skewness": 0.0,
+            "kurtosis": 0.0,
+            "std": 0.0,
+            "mean": 0.0
+          },
+          {
+            "channel": 2,
+            "skewness": 0.0,
+            "kurtosis": 0.0,
+            "std": 0.0,
+            "mean": 0.0
+          },
+          {
+            "channel": 3,
+            "skewness": 0.0,
+            "kurtosis": 0.0,
+            "std": 0.0,
+            "mean": 0.0
+          },
+          {
+            "channel": 4,
+            "skewness": 0.0,
+            "kurtosis": 0.0,
+            "std": 0.0,
+            "mean": 0.0
+          },
+          {
+            "channel": 5,
+            "skewness": 0.0,
+            "kurtosis": 0.0,
+            "std": 0.0,
+            "mean": 0.0
+          },
+          {
+            "channel": 6,
+            "skewness": 0.0,
+            "kurtosis": 0.0,
+            "std": 0.0,
+            "mean": 0.0
+          },
+          {
+            "channel": 7,
+            "skewness": 0.0,
+            "kurtosis": 0.0,
+            "std": 0.0,
+            "mean": 0.0
+          },
+          {
+            "channel": 8,
+            "skewness": 0.0,
+            "kurtosis": 0.0,
+            "std": 0.0,
+            "mean": 0.0
+          },
+          {
+            "channel": 9,
+            "skewness": 0.0,
+            "kurtosis": 0.0,
+            "std": 0.0,
+            "mean": 0.0
+          },
+          {
+            "channel": 10,
+            "skewness": 0.0,
+            "kurtosis": 0.0,
+            "std": 0.0,
+            "mean": 0.0
+          },
+          {
+            "channel": 11,
+            "skewness": 0.0,
+            "kurtosis": 0.0,
+            "std": 0.0,
+            "mean": 0.0
+          },
+          {
+            "channel": 12,
+            "skewness": 0.0,
+            "kurtosis": 0.0,
+            "std": 0.0,
+            "mean": 0.0
+          },
+          {
+            "channel": 13,
+            "skewness": 0.0,
+            "kurtosis": 0.0,
+            "std": 0.0,
+            "mean": 0.0
+          },
+          {
+            "channel": 14,
+            "skewness": 0.0,
+            "kurtosis": 0.0,
+            "std": 0.0,
+            "mean": 0.0
+          },
+          {
+            "channel": 15,
+            "skewness": 0.0,
+            "kurtosis": 0.0,
+            "std": 0.0,
+            "mean": 0.0
+          }
+        ],
+        "has_scipy": false,
+        "summary": {
+          "mean_abs_skewness": 0.0,
+          "mean_excess_kurtosis": 0.0,
+          "total_channels": 16
+        }
+      },
+      "spectral": {
+        "radial_power_spectrum": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "spectral_flatness": 0.0,
+        "peak_to_dc_ratio": 0.0,
+        "dc_power": 0.0
+      },
+      "residual_saved": "F:\\dox\\repos\\ai\\futudiffu\\validation_renders\\replication_test\\residual_analysis\\residual_final.npy"
+    },
+    "0": {
+      "mse": 0.0,
+      "l2_residual": 0.0,
+      "l2_reference": 515.6245727539062,
+      "relative_error": 0.0,
+      "cosine_similarity": 1.0,
+      "max_abs_diff": 0.0,
+      "mean_abs_diff": 0.0
+    },
+    "1": {
+      "mse": 0.0,
+      "l2_residual": 0.0,
+      "l2_reference": 504.0037536621094,
+      "relative_error": 0.0,
+      "cosine_similarity": 1.0,
+      "max_abs_diff": 0.0,
+      "mean_abs_diff": 0.0
+    },
+    "2": {
+      "mse": 0.0,
+      "l2_residual": 0.0,
+      "l2_reference": 489.4688720703125,
+      "relative_error": 0.0,
+      "cosine_similarity": 0.9999999403953552,
+      "max_abs_diff": 0.0,
+      "mean_abs_diff": 0.0
+    },
+    "3": {
+      "mse": 0.0,
+      "l2_residual": 0.0,
+      "l2_reference": 474.3102111816406,
+      "relative_error": 0.0,
+      "cosine_similarity": 1.0,
+      "max_abs_diff": 0.0,
+      "mean_abs_diff": 0.0
+    },
+    "4": {
+      "mse": 0.0,
+      "l2_residual": 0.0,
+      "l2_reference": 461.677490234375,
+      "relative_error": 0.0,
+      "cosine_similarity": 1.0,
+      "max_abs_diff": 0.0,
+      "mean_abs_diff": 0.0
+    },
+    "5": {
+      "mse": 0.0,
+      "l2_residual": 0.0,
+      "l2_reference": 449.336181640625,
+      "relative_error": 0.0,
+      "cosine_similarity": 1.0,
+      "max_abs_diff": 0.0,
+      "mean_abs_diff": 0.0
+    },
+    "6": {
+      "mse": 0.0,
+      "l2_residual": 0.0,
+      "l2_reference": 434.75958251953125,
+      "relative_error": 0.0,
+      "cosine_similarity": 1.0,
+      "max_abs_diff": 0.0,
+      "mean_abs_diff": 0.0
+    },
+    "7": {
+      "mse": 0.0,
+      "l2_residual": 0.0,
+      "l2_reference": 420.8424987792969,
+      "relative_error": 0.0,
+      "cosine_similarity": 1.0000001192092896,
+      "max_abs_diff": 0.0,
+      "mean_abs_diff": 0.0
+    },
+    "8": {
+      "mse": 0.0,
+      "l2_residual": 0.0,
+      "l2_reference": 409.1175842285156,
+      "relative_error": 0.0,
+      "cosine_similarity": 0.9999998807907104,
+      "max_abs_diff": 0.0,
+      "mean_abs_diff": 0.0
+    },
+    "9": {
+      "mse": 0.0,
+      "l2_residual": 0.0,
+      "l2_reference": 396.7349853515625,
+      "relative_error": 0.0,
+      "cosine_similarity": 1.0,
+      "max_abs_diff": 0.0,
+      "mean_abs_diff": 0.0
+    },
+    "10": {
+      "mse": 0.0,
+      "l2_residual": 0.0,
+      "l2_reference": 387.0118103027344,
+      "relative_error": 0.0,
+      "cosine_similarity": 0.9999998807907104,
+      "max_abs_diff": 0.0,
+      "mean_abs_diff": 0.0
+    },
+    "11": {
+      "mse": 0.0,
+      "l2_residual": 0.0,
+      "l2_reference": 377.16455078125,
+      "relative_error": 0.0,
+      "cosine_similarity": 1.0,
+      "max_abs_diff": 0.0,
+      "mean_abs_diff": 0.0
+    },
+    "12": {
+      "mse": 0.0,
+      "l2_residual": 0.0,
+      "l2_reference": 369.705810546875,
+      "relative_error": 0.0,
+      "cosine_similarity": 1.0,
+      "max_abs_diff": 0.0,
+      "mean_abs_diff": 0.0
+    },
+    "13": {
+      "mse": 0.0,
+      "l2_residual": 0.0,
+      "l2_reference": 362.9397888183594,
+      "relative_error": 0.0,
+      "cosine_similarity": 1.0,
+      "max_abs_diff": 0.0,
+      "mean_abs_diff": 0.0
+    },
+    "14": {
+      "mse": 0.0,
+      "l2_residual": 0.0,
+      "l2_reference": 358.2406311035156,
+      "relative_error": 0.0,
+      "cosine_similarity": 0.9999999403953552,
+      "max_abs_diff": 0.0,
+      "mean_abs_diff": 0.0
+    },
+    "15": {
+      "mse": 0.0,
+      "l2_residual": 0.0,
+      "l2_reference": 354.47540283203125,
+      "relative_error": 0.0,
+      "cosine_similarity": 0.9999999403953552,
+      "max_abs_diff": 0.0,
+      "mean_abs_diff": 0.0
+    },
+    "16": {
+      "mse": 0.0,
+      "l2_residual": 0.0,
+      "l2_reference": 352.6029357910156,
+      "relative_error": 0.0,
+      "cosine_similarity": 1.0,
+      "max_abs_diff": 0.0,
+      "mean_abs_diff": 0.0
+    },
+    "17": {
+      "mse": 0.0,
+      "l2_residual": 0.0,
+      "l2_reference": 352.1566467285156,
+      "relative_error": 0.0,
+      "cosine_similarity": 0.9999999403953552,
+      "max_abs_diff": 0.0,
+      "mean_abs_diff": 0.0
+    },
+    "18": {
+      "mse": 0.0,
+      "l2_residual": 0.0,
+      "l2_reference": 353.3563537597656,
+      "relative_error": 0.0,
+      "cosine_similarity": 1.0,
+      "max_abs_diff": 0.0,
+      "mean_abs_diff": 0.0
+    },
+    "19": {
+      "mse": 0.0,
+      "l2_residual": 0.0,
+      "l2_reference": 356.03082275390625,
+      "relative_error": 0.0,
+      "cosine_similarity": 1.0000001192092896,
+      "max_abs_diff": 0.0,
+      "mean_abs_diff": 0.0
+    },
+    "20": {
+      "mse": 0.0,
+      "l2_residual": 0.0,
+      "l2_reference": 360.1377868652344,
+      "relative_error": 0.0,
+      "cosine_similarity": 1.0,
+      "max_abs_diff": 0.0,
+      "mean_abs_diff": 0.0
+    },
+    "21": {
+      "mse": 0.0,
+      "l2_residual": 0.0,
+      "l2_reference": 365.72930908203125,
+      "relative_error": 0.0,
+      "cosine_similarity": 1.0000001192092896,
+      "max_abs_diff": 0.0,
+      "mean_abs_diff": 0.0
+    },
+    "22": {
+      "mse": 0.0,
+      "l2_residual": 0.0,
+      "l2_reference": 372.6367492675781,
+      "relative_error": 0.0,
+      "cosine_similarity": 0.9999998807907104,
+      "max_abs_diff": 0.0,
+      "mean_abs_diff": 0.0
+    },
+    "23": {
+      "mse": 0.0,
+      "l2_residual": 0.0,
+      "l2_reference": 380.7706604003906,
+      "relative_error": 0.0,
+      "cosine_similarity": 1.0,
+      "max_abs_diff": 0.0,
+      "mean_abs_diff": 0.0
+    },
+    "24": {
+      "mse": 0.0,
+      "l2_residual": 0.0,
+      "l2_reference": 390.40252685546875,
+      "relative_error": 0.0,
+      "cosine_similarity": 0.9999998807907104,
+      "max_abs_diff": 0.0,
+      "mean_abs_diff": 0.0
+    },
+    "25": {
+      "mse": 0.0,
+      "l2_residual": 0.0,
+      "l2_reference": 400.7131042480469,
+      "relative_error": 0.0,
+      "cosine_similarity": 1.0,
+      "max_abs_diff": 0.0,
+      "mean_abs_diff": 0.0
+    },
+    "26": {
+      "mse": 0.0,
+      "l2_residual": 0.0,
+      "l2_reference": 412.20806884765625,
+      "relative_error": 0.0,
+      "cosine_similarity": 0.9999998807907104,
+      "max_abs_diff": 0.0,
+      "mean_abs_diff": 0.0
+    },
+    "27": {
+      "mse": 0.0,
+      "l2_residual": 0.0,
+      "l2_reference": 424.777099609375,
+      "relative_error": 0.0,
+      "cosine_similarity": 1.0,
+      "max_abs_diff": 0.0,
+      "mean_abs_diff": 0.0
+    },
+    "28": {
+      "mse": 0.0,
+      "l2_residual": 0.0,
+      "l2_reference": 438.0486145019531,
+      "relative_error": 0.0,
+      "cosine_similarity": 1.0,
+      "max_abs_diff": 0.0,
+      "mean_abs_diff": 0.0
+    },
+    "29": {
+      "mse": 0.0,
+      "l2_residual": 0.0,
+      "l2_reference": 451.6335144042969,
+      "relative_error": 0.0,
+      "cosine_similarity": 0.9999999403953552,
+      "max_abs_diff": 0.0,
+      "mean_abs_diff": 0.0,
+      "covariance": {
+        "eigenspectrum": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "effective_rank": 0.0,
+        "top_3_eigenvalues": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "trace": 0.0,
+        "per_channel_std": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "per_channel_mean": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "gaussianity": {
+        "per_channel": [
+          {
+            "channel": 0,
+            "skewness": 0.0,
+            "kurtosis": 0.0,
+            "std": 0.0,
+            "mean": 0.0
+          },
+          {
+            "channel": 1,
+            "skewness": 0.0,
+            "kurtosis": 0.0,
+            "std": 0.0,
+            "mean": 0.0
+          },
+          {
+            "channel": 2,
+            "skewness": 0.0,
+            "kurtosis": 0.0,
+            "std": 0.0,
+            "mean": 0.0
+          },
+          {
+            "channel": 3,
+            "skewness": 0.0,
+            "kurtosis": 0.0,
+            "std": 0.0,
+            "mean": 0.0
+          },
+          {
+            "channel": 4,
+            "skewness": 0.0,
+            "kurtosis": 0.0,
+            "std": 0.0,
+            "mean": 0.0
+          },
+          {
+            "channel": 5,
+            "skewness": 0.0,
+            "kurtosis": 0.0,
+            "std": 0.0,
+            "mean": 0.0
+          },
+          {
+            "channel": 6,
+            "skewness": 0.0,
+            "kurtosis": 0.0,
+            "std": 0.0,
+            "mean": 0.0
+          },
+          {
+            "channel": 7,
+            "skewness": 0.0,
+            "kurtosis": 0.0,
+            "std": 0.0,
+            "mean": 0.0
+          },
+          {
+            "channel": 8,
+            "skewness": 0.0,
+            "kurtosis": 0.0,
+            "std": 0.0,
+            "mean": 0.0
+          },
+          {
+            "channel": 9,
+            "skewness": 0.0,
+            "kurtosis": 0.0,
+            "std": 0.0,
+            "mean": 0.0
+          },
+          {
+            "channel": 10,
+            "skewness": 0.0,
+            "kurtosis": 0.0,
+            "std": 0.0,
+            "mean": 0.0
+          },
+          {
+            "channel": 11,
+            "skewness": 0.0,
+            "kurtosis": 0.0,
+            "std": 0.0,
+            "mean": 0.0
+          },
+          {
+            "channel": 12,
+            "skewness": 0.0,
+            "kurtosis": 0.0,
+            "std": 0.0,
+            "mean": 0.0
+          },
+          {
+            "channel": 13,
+            "skewness": 0.0,
+            "kurtosis": 0.0,
+            "std": 0.0,
+            "mean": 0.0
+          },
+          {
+            "channel": 14,
+            "skewness": 0.0,
+            "kurtosis": 0.0,
+            "std": 0.0,
+            "mean": 0.0
+          },
+          {
+            "channel": 15,
+            "skewness": 0.0,
+            "kurtosis": 0.0,
+            "std": 0.0,
+            "mean": 0.0
+          }
+        ],
+        "has_scipy": false,
+        "summary": {
+          "mean_abs_skewness": 0.0,
+          "mean_excess_kurtosis": 0.0,
+          "total_channels": 16
+        }
+      },
+      "spectral": {
+        "radial_power_spectrum": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "spectral_flatness": 0.0,
+        "peak_to_dc_ratio": 0.0,
+        "dc_power": 0.0
+      },
+      "residual_saved": "F:\\dox\\repos\\ai\\futudiffu\\validation_renders\\replication_test\\residual_analysis\\residual_29.npy"
+    }
+  }
+}

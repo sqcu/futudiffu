@@ -312,3 +312,366 @@ def forward_checkpointed(
     )[:, :, :h, :w]
 
     return -img, last_hidden
+
+
+def forward_no_grad(
+    model: nn.Module,
+    x: Tensor,
+    timesteps: Tensor,
+    context: Tensor,
+    num_tokens: int,
+    rope_cache: dict,
+) -> Tensor:
+    """Model forward under torch.no_grad() with no checkpointing.
+
+    Same architecture as forward_checkpointed but optimized for the reference
+    pass in REINFORCE: no gradient graph, no checkpoint storage, no
+    last_hidden capture.
+
+    Returns:
+        -img output only.
+    """
+    from .diffusion_model import pad_to_patch_size, pad_zimage
+
+    with torch.no_grad():
+        t = 1 - timesteps
+        bs, c, h, w = x.shape
+        x_padded = pad_to_patch_size(x, (model.patch_size, model.patch_size))
+
+        t_emb = model.t_embedder(t * model.time_scale, dtype=x.dtype)
+        adaln_input = t_emb
+
+        bsz = x_padded.shape[0]
+        pH = pW = model.patch_size
+
+        cap_feats_embedded = model.cap_embedder(context)
+        if model.pad_tokens_multiple is not None:
+            cap_feats_embedded, _ = pad_zimage(
+                cap_feats_embedded, model.cap_pad_token, model.pad_tokens_multiple
+            )
+
+        B, C, H, W = x_padded.shape
+        x_patches = model.x_embedder(
+            x_padded.view(B, C, H // pH, pH, W // pW, pW)
+            .permute(0, 2, 4, 3, 5, 1).flatten(3).flatten(1, 2)
+        )
+        if model.pad_tokens_multiple is not None:
+            x_patches, _ = pad_zimage(
+                x_patches, model.x_pad_token, model.pad_tokens_multiple
+            )
+
+        img_len = x_patches.shape[1]
+
+        cap_freqs_cis = rope_cache['cap_freqs_cis']
+        x_freqs_cis = rope_cache['x_freqs_cis']
+        freqs_cis = rope_cache['freqs_cis']
+        if bsz > 1 and cap_freqs_cis.shape[0] == 1:
+            cap_freqs_cis = cap_freqs_cis.expand(bsz, -1, -1, -1, -1, -1)
+            x_freqs_cis = x_freqs_cis.expand(bsz, -1, -1, -1, -1, -1)
+            freqs_cis = freqs_cis.expand(bsz, -1, -1, -1, -1, -1)
+
+        for layer in model.context_refiner:
+            cap_feats_embedded = layer(cap_feats_embedded, None, cap_freqs_cis)
+        for layer in model.noise_refiner:
+            x_patches = layer(x_patches, None, x_freqs_cis, adaln_input)
+
+        embed = torch.cat([cap_feats_embedded, x_patches], dim=1)
+        l_effective_cap_len = [embed.shape[1] - img_len] * bsz
+        img_sizes = [(H, W)] * bsz
+
+        # Main layers (no checkpointing, no grad)
+        for layer in model.layers:
+            embed = layer(embed, None, freqs_cis, adaln_input)
+
+        # Final layer
+        img = model.final_layer(embed, adaln_input)
+        img = model.unpatchify(
+            img, img_sizes, l_effective_cap_len, return_tensor=True
+        )[:, :, :h, :w]
+
+    return -img
+
+
+# ---------------------------------------------------------------------------
+# REINFORCE log-ratio computation (per-step)
+# ---------------------------------------------------------------------------
+
+def compute_reinforce_step(
+    model: nn.Module,
+    x_t: Tensor,
+    sigma: Tensor,
+    conditioning: Tensor,
+    num_tokens: int,
+    rope_cache: dict,
+    multiplier: float,
+    advantage: float,
+    adapter_name: str,
+) -> float:
+    """Compute REINFORCE log-ratio for one step and backward into model params.
+
+    Runs two separate B=1 passes instead of one concurrent B=2 batch:
+      1. Reference forward: no_grad, scale=0 (no LoRA, no grad graph)
+      2. Policy forward: checkpointed, scale=1.0 (full grad)
+
+    This halves backward FLOPs and checkpoint memory vs the old B=2 approach
+    since backward only recomputes 30 layers for B=1 (policy) instead of B=2.
+
+    Args:
+        model: Diffusion model with LoRA adapters.
+        x_t: (1, C, H, W) checkpoint latent at this step.
+        sigma: Scalar sigma value for this step.
+        conditioning: (1, seq, dim) text conditioning (positive only).
+        num_tokens: Number of text tokens.
+        rope_cache: Pre-computed RoPE cache.
+        multiplier: Timestep multiplier.
+        advantage: Advantage weight for this rollout.
+        adapter_name: Which LoRA adapter to differentiate.
+
+    Returns:
+        Log-ratio value (detached float) for this step.
+    """
+    from .lora import set_lora_scale
+    from .sampling import const_calculate_denoised
+
+    device = x_t.device
+    dtype = x_t.dtype
+    timestep = sigma * multiplier
+
+    # 1. Reference forward: no_grad, scale=0 (no LoRA effect)
+    set_lora_scale(
+        model, torch.tensor([0.0], device=device, dtype=dtype),
+        adapter_name=adapter_name,
+    )
+    ref_output = forward_no_grad(
+        model, x_t, timestep.unsqueeze(0), conditioning, num_tokens, rope_cache,
+    )
+    ref_denoised = const_calculate_denoised(sigma, ref_output, x_t)
+
+    # 2. Policy forward: checkpointed, scale=1.0
+    set_lora_scale(
+        model, torch.tensor([1.0], device=device, dtype=dtype),
+        adapter_name=adapter_name,
+    )
+    pi_output, _ = forward_checkpointed(
+        model, x_t, timestep.unsqueeze(0), conditioning, num_tokens, rope_cache,
+    )
+    pi_denoised = const_calculate_denoised(sigma, pi_output, x_t)
+
+    # 3. Loss (ref_denoised has no grad from the no_grad block)
+    diff = pi_denoised - ref_denoised
+    mse = (diff * diff).sum()
+    log_ratio = -mse / (2.0 * sigma * sigma + 1e-10)
+
+    step_loss = -advantage * log_ratio
+    step_loss.backward()
+
+    return log_ratio.detach().item()
+
+
+# ---------------------------------------------------------------------------
+# Server-side training orchestration (extracted from server.py handlers)
+# ---------------------------------------------------------------------------
+
+def run_backbone_hidden(diff_model, latent, sigma, conditioning, device, dtype,
+                        multiplier=1.0, requires_grad=False):
+    """Run frozen backbone and return hidden states from last transformer block.
+
+    Args:
+        diff_model: Raw (uncompiled) diffusion model.
+        latent: (B, 16, H, W) noisy latent.
+        sigma: (B,) sigma values.
+        conditioning: (B, seq, dim) text conditioning.
+        device: CUDA device.
+        dtype: Working dtype.
+        multiplier: Timestep multiplier.
+        requires_grad: If True, use no_grad (allows downstream grad graphs).
+            If False, use inference_mode for max performance.
+
+    Returns:
+        Hidden states (B, N_tokens, hidden_dim) on GPU.
+    """
+    from .sampling import make_rope_cache
+
+    latent = latent.to(device=device, dtype=dtype)
+    sigma = sigma.to(device=device, dtype=dtype)
+    conditioning = conditioning.to(device=device, dtype=dtype)
+
+    timestep = sigma * multiplier
+    num_tokens = conditioning.shape[1]
+
+    B, C, H, W = latent.shape
+    rope_cache = make_rope_cache(diff_model, H, W, num_tokens, device)
+
+    capture = HiddenCapture(diff_model)
+    capture.install()
+    try:
+        ctx = torch.no_grad() if requires_grad else torch.inference_mode()
+        with ctx:
+            diff_model(
+                latent, timestep, conditioning,
+                num_tokens=num_tokens, rope_cache=rope_cache,
+            )
+    finally:
+        capture.remove()
+
+    return capture.get()
+
+
+def train_btrm_step(diff_model, btrm_head, btrm_optimizer, device, dtype,
+                    params, tensors):
+    """Complete BTRM training step: forward N examples, BT loss, backward, step.
+
+    Args:
+        diff_model: Raw diffusion model (for backbone hidden capture).
+        btrm_head: BTRMHead module (trainable).
+        btrm_optimizer: Optimizer for btrm_head parameters.
+        device: CUDA device.
+        dtype: Working dtype.
+        params: RPC params (labels, logsquare_weight, multiplier).
+        tensors: RPC tensors (latent_N, sigma_N, conditioning_N).
+
+    Returns:
+        Metadata dict with loss, bt_loss, logsq_loss, per_head_accuracy, etc.
+    """
+    from .btrm import compute_labeled_btrm_loss
+
+    labels = params["labels"]
+    logsq_weight = params.get("logsquare_weight", 0.1)
+    multiplier = params.get("multiplier", 1.0)
+    n_examples = len(labels)
+
+    all_scores = []
+    for i in range(n_examples):
+        hidden = run_backbone_hidden(
+            diff_model,
+            tensors[f"latent_{i}"], tensors[f"sigma_{i}"],
+            tensors[f"conditioning_{i}"],
+            device, dtype,
+            multiplier=multiplier, requires_grad=True,
+        )
+        scores = btrm_head(hidden)  # (1, N_heads)
+        all_scores.append(scores.squeeze(0))  # (N_heads,)
+
+    all_scores = torch.stack(all_scores)  # (N, N_heads)
+
+    loss_result = compute_labeled_btrm_loss(
+        all_scores, labels, btrm_head.head_names,
+        logsquare_weight=logsq_weight,
+    )
+    loss = loss_result["loss"]
+
+    btrm_optimizer.zero_grad()
+    loss.backward()
+    btrm_optimizer.step()
+
+    return {
+        "loss": loss.item(),
+        "bt_loss": loss_result["bt_loss"].item(),
+        "logsq_loss": loss_result["logsq_loss"].item(),
+        "per_head_accuracy": loss_result["per_head_accuracy"],
+        "n_examples": n_examples,
+        "active_heads": loss_result["active_heads"],
+    }
+
+
+def accumulate_policy_gradients(diff_model, device, dtype, params, tensors):
+    """Accumulate REINFORCE gradients for a LoRA adapter.
+
+    Runs two separate B=1 forwards (ref under no_grad, pi with checkpointing)
+    at each sparse step, computes MSE-based log-ratio, and backwards into LoRA
+    params. Scale management is per-pass inside compute_reinforce_step.
+
+    Args:
+        diff_model: Raw diffusion model with LoRA adapters.
+        device: CUDA device.
+        dtype: Working dtype.
+        params: RPC params (adapter_name, sparse_steps, advantage, multiplier).
+        tensors: RPC tensors (checkpoint_N, sigmas, conditioning).
+
+    Returns:
+        Metadata dict with total_log_ratio and n_steps.
+    """
+    from .lora import clear_lora_scale, get_lora_params
+    from .sampling import make_rope_cache
+
+    adapter_name = params["adapter_name"]
+    sparse_steps = params["sparse_steps"]
+    advantage = params["advantage"]
+    multiplier = params.get("multiplier", 1.0)
+
+    conditioning = tensors["conditioning"].to(device=device, dtype=dtype)
+    sigmas = tensors["sigmas"].to(device=device, dtype=dtype)
+
+    # Enable gradients on target LoRA params (don't zero -- accumulate)
+    lora_params = list(get_lora_params(diff_model, adapter_name=adapter_name))
+    for p in lora_params:
+        p.requires_grad_(True)
+
+    # RoPE cache from first checkpoint
+    first_key = f"checkpoint_{sparse_steps[0]}"
+    sample_latent = tensors[first_key]
+    B, C, H, W = sample_latent.shape
+    num_tokens = conditioning.shape[1]
+    rope_cache = make_rope_cache(diff_model, H, W, num_tokens, device)
+
+    total_log_ratio = 0.0
+    for step_idx in sparse_steps:
+        x_t = tensors[f"checkpoint_{step_idx}"].to(device=device, dtype=dtype)
+        step_lr = compute_reinforce_step(
+            diff_model, x_t, sigmas[step_idx], conditioning,
+            num_tokens, rope_cache, multiplier, advantage,
+            adapter_name=adapter_name,
+        )
+        total_log_ratio += step_lr
+
+    # Reset scale to broadcast 1.0
+    clear_lora_scale(diff_model, adapter_name=adapter_name)
+    torch.cuda.empty_cache()
+
+    return {
+        "total_log_ratio": total_log_ratio,
+        "n_steps": len(sparse_steps),
+    }
+
+
+def policy_optimizer_step(diff_model, policy_optimizers, device, dtype, params):
+    """Clip gradients, step policy optimizer, zero gradients.
+
+    Lazy-initializes the optimizer on first call for each adapter.
+
+    Args:
+        diff_model: Raw diffusion model with LoRA adapters.
+        policy_optimizers: Dict mapping adapter_name -> optimizer (mutated).
+        device: CUDA device.
+        dtype: Working dtype.
+        params: RPC params (adapter_name, max_grad_norm, lr).
+
+    Returns:
+        Metadata dict with grad_norm and n_params.
+    """
+    from .lora import get_lora_params
+
+    adapter_name = params["adapter_name"]
+    max_grad_norm = params.get("max_grad_norm", 1.0)
+    lr = params.get("lr", 1e-4)
+
+    lora_params = list(get_lora_params(diff_model, adapter_name=adapter_name))
+
+    # Lazy-init optimizer on first call
+    if adapter_name not in policy_optimizers:
+        policy_optimizers[adapter_name] = torch.optim.AdamW(lora_params, lr=lr)
+
+    optimizer = policy_optimizers[adapter_name]
+
+    grad_norm = torch.nn.utils.clip_grad_norm_(lora_params, max_grad_norm)
+    optimizer.step()
+
+    for p in lora_params:
+        if p.grad is not None:
+            p.grad = None
+
+    grad_norm_val = grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm
+    return {
+        "grad_norm": grad_norm_val,
+        "n_params": len(lora_params),
+    }

@@ -1,0 +1,15 @@
+Inference server listening on tcp://*:5555
+  Models: diff=F:\dox\ai\comfyui\ComfyUI\models\diffusion_models\z_image_fp8_blockwise.safetensors
+          te=F:\dox\ai\comfyui\ComfyUI\models\text_encoders\qwen_3_4b.safetensors
+          vae=F:\dox\ai\comfyui\ComfyUI\models\vae\zimage.safetensors
+  Device: cuda, dtype: torch.bfloat16
+  [status] ... 0.01s
+  [encode_prompt] ...  [lifecycle] TE loaded (torch.bfloat16)
+ 8.15s
+  [encode_prompt] ... 4.73s
+  [warmup] ...  [lifecycle] Diffusion loaded (FP8, fused, compiled) in 2.1s
+  [warmup] sdpa done
+ 41.97s
+  [status] ... 0.00s
+  [sample_trajectory] ... 44.58s
+  [vae_decode] ...

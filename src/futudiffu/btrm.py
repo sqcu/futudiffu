@@ -282,6 +282,79 @@ def compute_multihead_loss(
     }
 
 
+def compute_labeled_btrm_loss(
+    all_scores: Tensor,
+    labels: list[dict],
+    head_names: Sequence[str],
+    logsquare_weight: float = 0.1,
+) -> dict[str, Tensor | float]:
+    """Compute multi-head BT loss from flat per-example labels.
+
+    Each label dict has ``head_idx`` (int) and ``is_positive`` (bool).
+    Uses all-pairs BT loss within each head (cross-product of positives
+    and negatives) plus logsquare regularization on positives.
+
+    Args:
+        all_scores: (N, n_heads) scores from the BTRM head.
+        labels: Length-N list of dicts with head_idx, is_positive.
+        head_names: Ordered head names (for accuracy dict keys).
+        logsquare_weight: Weight for logsquare regularization.
+
+    Returns:
+        Dictionary with keys: loss, bt_loss, logsq_loss,
+        per_head_accuracy, active_heads.
+    """
+    n_heads = all_scores.size(1)
+    device = all_scores.device
+
+    total_bt = all_scores.new_zeros(())
+    total_logsq = all_scores.new_zeros(())
+    active_heads = 0
+    per_head_accuracy: dict[str, float] = {}
+
+    for head_idx in range(n_heads):
+        pos_mask = torch.tensor(
+            [l["head_idx"] == head_idx and l["is_positive"] for l in labels],
+            device=device,
+        )
+        neg_mask = torch.tensor(
+            [l["head_idx"] == head_idx and not l["is_positive"] for l in labels],
+            device=device,
+        )
+
+        if pos_mask.sum() == 0 or neg_mask.sum() == 0:
+            continue
+
+        active_heads += 1
+        pos_scores = all_scores[pos_mask, head_idx]
+        neg_scores = all_scores[neg_mask, head_idx]
+
+        bt = bt_loss_allpairs(pos_scores, neg_scores)
+        total_bt = total_bt + bt
+
+        with torch.no_grad():
+            diff = pos_scores.unsqueeze(1) - neg_scores.unsqueeze(0)
+            acc = (diff > 0).float().mean().item()
+            per_head_accuracy[head_names[head_idx]] = acc
+
+        if logsquare_weight > 0:
+            total_logsq = total_logsq + logsquare_regularizer(pos_scores)
+
+    if active_heads > 0:
+        total_bt = total_bt / active_heads
+        total_logsq = total_logsq / active_heads
+
+    total_loss = total_bt + logsquare_weight * total_logsq
+
+    return {
+        "loss": total_loss,
+        "bt_loss": total_bt,
+        "logsq_loss": total_logsq,
+        "per_head_accuracy": per_head_accuracy,
+        "active_heads": active_heads,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Wrapper: frozen NextDiT backbone + BTRM head
 # ---------------------------------------------------------------------------

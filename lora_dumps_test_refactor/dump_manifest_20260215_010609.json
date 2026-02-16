@@ -1,0 +1,24 @@
+{
+  "timestamp": "20260215_010609",
+  "adapters": [
+    {
+      "adapter": "test_refactor",
+      "path": "F:\\dox\\repos\\ai\\futudiffu\\lora_dumps_test_refactor\\test_refactor_20260215_010609.safetensors",
+      "n_tensors": 204,
+      "rank": 8,
+      "alpha": 16.0,
+      "scale": 1.0
+    }
+  ],
+  "btrm_head": {
+    "path": "F:\\dox\\repos\\ai\\futudiffu\\lora_dumps_test_refactor\\btrm_head_20260215_010609.safetensors",
+    "n_tensors": 2,
+    "config": {
+      "hidden_dim": 3840,
+      "head_names": [
+        "test_quality"
+      ],
+      "logit_cap": 10.0
+    }
+  }
+}

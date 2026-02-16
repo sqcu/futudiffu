@@ -180,6 +180,94 @@ def sage_attn_forward(
     return out.reshape(B, H, N, D)
 
 
+def sage_attn_forward_masked(
+    q: Tensor, k: Tensor, v: Tensor,
+    block_mask: Tensor,
+    sm_scale: float | None = None,
+) -> Tensor:
+    """SageAttention forward pass with block-level attention mask (no LSE, no grad).
+
+    Dispatches to the masked FP8 or INT8 QK^T kernel variant.
+
+    The block_mask is a uint8 tensor of shape (BH, n_q_blocks, n_kv_blocks)
+    or (n_q_blocks, n_kv_blocks). A value of 1 means "compute this block pair",
+    0 means "skip entirely" (the query block will see -inf for these KV positions).
+
+    This is used for packed multi-image inference where different images in the
+    same packed sequence must not attend to each other.
+
+    Args:
+        q, k, v: (B, H, N, D) tensors in BF16 on CUDA.
+        block_mask: uint8 tensor, (BH, n_q_blocks, n_kv_blocks) or
+            (n_q_blocks, n_kv_blocks). Will be broadcast across BH if 2D.
+        sm_scale: Softmax scale factor (1/sqrt(D)). Computed from D if None.
+
+    Returns:
+        out: (B, H, N, D) tensor in BF16.
+    """
+    import triton
+
+    B, H, N, D = q.shape
+    assert D == 128, f"SageAttention currently requires head_dim=128, got {D}"
+    assert q.dtype == torch.bfloat16, f"Expected BF16 input, got {q.dtype}"
+
+    if _SAGE_SMOOTH_K:
+        k = _smooth_k(k)
+
+    if sm_scale is None:
+        sm_scale = 1.0 / math.sqrt(D)
+    sm_scale_log2e = sm_scale * _LOG2E
+    fp8_max = torch.finfo(torch.float8_e4m3fn).max
+
+    BH = B * H
+    q = q.reshape(BH, N, D).contiguous()
+    k = k.reshape(BH, N, D).contiguous()
+    v = v.reshape(BH, N, D).contiguous()
+    out = torch.empty_like(q)
+
+    stride_z = N * D
+    BLOCK_M = 128
+    BLOCK_N = 64
+    grid = (triton.cdiv(N, BLOCK_M), BH)
+
+    n_q_blocks = triton.cdiv(N, BLOCK_M)
+    n_kv_blocks = triton.cdiv(N, BLOCK_N)
+
+    # Normalize block_mask shape to (BH, n_q_blocks, n_kv_blocks)
+    bm = block_mask.contiguous()
+    if bm.ndim == 2:
+        # (n_q_blocks, n_kv_blocks) -> broadcast: use stride_bm_z=0
+        stride_bm_z = 0
+    elif bm.ndim == 3:
+        # (BH, n_q_blocks, n_kv_blocks)
+        stride_bm_z = bm.shape[1] * bm.shape[2]
+    else:
+        raise ValueError(f"block_mask must be 2D or 3D, got {bm.ndim}D")
+
+    if _SAGE_QK_QUANT == "fp8":
+        from .sage_kernels import _sage_attn_fwd_fp8qk_bf16pv_masked
+        _sage_attn_fwd_fp8qk_bf16pv_masked[grid](
+            q, k, v, out,
+            bm,
+            stride_z, stride_bm_z, N, n_kv_blocks, sm_scale_log2e,
+            FP8_MAX=fp8_max, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, D=D,
+            HAS_BLOCK_MASK=True,
+            num_warps=4, num_stages=1,
+        )
+    elif _SAGE_QK_QUANT == "int8":
+        from .sage_kernels import _sage_attn_fwd_int8qk_bf16pv_masked
+        _sage_attn_fwd_int8qk_bf16pv_masked[grid](
+            q, k, v, out,
+            bm,
+            stride_z, stride_bm_z, N, n_kv_blocks, sm_scale_log2e,
+            BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, D=D,
+            HAS_BLOCK_MASK=True,
+            num_warps=4, num_stages=1,
+        )
+
+    return out.reshape(B, H, N, D)
+
+
 def sage_attn_forward_with_lse(
     q: Tensor, k: Tensor, v: Tensor, sm_scale: float | None = None
 ) -> tuple[Tensor, Tensor]:

@@ -347,6 +347,20 @@ def freeze_adapter(model: nn.Module, adapter_name: str) -> int:
     return n
 
 
+def unfreeze_adapter(model: nn.Module, adapter_name: str) -> int:
+    """Unfreeze adapter params (requires_grad=True). Returns count unfrozen."""
+    n = 0
+    for module in model.modules():
+        if not isinstance(module, LoRALinear):
+            continue
+        if adapter_name in module.adapters:
+            a = module.adapters[adapter_name]
+            a.lora_A.requires_grad_(True)
+            a.lora_B.requires_grad_(True)
+            n += 1
+    return n
+
+
 # ---------------------------------------------------------------------------
 # State dict
 # ---------------------------------------------------------------------------
@@ -437,3 +451,83 @@ def count_lora_params(
     lora_count = sum(p.numel() for p in get_lora_params(model, adapter_name))
     total_count = sum(p.numel() for p in model.parameters())
     return lora_count, total_count
+
+
+# ---------------------------------------------------------------------------
+# Emergency dump
+# ---------------------------------------------------------------------------
+
+def dump_all_loras(
+    model: nn.Module,
+    output_dir,
+    btrm_head: Optional[nn.Module] = None,
+    btrm_config: Optional[dict] = None,
+) -> dict:
+    """Dump all LoRA adapters (and optionally BTRM head) to disk.
+
+    Writes each adapter as a separate safetensors file plus a JSON manifest.
+
+    Args:
+        model: Model with LoRA adapters.
+        output_dir: Path or str for output directory.
+        btrm_head: Optional BTRM head to include in the dump.
+        btrm_config: Optional config dict for the BTRM head.
+
+    Returns:
+        Dict with keys: files (list), manifest (str path), btrm_head (dict or None).
+    """
+    import json as _json
+    import time
+    from pathlib import Path
+
+    from safetensors.torch import save_file as st_save
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    adapters = enumerate_adapters(model)
+    if not adapters:
+        return {"files": [], "manifest": None, "btrm_head": None,
+                "note": "no adapters found"}
+
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    files = []
+    for adapter_name, info in adapters.items():
+        sd = lora_state_dict(model, adapter_name=adapter_name)
+        sd_cpu = {k: v.cpu() for k, v in sd.items()}
+        fname = f"{adapter_name}_{timestamp}.safetensors"
+        fpath = output_dir / fname
+        st_save(sd_cpu, str(fpath))
+        files.append({
+            "adapter": adapter_name,
+            "path": str(fpath),
+            "n_tensors": len(sd_cpu),
+            "rank": info["rank"],
+            "alpha": info["alpha"],
+            "scale": info["scale"],
+        })
+        print(f"  [dump_all_loras] {adapter_name}: "
+              f"{len(sd_cpu)} tensors -> {fpath}")
+
+    btrm_file = None
+    if btrm_head is not None:
+        btrm_sd = {k: v.cpu() for k, v in btrm_head.state_dict().items()}
+        btrm_fname = f"btrm_head_{timestamp}.safetensors"
+        btrm_fpath = output_dir / btrm_fname
+        st_save(btrm_sd, str(btrm_fpath))
+        btrm_file = {
+            "path": str(btrm_fpath),
+            "n_tensors": len(btrm_sd),
+            "config": btrm_config,
+        }
+        print(f"  [dump_all_loras] BTRM head: {len(btrm_sd)} tensors -> {btrm_fpath}")
+
+    manifest_path = output_dir / f"dump_manifest_{timestamp}.json"
+    manifest = {"timestamp": timestamp, "adapters": files}
+    if btrm_file is not None:
+        manifest["btrm_head"] = btrm_file
+    with open(manifest_path, "w") as f:
+        _json.dump(manifest, f, indent=2)
+
+    print(f"  [dump_all_loras] {len(files)} adapter(s) dumped to {output_dir}")
+    return {"files": files, "manifest": str(manifest_path), "btrm_head": btrm_file}

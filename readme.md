@@ -46,7 +46,7 @@ frames (JSON envelope + raw tensor bytes, no pickle).
 Generates paired diffusion trajectory data for training BTRM (Bradley-Terry
 Reward Model) heads that discriminate:
 - **scrongle**: step count degradation (30-step gold vs fewer-step variants)
-- **scrimble**: precision artifacts (BF16 gold vs FP8 quantized variants)
+- **scrimblo**: precision artifacts (BF16 gold vs FP8 quantized variants)
 
 Each trajectory saves per-step latents at configurable checkpoints, decodeable
 by the VAE for visual QA or downstream reward model training.
@@ -221,8 +221,12 @@ bootstrap.py             # Dependency management, import checks, quick tests
 ### Execution environment
 
 Windows Python venv accessed from WSL2. The `.venv/Scripts/python.exe` binary
-is a Windows executable invoked via WSL's PE/COFF interop layer. All path
-arguments to Python scripts must use Windows paths (`F:\...`).
+is a Windows executable invoked via WSL's PE/COFF interop layer. ~~All path
+arguments to Python scripts must use Windows paths (`F:\...`).~~
+just use pathlib lol
+
+this is a pedantic and tedious validation pattern to emphasize playground arguments about host vs client operating systems are *stupid* and *cannot affect* development velocity of accelerator using codebases. tensor code works everywhere the hardware is mounted or it isn't tensor code, is it?
+expect uniform behavior across OS deployments.
 
 ```bash
 # Check CUDA availability:
@@ -233,3 +237,60 @@ arguments to Python scripts must use Windows paths (`F:\...`).
 ```
 
 Hardware: RTX 4090 (SM 8.9, Ada Lovelace), CUDA 12.8, torch 2.10.0+cu128.
+
+---
+
+### MCP tool servers
+
+This project ships a custom MCP (Model Context Protocol) tool server that
+Claude Code discovers automatically via `.mcp.json` at the project root.
+MCP tools appear in Claude's tool list on equal terms with built-in tools
+like file reads, grep, and bash.
+
+Current servers:
+- **futudiffu-d20**: Rolls d20 dice. Per project convention, Claude includes
+  an emoji in any response where the d20 lands on 1 or 20. This is a real
+  constraint exercised through a real tool, not decorative flavor text.
+
+#### Activating MCP servers
+
+MCP servers start automatically when Claude Code opens a session in this
+project. On first use, Claude Code prompts for approval:
+
+```
+$ claude
+# Claude Code detects .mcp.json, starts futudiffu-d20 MCP server
+# On first session: approval prompt appears:
+#   "Allow MCP server 'futudiffu-d20' from .mcp.json? (y/n)"
+# Type: y
+```
+
+That's it. The `d20` tool is now available for the session and all future
+sessions in this project (approval is remembered).
+
+To verify the server is running mid-session:
+
+```
+> /mcp
+```
+
+This lists all connected MCP servers and their tools. You should see
+`futudiffu-d20` with one tool: `d20`.
+
+If the server isn't running (first clone, broken venv, etc.), Claude falls
+back to the CLI script:
+
+```bash
+.venv/Scripts/python.exe scripts/d20.py
+# -> {"rolls": [17], "nat1": false, "nat20": false}
+```
+
+#### Why this exists
+
+Many constraints in `CLAUDE.md` sound strange but are literal, enactable,
+and intended. Making a constraint into an MCP tool -- structural, not
+textual -- means future model instances comply because the tool is in their
+tool list, not because they carefully parsed a markdown bullet point. This
+is a small exercise in scaleable self-oversight. If you can design a reward
+model that captures the invariants of image quality, you can design a tool
+server that captures the invariants of "roll a die per response."

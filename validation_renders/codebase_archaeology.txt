@@ -1,0 +1,635 @@
+========================================================================
+CODEBASE ARCHAEOLOGY REPORT
+Covering: 2026-02-13 16:00 through 2026-02-14 19:07 (~27 hours)
+Generated: 2026-02-14 19:07
+Repository: /mnt/f/dox/repos/ai/futudiffu
+Git: 2 total commits (fd5c822, 4ee106a). Nearly all work is uncommitted.
+========================================================================
+
+
+======================================================================
+1. FILE MODIFICATION TIMELINE
+======================================================================
+
+All source files (.py) sorted by modification time, grouped by recency.
+Times are local (UTC offset from filesystem).
+
+--- MODIFIED IN THE LAST 2 HOURS (17:07 - 19:07) ---
+
+  19:06  ./analyze_residuals.py                   [NEW, UNTRACKED]
+  18:07  ./test_repro_traj004.py                  [NEW, UNTRACKED]
+  17:55  ./regen_stream_futudiffu.py              [NEW, UNTRACKED]
+  17:44  ./remote_node_bootstrap.py               [NEW, UNTRACKED]
+  17:44  ./src/futudiffu/server.py                [MODIFIED]
+  17:44  ./src/futudiffu/client.py                [MODIFIED]
+  17:33  ./validate_server_pipeline.py            [NEW, UNTRACKED]
+  16:56  ./src/futudiffu/fp8.py                   [MODIFIED]
+
+--- MODIFIED 2-8 HOURS AGO (11:07 - 17:07) ---
+
+  15:15  ./remote_tmux.py                         [NEW, UNTRACKED]
+  13:44  ./train.py                               [NEW, UNTRACKED]
+  13:43  ./pack_trajectories.py                   [NEW, UNTRACKED]
+
+--- MODIFIED 8-26 HOURS AGO (Feb 13 16:00 - Feb 14 11:07) ---
+
+  01:46  ./test_e2e_real_trajectories.py          [COMMITTED]
+  01:44  ./smoke_test_e2e_training.py             [COMMITTED]
+  00:56  ./test_lifecycle_and_dump.py             [COMMITTED]
+  00:53  ./src/futudiffu/lora.py                  [COMMITTED]
+  00:43  ./test_lora_save_load.py                 [COMMITTED]
+  00:35  ./generate_policy_eval.py                [COMMITTED]
+  00:23  ./src/futudiffu/lora_kernels.py          [COMMITTED]
+  00:22  ./test_lora_kernel_integration.py        [COMMITTED]
+  00:04  ./diff_renders.py                        [COMMITTED]
+  23:50  ./render_policy_comparison.py            [COMMITTED]
+  23:12  ./src/futudiffu/btrm.py                  [COMMITTED]
+  23:03  ./src/futudiffu/diffusion_model.py       [COMMITTED]
+  23:01  ./src/futudiffu/fp8_kernels.py           [COMMITTED]
+  23:01  ./src/futudiffu/fused_kernels.py         [COMMITTED]
+  22:11  ./src/futudiffu/trajectory_loader.py     [COMMITTED]
+  20:26  ./smoke_test_btrm_v2.py                  [COMMITTED]
+  20:24  ./smoke_test_btrm_policy.py              [COMMITTED]
+  20:22  ./src/futudiffu/sampling.py              [COMMITTED]
+  20:21  ./src/futudiffu/train_qat.py             [COMMITTED]
+  20:21  ./src/futudiffu/trainer.py               [COMMITTED]
+  20:19  ./src/futudiffu/training_utils.py        [COMMITTED]
+  20:17  ./src/futudiffu/policy_loss.py           [COMMITTED]
+  19:25  ./generate_btrm_dataset.py               [COMMITTED]
+  18:45  ./test_flexattn_integration.py           [COMMITTED]
+  18:31  ./test_flexattn_packing.py               [COMMITTED]
+  18:20  ./src/futudiffu/attention.py             [COMMITTED]
+  15:43  ./src/futudiffu/btrm_dataset.py          [COMMITTED]
+  15:19  ./diagnose_i2i.py                        [COMMITTED]
+  14:45  ./render_trajectories.py                 [COMMITTED]
+  13:51  ./src/futudiffu/protocol.py              [COMMITTED]
+
+--- DOCS (all within 26 hours) ---
+
+  16:20  ./docs/session_notes_20260214.md         [NEW, UNTRACKED]
+  15:22  ./docs/h100_optimization_opportunities.md [NEW, UNTRACKED]
+  15:21  ./docs/remote_sessions.md                [NEW, UNTRACKED]
+  13:47  ./docs/remote_training_plan.md           [NEW, UNTRACKED]
+  13:46  ./docs/multi_gpu_scaling.md              [NEW, UNTRACKED]
+  01:50  ./docs/e2e_training_test_plan.md         [COMMITTED]
+  01:48  ./docs/architecture_review.md            [COMMITTED]
+  19:18  ./docs/btrm_rl_architecture_review.md    [COMMITTED]
+  18:19  ./docs/flexattention_batch_packing.md    [COMMITTED]
+  13:50  ./docs/btrm_ops_notes.md                 [COMMITTED]
+
+--- NOT MODIFIED IN 26 HOURS (older than Feb 13 16:00) ---
+
+  src/futudiffu/progress.py                      (Feb 13 03:24)
+  src/futudiffu/generate.py                      (Feb 13 01:24)
+  src/futudiffu/vae.py                           (Feb 12 17:40)
+  src/futudiffu/sage_kernels.py                  (Feb 11 23:33)
+  src/futudiffu/sage_attention.py                (Feb 11 23:27)
+  src/futudiffu/test_sage_backward.py            (Feb 11 22:53)
+  src/futudiffu/text_encoder.py                  (Feb 11 20:03)
+  bootstrap.py                                   (stable)
+  bench_*.py (8 files)                           (Feb 12 - Feb 13)
+  benchmark_sage_variants.py                     (Feb 12 00:10)
+  run_compat_validation.py                       (Feb 11 20:33)
+
+
+======================================================================
+2. UNTRACKED FILE ASSESSMENT
+======================================================================
+
+Each untracked file is assessed for completeness and integration state.
+
+
+--- train.py (root) ---
+Modified: Feb 14 13:44
+Lines: 689
+Purpose: Production training script. Three phases: BTRM training from
+  stored trajectories, policy optimization with live rollouts and diverse
+  prompts, final adapter dump. Pure scheduling client (no torch.cuda,
+  no model loading). Communicates with inference server via ZMQ RPCs.
+Status: COMPLETE and well-structured. Has argparse CLI, JSONL metrics
+  logging, checkpoint saves, resume support (--skip-btrm, --skip-policy,
+  --resume). Uses 24 prompt templates from btrm_dataset.py for diversity.
+Integration: Uses InferenceClient RPCs that all exist on the server:
+  inject_lora, inject_btrm_head, train_btrm_step, score_btrm,
+  accumulate_policy_gradients, policy_optimizer_step, dump_all_loras,
+  set_adapter_config, encode_prompt, sample_trajectory. All RPCs verified
+  present in server.py dispatch table.
+Blocking: NOTHING. This file is ready to run against a live server.
+  Not committed to git, but functionally complete.
+Note: This is the SERVER-BASED training path. There is also a LOCAL
+  training path (trainer.py + train_qat.py) that loads models directly.
+  These two paths are independent and serve different deployment targets.
+
+
+--- pack_trajectories.py (root) ---
+Modified: Feb 14 13:43
+Lines: 198
+Purpose: Convert per-trajectory directory format (step_00.pt, ...,
+  final.pt, meta.json) into safetensors archives + JSONL manifest.
+  For HuggingFace dataset hosting.
+Status: COMPLETE. Has round-trip verification, resume support (skips
+  already-packed trajectories), deduplication on re-runs.
+Integration: Standalone utility. Output (packed_dataset/) exists with
+  50 safetensors files + manifest.jsonl. Successfully run and verified.
+Blocking: NOTHING. This has been run and the output exists.
+  The packed_dataset/ is NOT consumed by any other script (train.py
+  uses btrm_dataset/ directly via TrajectoryPool). The packed format
+  is for HuggingFace upload, which is not yet implemented.
+
+
+--- packed_dataset/ (directory) ---
+Contains: 50 traj_NNNNNN.safetensors files + manifest.jsonl
+Status: COMPLETE output of pack_trajectories.py.
+Integration: Not consumed by any script. Created for future HF upload.
+
+
+--- remote_node_bootstrap.py (root) ---
+Modified: Feb 14 17:44
+Lines: 543
+Purpose: Four-phase bootstrap for remote GPU nodes: (1) download models
+  from HuggingFace, (2) quantize BF16 diffusion to FP8 blockwise,
+  (3) optional trajectory validation against reference, (4) summary report.
+Status: MOSTLY COMPLETE with ONE BUG. Phase 3 (validate_trajectory)
+  has a variable ordering bug: `ref_dir` is used on line 258 before
+  it is defined on line 291 (ref_dir = Path(reference_dir)). This
+  would cause a NameError at runtime during validation. Download and
+  quantize phases appear correct.
+Integration: Uses futudiffu.fp8.quantize_model (exists, verified) and
+  futudiffu.client.InferenceClient (exists). References HuggingFace repo
+  "Comfy-Org/z_image" with specific file paths.
+Blocking: The ref_dir bug prevents validation from running. Session notes
+  say bootstrap was "still running" during the session, so this bug may
+  have been encountered but not fixed.
+
+
+--- remote_tmux.py (root) ---
+Modified: Feb 14 15:15
+Lines: 288
+Purpose: tmux session manager for persistent remote training runs.
+  Subcommands: launch, attach, watch (read-only), list, logs, kill, setup.
+  The "setup" command launches server+train+sync trio with port polling.
+Status: COMPLETE. Well-structured CLI with argparse subparsers.
+  Handles session naming, logfile capture, read-only observation.
+Integration: Standalone operational tool. Not imported by any other file.
+  Documented in docs/remote_sessions.md.
+Blocking: NOTHING. Ready to use on a remote node.
+
+
+--- validate_server_pipeline.py (root) ---
+Modified: Feb 14 17:33
+Lines: 274
+Purpose: Connect to a running server on port 5557, run the canonical
+  laser shark trajectory, compare against stream_futudiffu/ reference
+  at every pipeline stage (TE, per-step latents, final latent, VAE).
+Status: COMPLETE. Comprehensive validation with cosine similarity,
+  MSE, pixel diff, PNG output. Pass/fail criteria defined.
+Integration: Uses InferenceClient (exists). Reads reference .pt files
+  from stream_futudiffu/ (exists, tracked in git).
+Blocking: NOTHING. Ready to run against a live server.
+
+
+--- regen_stream_futudiffu.py (root) ---
+Modified: Feb 14 17:55
+Lines: 324
+Purpose: Regenerate the canonical FP8 reference trajectory in
+  stream_futudiffu/. Uses canonical noise from noise.pt, runs full
+  Config B pipeline, saves all intermediates. Self-checks round-trip.
+Status: COMPLETE. Thorough implementation with self-verification.
+Integration: Uses InferenceClient. Writes to stream_futudiffu/ which
+  is the canonical reference directory (now un-gitignored and tracked).
+Blocking: NOTHING. Utility for regenerating reference after code changes.
+
+
+--- test_repro_traj004.py (root) ---
+Modified: Feb 14 18:07
+Lines: 235
+Purpose: Three-way reproducibility test for trajectory 000004.
+  Runs trajectory twice (A and B) on same server session, compares
+  both against saved reference. Diagnoses intra-session vs cross-session
+  divergence (torch.compile nondeterminism).
+Status: COMPLETE. Well-designed diagnostic with clear interpretation
+  of results (intra-session bitwise match + cross-session divergence
+  = expected torch.compile behavior).
+Integration: Uses InferenceClient. Reads from btrm_dataset/latents/traj_000004/.
+Blocking: NOTHING. Diagnostic tool, ready to run.
+
+
+--- analyze_residuals.py (root) ---
+Modified: Feb 14 19:06 (MOST RECENT FILE)
+Lines: 741
+Purpose: Deep statistical analysis of cross-session trajectory residuals.
+  Computes per-step MSE, cosine similarity, channel covariance eigenspectrum,
+  Gaussianity tests (skewness, kurtosis, Shapiro-Wilk), 2D FFT spectral
+  analysis, and synthesizes an "overall characterization" verdict
+  (structured divergence vs noise-like divergence).
+Status: COMPLETE. No GPU needed (pure CPU numpy analysis). Has matplotlib
+  plotting with graceful fallback if matplotlib missing. Writes structured
+  stats.json + human-readable summary.txt.
+Integration: Standalone CLI tool. Operates on any two trajectory directories.
+Blocking: NOTHING. Ready to use.
+
+
+--- docs/session_notes_20260214.md ---
+Modified: Feb 14 16:20
+Purpose: Pre-autocompaction context dump. Records user reframings (HF upload
+  is mid-hoc, continuous sync, scale reality check, reference trajectories
+  in git, GPU comparison, hybrid local+cloud budget play), actions completed,
+  actions in progress, and scoped-but-not-attempted problems.
+Status: COMPLETE as a record. Lists 7 "scoped problems described but NOT
+  yet attempted" -- these are the primary unimplemented H100 features.
+
+
+--- docs/remote_training_plan.md ---
+Modified: Feb 14 13:47
+Lines: 682
+Purpose: Operational plan for rented GPU node training. Covers: production
+  training script design, continuous sync, trajectory packing, dataset
+  variety analysis, adapter purpose/success criteria, and detailed GPU
+  performance analysis (RTX 4090 vs H100 vs RTX PRO 6000 Blackwell).
+Status: COMPLETE as planning doc. Piece 1 (train.py) has been implemented.
+  Piece 2 (continuous sync) is described but not coded (rsync one-liner).
+  Piece 3 (trajectory packing) has been implemented (pack_trajectories.py).
+  Pieces 4-6 are analysis/planning, not code.
+
+
+--- docs/h100_optimization_opportunities.md ---
+Modified: Feb 14 15:22
+Lines: 721
+Purpose: Analysis of 4 H100-specific optimizations: (1) torch._scaled_mm
+  replacing Triton FP8 GEMM kernels, (2) SM90 Triton kernel tuning configs,
+  (3) skipping gradient checkpointing on 80GB, (4) no-offload model lifecycle.
+Status: COMPLETE as analysis doc. NONE of the 4 optimizations are implemented.
+  All are described as "documented, not implemented" in session notes.
+
+
+--- docs/multi_gpu_scaling.md ---
+Modified: Feb 14 13:46
+Lines: 632
+Purpose: Multi-GPU scaling design for trajectory generation (embarrassingly
+  parallel), BTRM training (local SGD with weight averaging), and policy
+  optimization (centralized backward on primary GPU).
+Status: COMPLETE as design doc. The key output -- MultiGPUClient class --
+  is described in ~100 lines of pseudocode but NOT implemented. No
+  multi_gpu_client.py exists anywhere in the codebase.
+
+
+--- docs/remote_sessions.md ---
+Modified: Feb 14 15:21
+Lines: 104
+Purpose: Usage guide for remote_tmux.py.
+Status: COMPLETE. Documents the tool that exists.
+
+
+======================================================================
+3. INTEGRATION GAPS
+======================================================================
+
+
+--- A. FlexAttention Batch Packing ---
+
+Implementation status:
+  - diffusion_model.py: PackingInfo, build_packed_sequence, build_packed_rope,
+    make_packing_mask_mod, unpack_and_unpatchify, prepare_packed_state,
+    forward_packed -- ALL PRESENT
+  - attention.py: block_mask param on sdpa_attention, FlexAttention dispatch
+    -- PRESENT
+  - server.py: handle_sample_trajectory_packed (line 429),
+    handle_warmup_packed (line 719), both in dispatch table -- PRESENT
+  - client.py: sample_trajectory_packed (line 129),
+    warmup_packed (line 225) -- PRESENT
+  - Test files: test_flexattn_packing.py, test_flexattn_integration.py
+    -- PRESENT, results documented in MEMORY.md (all cos > 0.999)
+
+Integration into production:
+  - generate.py: NO FlexAttention code. generate.py is the original
+    standalone pipeline and has not been updated.
+  - train.py: Does NOT use packed trajectories. Uses single-image
+    sample_trajectory, not sample_trajectory_packed.
+  - generate_btrm_dataset.py: Does NOT use packed trajectories.
+
+Verdict: FlexAttention is FULLY IMPLEMENTED in the model/server/client
+  layers but NOT USED by any production script. The integration into
+  generate_btrm_dataset.py (for 4x throughput via packing) and into
+  train.py (for batched rollouts) is the missing step. This was
+  explicitly called out in MEMORY.md: "NOT YET DONE: Integration into
+  server.py/generate.py, production benchmarks, total_len bucketing."
+  Note: server.py integration IS done (RPCs exist); it is the CLIENT
+  scripts that do not call the packed RPCs.
+
+
+--- B. Multi-LoRA ---
+
+Implementation status:
+  - lora.py: LoRAAdapter, LoRALinear, inject_lora, set_lora_scale,
+    freeze_adapter, lora_state_dict, load_lora_state_dict -- ALL PRESENT
+  - lora_kernels.py: Triton sparse multi-adapter kernel -- PRESENT
+  - Tests: test_multilora_fused.py, test_lora_kernel_integration.py,
+    test_lora_save_load.py -- PRESENT
+
+Integration into training:
+  - server.py: handle_inject_lora, handle_set_adapter_config,
+    handle_update_lora_weights, handle_get_lora_state_dict,
+    handle_dump_all_loras -- ALL PRESENT
+  - train.py (root): Uses inject_lora, set_adapter_config, dump_all_loras
+    via client RPCs. Manages rtheta + ptheta adapters. -- FULLY INTEGRATED
+  - trainer.py (src/): Uses inject_lora, set_lora_scale, freeze_adapter,
+    get_lora_params, lora_state_dict directly (local training path).
+    -- FULLY INTEGRATED
+
+Verdict: Multi-LoRA is FULLY INTEGRATED into both training paths
+  (server-based train.py and local trainer.py/train_qat.py).
+
+
+--- C. BTRM Training ---
+
+Implementation status:
+  - btrm.py: BTRMHead, bradley_terry_loss, compute_multihead_loss,
+    logsquare_regularizer -- ALL PRESENT
+  - trajectory_loader.py: TrajectoryPool, scrimble_split, scrongle_split
+    -- PRESENT
+  - btrm_dataset.py: PROMPT_TEMPLATES (24), plan builder -- PRESENT
+
+Integration:
+  - train.py (root, server-based): phase_btrm() loads TrajectoryPool,
+    caches prompts, trains BTRM via train_btrm_step RPCs. -- INTEGRATED
+  - trainer.py (src/, local): train_btrm_epoch() with direct forward_
+    checkpointed calls. -- INTEGRATED
+  - server.py: handle_inject_btrm_head, handle_score_btrm,
+    handle_train_btrm_step -- ALL PRESENT
+
+Verdict: BTRM training is FULLY INTEGRATED into both paths.
+
+
+--- D. Remote Training Infrastructure ---
+
+  remote_node_bootstrap.py: COMPLETE with one bug (ref_dir NameError).
+    Downloads models from HF, quantizes to FP8, validates trajectory.
+  remote_tmux.py: COMPLETE. Session manager for server/train/sync trio.
+  docs/remote_training_plan.md: COMPLETE planning doc.
+  docs/remote_sessions.md: COMPLETE usage guide.
+
+Missing pieces:
+  - MultiGPUClient: Designed in docs/multi_gpu_scaling.md but NOT
+    IMPLEMENTED. No multi_gpu_client.py or MultiGPUClient class exists.
+  - HuggingFace upload daemon/script: Mentioned in planning, NOT WRITTEN.
+    pack_trajectories.py creates the safetensors format but nothing
+    uploads them.
+  - Continuous sync script: Described as an rsync one-liner in
+    remote_training_plan.md, not codified as a Python script (consistent
+    with the "use tmux" approach in remote_tmux.py setup --sync-cmd).
+  - launch_servers.py: Described in multi_gpu_scaling.md, NOT WRITTEN.
+  - --no-offload flag for server.py: Described in h100_optimization_
+    opportunities.md, NOT IMPLEMENTED.
+  - --gradient-checkpointing/--no-checkpoint flag: Described in
+    h100_optimization_opportunities.md, NOT IMPLEMENTED.
+  - torch._scaled_mm runtime dispatch: Described, NOT IMPLEMENTED.
+  - SM90 Triton kernel configs: Described, NOT IMPLEMENTED.
+
+Verdict: The operational tooling for SINGLE-GPU remote training is
+  complete (bootstrap + tmux + train.py + pack_trajectories.py). The
+  MULTI-GPU scaling layer (MultiGPUClient, launch_servers.py) exists
+  only as design docs. The H100-specific optimizations (4 items) exist
+  only as analysis docs.
+
+
+--- E. Packed Dataset ---
+
+  pack_trajectories.py: COMPLETE, has been run.
+  packed_dataset/: Contains 50 safetensors + manifest.jsonl.
+  Consumers: NONE. No script reads from packed_dataset/. The format
+    is designed for HuggingFace hosting. TrajectoryPool reads from
+    the unpacked btrm_dataset/ directory structure.
+
+Verdict: packed_dataset/ is a completed artifact with no downstream
+  consumer yet. The consumer would be a HuggingFace-hosted training
+  pipeline on a remote node, which does not exist.
+
+
+--- F. Two Parallel Training Paths ---
+
+  There are TWO independent training implementations:
+
+  1. LOCAL PATH: trainer.py + train_qat.py (in src/futudiffu/)
+     - Loads models directly into GPU memory
+     - Uses forward_checkpointed for gradient computation
+     - Single prompt (laser shark hardcoded)
+     - Uses SageAttention for BTRM negative examples
+     - 725 lines (trainer.py) + 162 lines (train_qat.py)
+     - Verified working in test_e2e_real_trajectories.py
+
+  2. SERVER PATH: train.py (in root)
+     - Pure scheduling client, no model loading
+     - Communicates via ZMQ RPCs to inference server
+     - Multi-prompt (all 24 templates)
+     - Structured JSONL metrics logging
+     - 689 lines
+     - NOT yet run (depends on running server)
+
+  These two paths share the same underlying modules (lora.py, btrm.py,
+  policy_loss.py, training_utils.py) but are architecturally different.
+  The server path (train.py) is the production target. The local path
+  (trainer.py/train_qat.py) is the smoke-test/development path.
+
+  There is NO conflict between them, but there is conceptual redundancy.
+  The local path will likely become vestigial once the server path is
+  validated end-to-end.
+
+
+======================================================================
+4. SESSION-LEVEL OVER-INTERVENTION PATTERNS
+======================================================================
+
+
+--- A. Breadth-first planning, not depth-first execution ---
+
+The session produced 5 docs totaling ~2,800 lines of planning/analysis:
+  - remote_training_plan.md (682 lines)
+  - h100_optimization_opportunities.md (721 lines)
+  - multi_gpu_scaling.md (632 lines)
+  - remote_sessions.md (104 lines)
+  - session_notes_20260214.md (~150 lines)
+
+And 6 new Python files totaling ~2,776 lines of implementation:
+  - train.py (689 lines)
+  - pack_trajectories.py (198 lines)
+  - remote_node_bootstrap.py (543 lines)
+  - remote_tmux.py (288 lines)
+  - validate_server_pipeline.py (274 lines)
+  - regen_stream_futudiffu.py (324 lines)
+
+Plus 2 diagnostic scripts:
+  - test_repro_traj004.py (235 lines)
+  - analyze_residuals.py (741 lines)
+
+The ratio of planning to implementation is roughly 1:1 by line count.
+This is not inherently problematic for a "preparing for remote execution"
+session, but it means roughly half the session's output is words about
+code rather than code.
+
+
+--- B. Docs describing features that are not implemented ---
+
+Seven specific items are "described but NOT yet attempted" (quoted from
+session_notes_20260214.md):
+  1. torch._scaled_mm dispatch for H100
+  2. SM90 Triton kernel tuning
+  3. Skip gradient checkpointing on H100
+  4. No-offload mode on H100
+  5. MultiGPUClient wrapper
+  6. HuggingFace dataset upload integration
+  7. Vendored quantization in fp8.py
+
+Of these, items 1-4 are H100-specific and cannot be tested on the
+local RTX 4090. Items 5-7 could have been implemented locally.
+Item 5 (MultiGPUClient) is ~100-150 lines per the design doc. Item 6
+(HF upload) could have been a simple script. Item 7 is trivial.
+
+The session chose to document all 7 thoroughly rather than implement
+the 3 that were locally testable. This is a defensible prioritization
+if the session was time-constrained, but the docs for items 5-7 are
+proportionally over-specified for their implementation complexity.
+
+
+--- C. analyze_residuals.py: most recent file, 741 lines ---
+
+This is a deep statistical analysis tool (channel covariance eigenspectrum,
+Shapiro-Wilk normality testing, 2D FFT spectral analysis) for diagnosing
+cross-session trajectory divergence. It was the LAST file modified in the
+session.
+
+It is a well-written diagnostic tool, but it solves a problem that was
+already diagnosed: cross-session divergence from torch.compile
+nondeterminism. test_repro_traj004.py (written earlier in the session)
+already established that intra-session reproducibility is bitwise exact
+and cross-session divergence is expected.
+
+This appears to be an instance of "going deeper on diagnostics" rather
+than "completing integration work." The 741 lines of residual analysis
+could have been spent on, e.g., implementing MultiGPUClient or the
+HuggingFace upload script.
+
+
+--- D. remote_node_bootstrap.py: has a bug in the validation path ---
+
+The validate_trajectory function uses `ref_dir` on line 258:
+  ref_noise_file = ref_dir / "noise.pt"
+But `ref_dir` is not defined until line 291:
+  ref_dir = Path(reference_dir)
+
+This is a variable ordering bug that would cause a NameError at runtime.
+The session notes say the bootstrap script was "still running" when the
+notes were written, suggesting the download phase was still in progress
+and the validation path had not yet been hit.
+
+This is not catastrophic (the download and quantize phases work fine),
+but it means the end-to-end bootstrap validation has never actually run.
+
+
+--- E. Root-level file proliferation ---
+
+35 Python files in the repo root. Of these:
+  - 8 are bench_* benchmarks
+  - 8 are test_* tests
+  - 6 are smoke_test_* / generate_* / render_* operational scripts
+  - 5 are the new session files (train.py, pack_trajectories.py,
+    remote_node_bootstrap.py, remote_tmux.py, analyze_residuals.py)
+  - 3 are validation scripts (validate_*, regen_*, test_repro_*)
+  - 2 are infrastructure (bootstrap.py, run_compat_validation.py)
+  - 2 are visualization (diff_renders.py, render_policy_comparison.py)
+  - 1 is diagnostic (diagnose_i2i.py)
+
+None of these are in a tests/ or scripts/ directory. The repo root is
+the dumping ground for all non-src Python files. This is a organizational
+debt item, not a functional one.
+
+
+======================================================================
+5. WHAT IS ACTUALLY BLOCKING PROGRESS
+======================================================================
+
+In priority order:
+
+1. NOTHING blocks local single-GPU training. train.py + server.py +
+   all supporting modules are complete and ready to run. The only
+   prerequisite is a running inference server instance.
+
+2. NOTHING blocks local trajectory generation at scale.
+   generate_btrm_dataset.py works, has resume support, and has generated
+   50 trajectories already. Running it with a larger schedule is just
+   a matter of time (14 hours on the local 4090 for 2,304 trajectories).
+
+3. The remote_node_bootstrap.py ref_dir bug blocks bootstrap VALIDATION
+   on a remote node. The download + quantize phases work fine without it.
+   Fix: move `ref_dir = Path(reference_dir)` before its first use.
+
+4. MultiGPUClient is unimplemented. Required for multi-GPU trajectory
+   generation on rented nodes. ~100-150 lines per the design doc.
+
+5. HuggingFace upload is unimplemented. Required for the "continuous sync"
+   pattern described in remote_training_plan.md. Scope: small script.
+
+6. FlexAttention is not wired into production scripts. The 4x throughput
+   gain from batch packing is available in the server but no client script
+   uses sample_trajectory_packed. This matters most for trajectory
+   generation speed on H100.
+
+7. Four H100-specific optimizations are designed but not implemented.
+   These are only actionable on an actual H100 node and cannot be
+   pre-tested locally.
+
+
+======================================================================
+6. RECOMMENDED PRIORITY FOR COMPLETING STRANDED WORK
+======================================================================
+
+Priority 1 (immediate, high ROI):
+  - Fix remote_node_bootstrap.py ref_dir bug (2 minutes)
+  - Run train.py against local server for end-to-end validation
+    (requires: start server, then run train.py --dataset-dir ...)
+
+Priority 2 (before renting GPU time):
+  - Wire FlexAttention into generate_btrm_dataset.py for 4x throughput
+    (use client.sample_trajectory_packed instead of sample_trajectory)
+  - Implement MultiGPUClient (~100-150 lines, design doc is complete)
+  - Write HuggingFace upload script (small, mostly huggingface_hub API)
+
+Priority 3 (on the remote node):
+  - Implement --no-offload flag for server.py (~50 lines, per H100 doc)
+  - Implement --no-checkpoint flag for training_utils.py (~20 lines)
+  - Add SM90 Triton kernel configs (~10 lines)
+  - Test torch._scaled_mm blockwise availability and implement dispatch
+
+Priority 4 (cleanup, non-blocking):
+  - Organize root-level .py files into tests/, scripts/, bench/
+  - Commit all new untracked files to git
+  - Delete or archive the local training path (trainer.py/train_qat.py)
+    once server-based training is validated
+
+
+======================================================================
+7. SUMMARY
+======================================================================
+
+The 26-hour period was a planning-heavy session that produced:
+  - A complete production training script (train.py)
+  - Complete remote deployment tooling (bootstrap, tmux, validation)
+  - Complete trajectory packing utility
+  - 5 thorough design/analysis documents
+  - 2 sophisticated diagnostic tools
+
+The core training pipeline (server + client + BTRM + LoRA + policy)
+is functionally complete. The main gaps are:
+  - FlexAttention not wired into client scripts (throughput miss)
+  - MultiGPUClient not implemented (multi-GPU miss)
+  - H100 optimizations not implemented (but cannot be pre-tested)
+  - One bug in bootstrap validation (ref_dir ordering)
+
+The session's primary risk pattern is over-documentation of future work
+at the expense of completing simpler present work (MultiGPUClient,
+HF upload, FlexAttention wiring). However, the documentation itself
+is high quality and will reduce implementation time when those features
+are built.
+
+========================================================================
+END OF REPORT
+========================================================================

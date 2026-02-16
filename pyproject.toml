@@ -11,6 +11,9 @@ dependencies = [
     "numpy",
     "pillow",
     "pyzmq>=25.0",
+    "pyarrow>=14.0",
+    "tzdata",
+    "huggingface_hub",
 ]
 
 [project.optional-dependencies]

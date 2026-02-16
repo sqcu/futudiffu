@@ -8,12 +8,12 @@ btrm_dataset/renders/
 # i2i source images (copyrighted/personal art)
 i2i_off_policies/
 
-# validation tensor dumps
+# validation tensor dumps (historical variants)
 stream_comfyui/
-stream_futudiffu/
 stream_futudiffu_bf16/
 stream_futudiffu_f16te/
 stream_compat_bf16/
+# stream_futudiffu/ is the canonical FP8 reference trajectory — tracked
 
 # test artifacts
 lora_dumps_test/
@@ -26,3 +26,9 @@ bench_results.txt
 
 # model weights / lora checkpoints (use your own)
 *.safetensors
+
+#shhh don't look
+.supersekrit
+
+# remote orchestration config (contains ephemeral IPs/keys)
+remote_target.json

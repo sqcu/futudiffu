@@ -29,11 +29,10 @@ from pathlib import Path
 
 sys.path.insert(0, r"F:\dox\repos\ai\futudiffu\src")
 
-import numpy as np
 import torch
-from PIL import Image
 
 from futudiffu.client import InferenceClient
+from futudiffu.rendering import decode_and_save as _decode_and_save
 
 
 def find_trajectories(dataset_dir: Path, type_filter: str | None,
@@ -83,10 +82,7 @@ def render_latent(client: InferenceClient, latent_path: Path,
                   output_path: Path) -> None:
     """VAE-decode a .pt latent file and save as PNG."""
     latent = torch.load(str(latent_path), map_location="cpu", weights_only=True)
-    image = client.vae_decode(latent)
-    image_np = (image[0].permute(1, 2, 0).float().numpy() * 255).astype(np.uint8)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    Image.fromarray(image_np).save(str(output_path))
+    _decode_and_save(client, latent, output_path)
 
 
 def render_trajectory(client: InferenceClient, traj_dir: Path,

@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "futudiffu-d20": {
+      "type": "stdio",
+      "command": "/mnt/f/dox/repos/ai/futudiffu/.venv/Scripts/python.exe",
+      "args": ["F:\\dox\\repos\\ai\\futudiffu\\scripts\\d20_mcp.py"]
+    }
+  }
+}

@@ -1,0 +1,78 @@
+========================================================================
+RESIDUAL ANALYSIS SUMMARY
+========================================================================
+Reference (A): F:\dox\repos\ai\futudiffu\btrm_dataset\latents\traj_000004
+Comparison (B): F:\dox\repos\ai\futudiffu\btrm_dataset\latents\traj_000035
+Common steps: [-1, 0, 4, 9, 14]
+
+--- PER-STEP METRICS ---
+  Step           MSE     Rel Err   Max|Diff|  Mean|Diff|
+------------------------------------------------------------
+ final    9.8597e-01      0.9964      4.7500      0.7840
+     0    1.9922e+00      1.4126      6.5625      1.1263
+     4    1.4269e+00      1.3321      5.5469      0.9531
+     9    9.1004e-01      1.2232      4.3203      0.7609
+    14    7.6467e-01      1.2110      4.2578      0.6944
+
+MSE ratio first-to-last: 0.78x (stable magnitude).
+
+--- COVARIANCE STRUCTURE (step final) ---
+  Effective rank: 9.6 / 16 channels
+  Top 3 eigenvalues: 5.04, 3.06, 1.23 (58% of variance)
+  INTERPRETATION: Moderate rank (9.6/16).
+    Mix of structured and diffuse components.
+  Channel std range: 0.681 (ch3) to 1.276 (ch9), ratio=1.9x
+
+--- COVARIANCE STRUCTURE (step 14) ---
+  Effective rank: 13.9 / 16 channels
+  Top 3 eigenvalues: 2.86, 2.08, 1.12 (38% of variance)
+  INTERPRETATION: High-rank residual (eff_rank=13.9 ~ 16).
+    Difference is spread across channels.
+    This looks like DIFFUSE noise, not structured divergence.
+  Channel std range: 0.731 (ch3) to 0.968 (ch2), ratio=1.3x
+
+--- GAUSSIANITY (step final) ---
+  Mean |skewness|: 0.151 (Gaussian: ~0, concern: >0.5)
+  Mean excess kurtosis: -0.025 (Gaussian: 0, heavy tails: >0)
+  OUTLIER CHANNELS (|skew|>0.5 or |kurt|>0.5):
+    ch4: skew=0.174, kurt=0.504, std=0.793
+  ASSESSMENT: Residual is approximately Gaussian per channel.
+    Consistent with accumulated floating-point rounding noise.
+
+--- GAUSSIANITY (step 14) ---
+  Mean |skewness|: 0.035 (Gaussian: ~0, concern: >0.5)
+  Mean excess kurtosis: 0.037 (Gaussian: 0, heavy tails: >0)
+  All channels within Gaussian envelope (|skew|<0.5, |kurt|<0.5).
+  ASSESSMENT: Residual is approximately Gaussian per channel.
+    Consistent with accumulated floating-point rounding noise.
+
+--- SPATIAL SPECTRUM (step final) ---
+  Spectral flatness: 4.17 (0 = white noise, >2 = spatially structured)
+  Peak-to-DC ratio: 0.346
+  Low-freq / high-freq power ratio: 177.9x
+  INTERPRETATION: Strong low-frequency dominance.
+    Residual has large-scale spatial structure (blobs, gradients).
+    NOT consistent with pixel-independent noise.
+
+--- SPATIAL SPECTRUM (step 14) ---
+  Spectral flatness: 5.88 (0 = white noise, >2 = spatially structured)
+  Peak-to-DC ratio: 0.073
+  Low-freq / high-freq power ratio: 50.6x
+  INTERPRETATION: Strong low-frequency dominance.
+    Residual has large-scale spatial structure (blobs, gradients).
+    NOT consistent with pixel-independent noise.
+
+========================================================================
+OVERALL CHARACTERIZATION
+========================================================================
+MIXED SIGNAL:
+  - High-rank covariance suggests diffuse noise
+  - Gaussian residual suggests FP noise
+  - Spatial structure suggests correlated differences
+Further investigation needed to disambiguate.
+
+--- ARTIFACTS ON DISK ---
+  F:\dox\repos\ai\futudiffu\validation_renders\residual_same_prompt\residual_final.npy
+  F:\dox\repos\ai\futudiffu\validation_renders\residual_same_prompt\residual_14.npy
+  F:\dox\repos\ai\futudiffu\validation_renders\residual_same_prompt\summary.txt
+  F:\dox\repos\ai\futudiffu\validation_renders\residual_same_prompt\stats.json

@@ -334,6 +334,121 @@ class FP8Linear(nn.Module):
         return out
 
 
+def quantize_fp8_blockwise(
+    tensor: torch.Tensor,
+    block_size: int = BLOCK_SIZE,
+    dtype: torch.dtype = torch.float8_e4m3fn,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize a 2D tensor to FP8 with 2D block-wise scaling on CUDA.
+
+    Vendored from quantize_to_fp8_blockwise.py — the canonical script that
+    produced the reference z_image_fp8_blockwise.safetensors.
+
+    Requires both dimensions divisible by block_size. Does NOT pad.
+
+    Returns:
+        (qdata, scale) — qdata in float8_e4m3fn, scale in float32, both on CPU.
+    """
+    assert tensor.dim() == 2
+    M, N = tensor.shape
+    fp8_max = torch.finfo(dtype).max
+
+    t = tensor.cuda().float()
+
+    blocked = t.reshape(M // block_size, block_size, N // block_size, block_size)
+    blocked = blocked.permute(0, 2, 1, 3)
+
+    block_max = blocked.abs().amax(dim=(2, 3))
+    quant_scale = fp8_max / block_max.clamp_min(1e-12)
+
+    scale_bc = quant_scale.unsqueeze(-1).unsqueeze(-1)
+    scaled = (blocked * scale_bc).clamp(-fp8_max, fp8_max)
+    qblocked = scaled.to(dtype)
+
+    qdata = qblocked.permute(0, 2, 1, 3).reshape(M, N)
+    dequant_scale = (1.0 / quant_scale).float()
+
+    return qdata.cpu(), dequant_scale.cpu()
+
+
+def quantize_model(
+    input_path: str,
+    output_path: str,
+    block_size: int = BLOCK_SIZE,
+    min_elements: int = 4096,
+) -> dict:
+    """Quantize a safetensors model to FP8 blockwise with comfy_quant metadata.
+
+    Vendored from quantize_to_fp8_blockwise.py — the canonical script.
+    Weights must have both dimensions divisible by block_size to be quantized;
+    non-divisible weights are kept in their original dtype.
+
+    Returns:
+        Stats dict with keys: quantized, kept, total_params, quantized_params.
+    """
+    import json
+    import os
+    from collections import OrderedDict
+    from safetensors.torch import load_file, save_file
+
+    print(f"Loading {input_path}...")
+    state_dict = load_file(input_path)
+
+    output_dict = OrderedDict()
+    stats = {"quantized": 0, "kept": 0, "total_params": 0, "quantized_params": 0}
+
+    for key, tensor in state_dict.items():
+        stats["total_params"] += tensor.numel()
+
+        is_weight = tensor.dim() == 2 and tensor.numel() >= min_elements
+        is_float = tensor.dtype in (torch.float32, torch.float16, torch.bfloat16)
+        can_block = is_weight and (tensor.shape[0] % block_size == 0) and (tensor.shape[1] % block_size == 0)
+
+        if is_weight and is_float and can_block:
+            qdata, scale = quantize_fp8_blockwise(tensor, block_size)
+
+            output_dict[key] = qdata
+            output_dict[key.replace(".weight", ".weight_scale")] = scale
+
+            meta = {
+                "format": "float8_e4m3fn_blockwise",
+                "group_size": block_size,
+                "orig_dtype": str(tensor.dtype),
+                "orig_shape": list(tensor.shape),
+            }
+            meta_bytes = json.dumps(meta).encode("utf-8")
+            output_dict[key.replace(".weight", ".comfy_quant")] = torch.tensor(
+                list(meta_bytes), dtype=torch.uint8
+            )
+
+            stats["quantized"] += 1
+            stats["quantized_params"] += tensor.numel()
+            print(f"  {key}: {list(tensor.shape)} -> FP8 block-wise (bs={block_size})")
+        else:
+            output_dict[key] = tensor
+            stats["kept"] += 1
+            reason = []
+            if not is_weight:
+                reason.append(f"dim={tensor.dim()}" if tensor.dim() != 2 else f"numel={tensor.numel()}")
+            if not is_float:
+                reason.append(f"dtype={tensor.dtype}")
+            if is_weight and is_float and not can_block:
+                reason.append(f"shape={list(tensor.shape)} not divisible by {block_size}")
+            print(f"  {key}: kept ({', '.join(reason)})")
+
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    print(f"\nSaving to {output_path}...")
+    save_file(output_dict, output_path)
+
+    pct = 100 * stats["quantized_params"] / max(stats["total_params"], 1)
+    print(f"\nDone. {stats['quantized']} layers quantized, {stats['kept']} kept.")
+    print(f"  {stats['quantized_params']:,} / {stats['total_params']:,} params quantized ({pct:.1f}%)")
+    print(f"  Original size: {os.path.getsize(input_path) / 1e9:.2f} GB")
+    print(f"  Quantized size: {os.path.getsize(output_path) / 1e9:.2f} GB")
+
+    return stats
+
+
 def dequantize_fp8_blockwise(
     weight: torch.Tensor,
     scale: torch.Tensor,

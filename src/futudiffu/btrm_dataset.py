@@ -230,6 +230,16 @@ TRANSFORMATIVE_LABELS: list[str] = [
     "in the palette and style of a faded retro VHS screenshot",
     "as a mosaic made of small colored tiles",
     "reimagined in the dense linework of a Moebius comic panel",
+    "rendered in luminous gouache with opaque layered washes",
+    "as a risograph print with misregistered cyan and magenta layers",
+    "in the style of a Soviet-era propaganda poster with bold typography",
+    "reimagined as an illuminated manuscript page with gold leaf borders",
+    "rendered in scratchboard with fine white lines on black",
+    "as a thermal infrared photograph with false-color heat mapping",
+    "in the style of a Meiji-era Japanese lithograph with mineral pigments",
+    "reimagined as a cyanotype blueprint with Prussian blue tones",
+    "rendered in thick palette knife oil impasto under raking gallery light",
+    "as a linocut print with rough carved texture and uneven ink coverage",
 ]
 
 

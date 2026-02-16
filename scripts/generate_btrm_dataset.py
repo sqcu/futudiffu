@@ -10,6 +10,7 @@ Requires a running inference server:
 Usage:
     python generate_btrm_dataset.py --schedule schedule.json [--output-dir PATH]
     python generate_btrm_dataset.py --t2i 20 --i2i 10 [--output-dir PATH]
+    python generate_btrm_dataset.py --t2i 40 --packed   # FlexAttention ~4x throughput
 
 Schedule JSON format:
     [
@@ -41,18 +42,30 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, r"F:\dox\repos\ai\futudiffu\src")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import numpy as np
 import torch
 from PIL import Image
 
+from futudiffu.rendering import decode_and_save as _lib_decode_and_save
 from futudiffu.btrm_dataset import (
     I2I_IMAGES,
     PROMPT_TEMPLATES,
     TRANSFORMATIVE_LABELS,
 )
 from futudiffu.client import InferenceClient
+
+# V2 dataset writer (lazy import to avoid hard pyarrow dependency for v1 mode)
+_DatasetWriter = None
+
+
+def _get_dataset_writer_class():
+    global _DatasetWriter
+    if _DatasetWriter is None:
+        from futudiffu.dataset_v2 import DatasetWriter
+        _DatasetWriter = DatasetWriter
+    return _DatasetWriter
 
 
 # ---------------------------------------------------------------------------
@@ -225,10 +238,41 @@ def render_latent_to_png(
 ):
     """VAE-decode a latent file and save as PNG."""
     latent = torch.load(str(latent_path), map_location="cpu", weights_only=True)
-    image = client.vae_decode(latent)
-    image_np = (image[0].permute(1, 2, 0).float().numpy() * 255).astype(np.uint8)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    Image.fromarray(image_np).save(str(output_path))
+    _lib_decode_and_save(client, latent, output_path)
+
+
+def render_tensor_to_png(
+    client: InferenceClient,
+    latent: torch.Tensor,
+    output_path: Path,
+):
+    """VAE-decode a latent tensor and save as PNG (for v2 path)."""
+    _lib_decode_and_save(client, latent, output_path)
+
+
+def _params_to_v2_meta(params: dict, batch_i: int, defs: dict,
+                        packed: bool = False, width: int = None,
+                        height: int = None,
+                        timing_seconds: float = None) -> dict:
+    """Convert generation params to v2 metadata dict."""
+    meta = {
+        "prompt": params["prompt"],
+        "prompt_idx": params.get("prompt_idx", -1),
+        "seed": params["seed"],
+        "cfg": defs["cfg"],
+        "width": width or defs["width"],
+        "height": height or defs["height"],
+        "n_steps": params["n_steps"],
+        "attention_backend": params["precision"],
+        "batch_type": params["type"],
+        "denoise": params.get("denoise"),
+        "image_file": params.get("image_file"),
+        "is_gold": (params["precision"] == "sdpa" and params["n_steps"] == 30),
+        "batch_idx": batch_i,
+        "packed": packed,
+        "timing_seconds": timing_seconds,
+    }
+    return meta
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +287,7 @@ def _flush_packed_batch(
     defs: dict,
     timing: dict,
     batch_idx: int,
+    v2_writer=None,
 ) -> int:
     """Generate a packed batch of t2i trajectories via FlexAttention.
 
@@ -253,6 +298,7 @@ def _flush_packed_batch(
         defs: GENERATION_DEFAULTS.
         timing: Timing accumulator dict.
         batch_idx: Current schedule batch index.
+        v2_writer: If not None, use DatasetWriter instead of per-directory save.
 
     Returns:
         Number of trajectories generated.
@@ -277,12 +323,20 @@ def _flush_packed_batch(
         multiplier=defs["multiplier"],
         save_steps=defs["save_steps"],
     )
-    timing["diffusion"] += time.perf_counter() - t0
+    dt = time.perf_counter() - t0
+    timing["diffusion"] += dt
 
     for (idx, params, traj_dir), result in zip(pending, results):
-        meta = {**params, "batch_idx": batch_idx, "packed": True,
-                "pack_size": len(pending)}
-        save_trajectory(traj_dir, result, meta)
+        if v2_writer is not None:
+            v2_meta = _params_to_v2_meta(
+                params, batch_idx, defs, packed=True,
+                timing_seconds=dt / len(pending),
+            )
+            v2_writer.add_trajectory(tensors=result, metadata=v2_meta)
+        else:
+            meta = {**params, "batch_idx": batch_idx, "packed": True,
+                    "pack_size": len(pending)}
+            save_trajectory(traj_dir, result, meta)
 
     return len(pending)
 
@@ -297,11 +351,18 @@ def run_schedule(
     output_dir: Path,
     rng_seed: int = 42,
     i2i_dir: str = "",
+    packed: bool = False,
+    dataset_format: str = "v1",
 ):
     """Execute a generation schedule via the inference server.
 
     Each entry in schedule is a batch: {type, count, precision, steps, render, ...}.
     Batches execute in order. Resume is automatic.
+
+    Args:
+        packed: If True, batch t2i trajectories via FlexAttention packed forward.
+                If False (default), generate each trajectory individually.
+        dataset_format: "v1" (per-directory .pt) or "v2" (parquet + safetensors blobs).
     """
     global _interrupted
 
@@ -309,9 +370,21 @@ def run_schedule(
     output_dir.mkdir(parents=True, exist_ok=True)
     latents_dir = output_dir / "latents"
 
+    # V2 writer setup
+    v2_writer = None
+    if dataset_format == "v2":
+        WriterCls = _get_dataset_writer_class()
+        v2_writer = WriterCls(output_dir)
+        v2_writer.__enter__()
+        print(f"Dataset format: v2 (parquet + safetensors blobs)")
+    else:
+        print(f"Dataset format: v1 (per-directory .pt files)")
+
     # Print schedule summary
     total_requested = sum(b["count"] for b in schedule)
+    mode_label = f"PACKED (FlexAttention, pack_size={PACK_SIZE})" if packed else "SINGLE-IMAGE"
     print(f"Schedule: {len(schedule)} batches, {total_requested} trajectories total")
+    print(f"Mode: {mode_label}")
     for i, batch in enumerate(schedule):
         steps_desc = batch.get("steps", 30)
         if isinstance(steps_desc, list):
@@ -365,16 +438,29 @@ def run_schedule(
 
     # Warmup packed path (FlexAttention + torch.compile for forward_packed)
     has_t2i = any(b["type"] == "t2i" for b in schedule)
-    if has_t2i:
-        print(f"  Warming up packed forward (FlexAttention)...")
-        t0 = time.perf_counter()
-        client.warmup_packed(n_images=min(PACK_SIZE, 2))
-        timing["warmup"] += time.perf_counter() - t0
+    if packed and has_t2i:
+        # Each new total_len triggers torch.compile recompilation (~45-73s).
+        # Pre-warm ALL sizes 1..PACK_SIZE so remainder batches don't cause
+        # cold compiles during generation.
+        warmup_sizes = list(range(1, PACK_SIZE + 1))
+        for ws in warmup_sizes:
+            print(f"  Warming up packed forward (FlexAttention, n_images={ws})...")
+            t0 = time.perf_counter()
+            client.warmup_packed(n_images=ws)
+            timing["warmup"] += time.perf_counter() - t0
+            print(f"    Done ({time.perf_counter() - t0:.1f}s)")
+    elif packed:
+        print("  (--packed has no effect: no t2i batches in schedule)")
 
     # ---------------------------------------------------------------
     # Phase 3: Generate trajectories
     # ---------------------------------------------------------------
-    traj_idx = _next_traj_idx(latents_dir)  # Append after any existing trajectories.
+    if v2_writer is not None:
+        traj_idx = v2_writer.next_traj_id
+        existing_count = v2_writer.n_trajectories
+    else:
+        traj_idx = _next_traj_idx(latents_dir)
+        existing_count = len(_load_existing_records(latents_dir))
     start_idx = traj_idx
     # RNG is deterministic within this schedule: every trajectory in the schedule
     # advances the RNG whether it's generated or skipped, so resume after interrupt
@@ -382,13 +468,14 @@ def run_schedule(
     generated_count = 0
     skipped_count = 0
     rng = random.Random(rng_seed)
-    all_records = _load_existing_records(latents_dir)
 
-    print(f"\nExisting trajectories: {len(all_records)}")
+    print(f"\nExisting trajectories: {existing_count}")
     print()
 
-    # Collect trajectories that need rendering
-    render_queue: list[tuple[Path, Path]] = []
+    # Collect trajectories that need rendering.
+    # For v1: list of (traj_dir: Path, render_dir: Path)
+    # For v2: list of (final_tensor: Tensor, render_dir: Path)
+    render_queue: list[tuple] = []
 
     for batch_i, batch in enumerate(schedule):
         if _interrupted:
@@ -403,23 +490,39 @@ def run_schedule(
 
         # Packing accumulator: adjacent t2i trajectories with the same
         # n_steps are batched into a single FlexAttention forward pass.
+        # Only used when packed=True.
         pending_pack: list[tuple[int, dict, Path]] = []
+        pack_flush_count = 0  # Number of packed flushes in this batch
 
         def _do_flush():
             """Flush the pending pack and update counters."""
-            nonlocal batch_generated, generated_count, render_done
+            nonlocal batch_generated, generated_count, render_done, pack_flush_count
+            idxs = [idx for idx, _, _ in pending_pack]
+            n_steps_label = pending_pack[0][1]["n_steps"]
+            print(f"    Packed flush: {len(pending_pack)} images "
+                  f"(traj {idxs[0]:06d}..{idxs[-1]:06d}, "
+                  f"{n_steps_label} steps)...", end="", flush=True)
+            t_flush = time.perf_counter()
             n = _flush_packed_batch(
                 client, pending_pack, te_cache, neg_cond,
                 defs, timing, batch_i,
+                v2_writer=v2_writer,
             )
-            # Queue renders for the flushed trajectories
-            for idx, params_p, tdir in pending_pack:
-                if render_done < batch_render:
-                    rdir = output_dir / "renders" / f"traj_{idx:06d}"
-                    render_queue.append((tdir, rdir))
-                    render_done += 1
+            elapsed = time.perf_counter() - t_flush
+            print(f" {elapsed:.1f}s ({elapsed/len(pending_pack):.1f}s/img)")
+            # Queue renders for the flushed trajectories.
+            # For v2, packed results are written to the blob -- rendering from
+            # blobs is not supported here (the tensor is not retained in memory).
+            # Only queue v1 renders where the .pt file is on disk.
+            if v2_writer is None:
+                for idx, params_p, tdir in pending_pack:
+                    if render_done < batch_render:
+                        rdir = output_dir / "renders" / f"traj_{idx:06d}"
+                        render_queue.append((tdir, rdir))
+                        render_done += 1
             batch_generated += n
             generated_count += n
+            pack_flush_count += 1
 
         for j in range(batch_count):
             if _interrupted:
@@ -433,12 +536,19 @@ def run_schedule(
 
             # Skip if this trajectory was already generated (resume)
             traj_dir = latents_dir / f"traj_{traj_idx:06d}"
-            if (traj_dir / "meta.json").exists():
+            if v2_writer is not None:
+                # v2 resume: skip trajectories that already exist in the writer
+                if traj_idx < start_idx:
+                    traj_idx += 1
+                    skipped_count += 1
+                    continue
+            elif (traj_dir / "meta.json").exists():
                 traj_idx += 1
                 skipped_count += 1
                 continue
 
-            if batch_type == "t2i":
+            if batch_type == "t2i" and packed:
+                # -- Packed path: accumulate into FlexAttention batch --
                 # Check compatibility with pending pack (must share n_steps)
                 if pending_pack:
                     pack_n_steps = pending_pack[0][1]["n_steps"]
@@ -451,6 +561,47 @@ def run_schedule(
                 if len(pending_pack) >= PACK_SIZE:
                     _do_flush()
                     pending_pack = []
+
+            elif batch_type == "t2i":
+                # -- Single-image path (--no-packed) --
+                t_traj = time.perf_counter()
+                result = client.sample_trajectory(
+                    pos_cond=te_cache[params["prompt"]],
+                    neg_cond=neg_cond,
+                    seed=params["seed"],
+                    n_steps=params["n_steps"],
+                    cfg=defs["cfg"],
+                    width=defs["width"],
+                    height=defs["height"],
+                    attention_backend=batch_precision,
+                    sampling_shift=defs["sampling_shift"],
+                    multiplier=defs["multiplier"],
+                    save_steps=defs["save_steps"],
+                )
+                dt = time.perf_counter() - t_traj
+                timing["diffusion"] += dt
+
+                if v2_writer is not None:
+                    v2_meta = _params_to_v2_meta(
+                        params, batch_i, defs, packed=False,
+                        timing_seconds=dt,
+                    )
+                    v2_writer.add_trajectory(tensors=result, metadata=v2_meta)
+                else:
+                    meta = {**params, "batch_idx": batch_i, "packed": False}
+                    save_trajectory(traj_dir, result, meta)
+
+                if render_done < batch_render:
+                    render_dir = output_dir / "renders" / f"traj_{traj_idx:06d}"
+                    if v2_writer is not None and "final" in result:
+                        render_queue.append((result["final"], render_dir))
+                    else:
+                        render_queue.append((traj_dir, render_dir))
+                    render_done += 1
+
+                batch_generated += 1
+                generated_count += 1
+
             else:
                 # i2i: flush any pending t2i pack, then run individually
                 if pending_pack:
@@ -481,15 +632,27 @@ def run_schedule(
                     denoise=params["denoise"],
                     clean_latent=clean_latent,
                 )
-                timing["diffusion"] += time.perf_counter() - t_traj
+                dt = time.perf_counter() - t_traj
+                timing["diffusion"] += dt
 
-                meta = {**params, "batch_idx": batch_i,
-                        "output_width": i2i_w, "output_height": i2i_h}
-                save_trajectory(traj_dir, result, meta)
+                if v2_writer is not None:
+                    v2_meta = _params_to_v2_meta(
+                        params, batch_i, defs, packed=False,
+                        width=i2i_w, height=i2i_h,
+                        timing_seconds=dt,
+                    )
+                    v2_writer.add_trajectory(tensors=result, metadata=v2_meta)
+                else:
+                    meta = {**params, "batch_idx": batch_i,
+                            "output_width": i2i_w, "output_height": i2i_h}
+                    save_trajectory(traj_dir, result, meta)
 
                 if render_done < batch_render:
                     render_dir = output_dir / "renders" / f"traj_{traj_idx:06d}"
-                    render_queue.append((traj_dir, render_dir))
+                    if v2_writer is not None and "final" in result:
+                        render_queue.append((result["final"], render_dir))
+                    else:
+                        render_queue.append((traj_dir, render_dir))
                     render_done += 1
 
                 batch_generated += 1
@@ -503,8 +666,12 @@ def run_schedule(
             pending_pack = []
 
         if batch_generated > 0:
+            pack_info = ""
+            if packed and batch_type == "t2i" and pack_flush_count > 0:
+                pack_info = f", {pack_flush_count} packed flushes"
             print(f"  Batch [{batch_i}] {batch_type}/{batch_precision}: "
                   f"generated {batch_generated}/{batch_count}"
+                  f"{pack_info}"
                   f"{f', rendered {render_done}' if render_done else ''}")
 
     # ---------------------------------------------------------------
@@ -512,24 +679,38 @@ def run_schedule(
     # ---------------------------------------------------------------
     if render_queue and not _interrupted:
         print(f"\nRendering {len(render_queue)} trajectories...")
-        for traj_dir, render_dir in render_queue:
+        for src, render_dir in render_queue:
             t0 = time.perf_counter()
-            final_file = traj_dir / "final.pt"
-            if final_file.exists():
-                render_latent_to_png(client, final_file, render_dir / "final.png")
+            if isinstance(src, torch.Tensor):
+                # v2 path: src is the final latent tensor directly
+                render_tensor_to_png(client, src, render_dir / "final.png")
+            elif isinstance(src, Path):
+                # v1 path: src is the traj_dir
+                final_file = src / "final.pt"
+                if final_file.exists():
+                    render_latent_to_png(client, final_file, render_dir / "final.png")
             timing["vae_decode"] += time.perf_counter() - t0
 
     # ---------------------------------------------------------------
-    # Save manifest
+    # Close v2 writer (seals WIP blob + writes final index)
     # ---------------------------------------------------------------
-    all_records = _load_existing_records(latents_dir)
-    manifest = {
-        "schedule": schedule,
-        "rng_seed": rng_seed,
-        "records": all_records,
-    }
-    manifest_path = output_dir / "manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2))
+    total_records = 0
+    manifest_path = None
+    if v2_writer is not None:
+        v2_writer.__exit__(None, None, None)
+        total_records = v2_writer.n_trajectories
+        manifest_path = output_dir / "index.parquet"
+    else:
+        # Save v1 manifest
+        all_records = _load_existing_records(latents_dir)
+        total_records = len(all_records)
+        manifest = {
+            "schedule": schedule,
+            "rng_seed": rng_seed,
+            "records": all_records,
+        }
+        manifest_path = output_dir / "manifest.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2))
 
     # Throughput summary
     wall_total = time.perf_counter() - wall_start
@@ -551,8 +732,8 @@ def run_schedule(
         print(f"\n  Avg diffusion: {avg:.1f}s/trajectory")
         print(f"  Throughput:    {imgs_per_min:.2f} images/min")
         print(f"  GPU util:      {100*gpu_active/wall_total:.1f}%")
-    print(f"  Total records: {len(all_records)}")
-    print(f"  Manifest:      {manifest_path}")
+    print(f"  Total records: {total_records}")
+    print(f"  Index/Manifest: {manifest_path}")
     print(f"{'='*60}")
 
 
@@ -570,11 +751,14 @@ DEFAULT_SCHEDULE = [
 ]
 
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Generate BTRM training dataset (schedule-driven, server-backed)")
     parser.add_argument("--output-dir", type=str,
-                        default=r"F:\dox\repos\ai\futudiffu\btrm_dataset")
+                        default=str(_REPO_ROOT / "btrm_dataset"))
     parser.add_argument("--schedule", type=str, default=None,
                         help="Path to schedule JSON file")
     parser.add_argument("--rng-seed", type=int, default=42)
@@ -590,12 +774,28 @@ def main():
                         help="Total trajectories to render across all batches")
 
     parser.add_argument("--i2i-dir", type=str,
-                        default=r"F:\dox\repos\ai\futudiffu\i2i_off_policies")
+                        default=str(_REPO_ROOT / "i2i_off_policies"))
+
+    parser.add_argument("--packed", action="store_true", default=False,
+                        help="Use FlexAttention batch packing for t2i (~4x throughput)")
+    parser.add_argument("--no-packed", action="store_false", dest="packed",
+                        help="Use single-image generation (default, safe)")
+
+    parser.add_argument("--dataset-format", type=str, default="v1",
+                        choices=["v1", "v2"],
+                        help="Output format: v1 (per-dir .pt) or v2 (parquet + safetensors)")
+
+    parser.add_argument("--gpu-id", type=int, default=None,
+                        help="GPU ID for multi-GPU staging. Appends '_gpu{id}' to output dir. "
+                             "Each GPU writes to its own staging directory to avoid lock contention.")
 
     parser.add_argument("--dry-run", action="store_true",
                         help="Print schedule and exit")
 
     args = parser.parse_args()
+
+    if args.gpu_id is not None:
+        args.output_dir = str(args.output_dir) + f"_gpu{args.gpu_id}"
 
     # Build schedule
     if args.schedule:
@@ -670,6 +870,8 @@ def main():
             output_dir=Path(args.output_dir),
             rng_seed=args.rng_seed,
             i2i_dir=args.i2i_dir,
+            packed=args.packed,
+            dataset_format=args.dataset_format,
         )
     return 0
 

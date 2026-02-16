@@ -36,6 +36,16 @@ def _check_triton_available() -> bool:
     return _HAS_TRITON
 
 
+def _get_sm_major() -> int:
+    """Return SM major version (8 for Ada, 9 for Hopper) or 0 if no CUDA."""
+    if not torch.cuda.is_available():
+        return 0
+    return torch.cuda.get_device_capability()[0]
+
+
+_SM_MAJOR = _get_sm_major()  # cache at module load
+
+
 if _HAS_TRITON:
     # ==============================================================================
     # FP8 Activation Quantization
@@ -96,6 +106,21 @@ if _HAS_TRITON:
         for num_stages in [3, 4, 5]
         for num_warps in [4, 8]
     ]
+
+    # SM90 (Hopper): larger tiles, deeper pipelines, 4-warp-group scheduling.
+    # 228KB shared memory (vs 100KB on SM89) enables 512-wide M tiles and
+    # 6-8 pipeline stages. num_warps=16 maps to 4 warp groups on Hopper.
+    if _SM_MAJOR >= 9:
+        fp8_gemm_configs.extend([
+            Config(
+                {"BLOCK_SIZE_M": block_m},
+                num_stages=num_stages,
+                num_warps=num_warps,
+            )
+            for block_m in [256, 512]
+            for num_stages in [6, 7, 8]
+            for num_warps in [8, 16]
+        ])
 
     @triton.autotune(configs=fp8_gemm_configs, key=["M", "N", "K"])
     @triton.jit
@@ -989,11 +1014,12 @@ if _HAS_TRITON:
         return per_stage * ns
 
     # SM89 has 100KB (102400 bytes) shared memory per threadblock.
+    # SM90 (Hopper) has 228KB (233472 bytes) shared memory per threadblock.
     # K tile is always input_block_size=128 (not autotuned).
     # Use a generous filter (2x) — Triton rejects oversized configs at JIT time,
     # and the autotuner gracefully skips compilation failures.
     _IBS = 128  # input_block_size for smem estimation
-    _SMEM_LIMIT = 102400 * 2  # generous: 200KB filter, actual 100KB enforced by HW
+    _SMEM_LIMIT = (233472 * 2) if _SM_MAJOR >= 9 else (102400 * 2)  # 2x generous filter
     fp8_gemm_v2_configs = [
         Config(
             {"BLOCK_SIZE_M": bm, "BLOCK_SIZE_N": bn},
@@ -1006,6 +1032,29 @@ if _HAS_TRITON:
         for nw in [4, 8]
         if _smem_estimate_v2(bm, bn, _IBS, ns) <= _SMEM_LIMIT
     ]
+
+    # SM90 (Hopper): deeper pipelines and larger tiles enabled by 228KB smem.
+    # Adds 512-wide M tiles, extended pipeline stages, and 16-warp (4 warp-group)
+    # configs. Stage range starts at 3 (overlap with SM89 only at new tile sizes)
+    # because larger tiles benefit from Hopper smem even at moderate pipeline depth.
+    if _SM_MAJOR >= 9:
+        _sm90_v2_existing = {
+            (c.kwargs.get("BLOCK_SIZE_M"), c.kwargs.get("BLOCK_SIZE_N"), c.num_stages, c.num_warps)
+            for c in fp8_gemm_v2_configs
+        }
+        fp8_gemm_v2_configs.extend([
+            Config(
+                {"BLOCK_SIZE_M": bm, "BLOCK_SIZE_N": bn},
+                num_stages=ns,
+                num_warps=nw,
+            )
+            for bm in [256, 512]
+            for bn in [128, 256]
+            for ns in [3, 4, 5, 6, 7, 8]
+            for nw in [8, 16]
+            if _smem_estimate_v2(bm, bn, _IBS, ns) <= _SMEM_LIMIT
+            and (bm, bn, ns, nw) not in _sm90_v2_existing
+        ])
 
     @triton.autotune(configs=fp8_gemm_v2_configs, key=["M", "N", "K"])
     @triton.jit
@@ -1339,6 +1388,29 @@ if _HAS_TRITON:
         for nw in [4, 8]
         if _smem_estimate_v2(bm, bn, bk, ns) <= _SMEM_LIMIT
     ]
+
+    # SM90 (Hopper): larger M tiles, deeper pipelines for pre-quantized FP8 path.
+    # Same stage range rationale as v2 above — include moderate stages for new tiles.
+    if _SM_MAJOR >= 9:
+        _sm90_v1t_existing = {
+            (c.kwargs.get("BLOCK_SIZE_M"), c.kwargs.get("BLOCK_SIZE_N"),
+             c.kwargs.get("BLOCK_SIZE_K"), c.num_stages, c.num_warps)
+            for c in fp8_gemm_v1t_configs
+        }
+        fp8_gemm_v1t_configs.extend([
+            Config(
+                {"BLOCK_SIZE_M": bm, "BLOCK_SIZE_N": bn, "BLOCK_SIZE_K": bk},
+                num_stages=ns,
+                num_warps=nw,
+            )
+            for bm in [256, 512]
+            for bn in [128, 256]
+            for bk in [128]
+            for ns in [3, 4, 5, 6, 7, 8]
+            for nw in [8, 16]
+            if _smem_estimate_v2(bm, bn, bk, ns) <= _SMEM_LIMIT
+            and (bm, bn, bk, ns, nw) not in _sm90_v1t_existing
+        ])
 
     @triton.autotune(configs=fp8_gemm_v1t_configs, key=["M", "N", "K"])
     @triton.jit

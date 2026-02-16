@@ -50,9 +50,14 @@ def sdpa_attention(
         heads: Number of attention heads.
         mask: Optional attention mask.
         skip_reshape: If True, input is already (B, heads, seq, dim).
-        block_mask: Optional FlexAttention BlockMask for packed batch inference.
-            When provided, FlexAttention is used unconditionally (ignoring the
-            attention backend setting and the mask parameter).
+        block_mask: Optional mask for packed batch inference. Accepts either:
+            - A FlexAttention BlockMask: dispatches to FlexAttention.
+            - A torch.Tensor (uint8): dispatches to SageAttention masked kernel
+              when the attention backend is "sage" or "auto". Shape must be
+              (n_q_blocks, n_kv_blocks) or (B*H, n_q_blocks, n_kv_blocks)
+              where blocks are BLOCK_M=128 for Q and BLOCK_N=64 for K/V.
+            When the backend is "sdpa" and block_mask is a uint8 tensor,
+            falls back to FlexAttention (requires conversion by the caller).
 
     Returns:
         Output tensor (B, seq, heads*dim).
@@ -64,8 +69,24 @@ def sdpa_attention(
         dim_head //= heads
         q, k, v = (t.view(b, -1, heads, dim_head).transpose(1, 2) for t in (q, k, v))
 
+    # Dispatch to SageAttention masked kernel when block_mask is a uint8 tensor
+    # and the attention backend is sage or auto.
+    if block_mask is not None and isinstance(block_mask, Tensor):
+        if block_mask.dtype == torch.uint8 and _ATTENTION_BACKEND in ("sage", "auto"):
+            try:
+                from .sage_attention import sage_attn_forward_masked
+                sm_scale = 1.0 / (dim_head ** 0.5)
+                out = sage_attn_forward_masked(q, k, v, block_mask, sm_scale)
+                out = out.transpose(1, 2).reshape(b, -1, heads * dim_head)
+                return out
+            except Exception:
+                if _ATTENTION_BACKEND == "sage":
+                    raise
+                # "auto" mode: fall through to FlexAttention
+
     # FlexAttention dispatch for packed batch inference.
-    # Takes priority over all other backends when block_mask is provided.
+    # Handles FlexAttention BlockMask objects and fallback for uint8 tensors
+    # when sage backend is not active.
     if block_mask is not None:
         from torch.nn.attention.flex_attention import flex_attention
         out = flex_attention(q, k, v, block_mask=block_mask)

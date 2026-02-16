@@ -1,0 +1,39 @@
+{
+  "run_a_dir": "F:\\dox\\repos\\ai\\futudiffu\\validation_renders\\replication_test\\run_a",
+  "run_b_dir": "F:\\dox\\repos\\ai\\futudiffu\\validation_renders\\replication_test\\run_b",
+  "run_a_render": "F:\\dox\\repos\\ai\\futudiffu\\validation_renders\\replication_test\\run_a_render.png",
+  "run_b_render": "F:\\dox\\repos\\ai\\futudiffu\\validation_renders\\replication_test\\run_b_render.png",
+  "diff_10x": "F:\\dox\\repos\\ai\\futudiffu\\validation_renders\\replication_test\\diff_10x.png",
+  "residual_analysis": "F:\\dox\\repos\\ai\\futudiffu\\validation_renders\\replication_test\\residual_analysis",
+  "config": {
+    "prompt": "ahem.\n*ting ting ting ting ting*\nthe query model for this is a LARGE LANGUAGE MODEL, specifically QWEN-3-4B, a GENERAL PURPOSE SEMANTIC PARSER which is able to WRITE SENTENCES AT A TIME when they are participating in dialogue. however, in this situation, they are being used as a hidden state generator to steer an *image generation model*, z-image.\n\nqwen-3-4b, draw me an \"enormous laser shark for the sega saturn\".",
+    "seed": 91849188298864,
+    "n_steps": 30,
+    "cfg": 4.0,
+    "width": 1280,
+    "height": 832,
+    "port": 5560
+  },
+  "results": {
+    "te_pos_bitwise": true,
+    "te_neg_bitwise": true,
+    "te_pos_cos": 1.0000615119934082,
+    "te_neg_cos": 1.0000059604644775,
+    "final_cos": 0.9999812245368958,
+    "final_mse": 0.0,
+    "final_bitwise": true,
+    "vae_cos": 0.9996368288993835,
+    "vae_mse": 0.0,
+    "vae_bitwise": true,
+    "mean_pixel_diff": 0.0,
+    "max_pixel_diff": 0.0
+  },
+  "timing": {
+    "run_a_seconds": 45.65,
+    "run_b_seconds": 23.49,
+    "total_seconds": 127.67
+  },
+  "verdict": "BITWISE REPRODUCIBLE: All outputs identical between runs.",
+  "timestamp": "2026-02-14T19:14:47",
+  "torch_version": "2.10.0+cu128"
+}
