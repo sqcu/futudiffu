@@ -37,12 +37,13 @@ import torch.nn.functional as F
 
 from futudiffu.btrm_dataset import PROMPT_TEMPLATES
 from futudiffu.client import InferenceClient
+from futudiffu.dataset_v2 import DatasetWriter
 from futudiffu.multi_gpu_client import MultiGPUClient
 from futudiffu.image_stats import naturalness_report
 from futudiffu.policy_loss import compute_group_advantages
 from futudiffu.rendering import decode_and_save
 from futudiffu.sampling import build_sigmas, simple_scheduler
-from futudiffu.trajectory_loader import TrajectoryPool
+from futudiffu.trajectory_loader import TrajectoryPool, TrajectoryPoolV2
 
 # Type alias: both client types share the same RPC interface
 Client = InferenceClient | MultiGPUClient
@@ -85,9 +86,15 @@ def _json_default(obj):
     return str(obj)
 
 
+_console_log = None  # Set by main() after output_dir is known
+
+
 def _stderr(msg: str) -> None:
-    """Print to stderr (human-readable output)."""
+    """Print to stderr and optional console logfile (human-readable output)."""
     print(msg, file=sys.stderr, flush=True)
+    if _console_log is not None:
+        _console_log.write(msg + "\n")
+        _console_log.flush()
 
 
 def _section(title: str) -> None:
@@ -271,19 +278,8 @@ def phase_btrm(
     """
     _section("Phase 1: BTRM Training")
 
-    # -- Inject rtheta LoRA on last 2 layers --
-    n_rtheta = client.inject_lora(
-        "rtheta", rank=lora_rank, alpha=lora_alpha,
-        layer_indices=[28, 29],
-    )
-    _stderr(f"  Injected rtheta: {n_rtheta} adapters on layers 28-29")
-
-    # Warmup compiled model with new LoRA
-    _stderr("  Warming up compiled model...")
-    t0 = time.monotonic()
-    client.warmup(attention_backend="sdpa")
-    _stderr(f"  Warmup done in {time.monotonic() - t0:.1f}s")
-
+    # Adapters already pre-injected + warmed up in main().
+    # Inject BTRM head (not pre-injected since it needs lr param).
     # -- Inject BTRM head --
     btrm_meta = client.inject_btrm_head(
         head_names=["scrimble", "scrongle"],
@@ -443,34 +439,35 @@ def phase_policy(
     lora_rank: int,
     lora_alpha: float,
     render_every: int = 0,
+    persist_fraction: float = 0.01,
+    persist_min_k: int = 1,
 ) -> None:
     """Phase 2: Policy optimization with live rollouts and diverse prompts.
 
-    Rollout capture rate (when render_every > 0):
-      - 1/K rollout finals VAE-decoded per render_every iterations
-      - group_size rollouts generated per iteration (default K=4)
-      - sparse_steps checkpoints kept transiently for gradient computation
-      - All rollout checkpoint latents are consumed then discarded (not persisted)
-      - VAE decode of 1 final is ~0.5s vs ~30s per trajectory — negligible
+    Rollout persistence: per iteration, the top-K rollouts (by reward) are
+    saved to a v2 dataset in {output_dir}/policy_rollouts/. K is
+    max(ceil(group_size * persist_fraction), persist_min_k). Default: 1
+    trajectory per iteration. Set persist_min_k=0 to disable.
     """
     _section("Phase 2: Policy Optimization")
 
-    # -- Freeze rtheta and silence it --
+    # -- Rollout persistence --
+    persist_count = max(math.ceil(group_size * persist_fraction), persist_min_k)
+    persist_dir = os.path.join(output_dir, "policy_rollouts")
+    if persist_count > 0:
+        _stderr(f"  Rollout persistence: {persist_count}/{group_size} per iteration "
+                f"-> {persist_dir}")
+    else:
+        _stderr("  Rollout persistence: disabled")
+
+    # -- Freeze rtheta, initialize + activate ptheta --
+    # Both adapter slots allocated + compiled in main(). No recompilation needed
+    # since lora_scale is a registered buffer (graph-invariant).
     client.set_adapter_config("rtheta", frozen=True, scale=0.0)
     _stderr("  rtheta frozen, scale=0")
-
-    # -- Inject ptheta on all layers --
-    n_ptheta = client.inject_lora(
-        "ptheta", rank=lora_rank, alpha=lora_alpha,
-        init_b_std=0.01,
-    )
-    _stderr(f"  Injected ptheta: {n_ptheta} adapters (all layers)")
-
-    # Warmup after injection
-    _stderr("  Warming up compiled model...")
-    t0 = time.monotonic()
-    client.warmup(attention_backend="sdpa")
-    _stderr(f"  Warmup done in {time.monotonic() - t0:.1f}s")
+    # Initialize ptheta weights for policy gradient (needs nonzero B for grad signal)
+    n_init = client.init_adapter_weights("ptheta", init_b_std=0.01, scale=1.0)
+    _stderr(f"  ptheta initialized ({n_init} modules, init_b_std=0.01, scale=1.0)")
 
     # -- Build sigma schedule --
     sigma_table = build_sigmas(shift=1.0, multiplier=1000.0)
@@ -493,7 +490,14 @@ def phase_policy(
     # -- Policy training loop --
     base_seed = 70000
 
-    for iteration in range(n_iterations):
+    # Open v2 dataset writer for rollout persistence (if enabled)
+    _writer = DatasetWriter(persist_dir) if persist_count > 0 else None
+    if _writer is not None:
+        _writer.__enter__()
+    n_persisted_total = 0
+
+    try:
+      for iteration in range(n_iterations):
         t0 = time.monotonic()
 
         # Sample a prompt for this iteration's group
@@ -502,17 +506,55 @@ def phase_policy(
         pos_cond, neg_cond_padded = pad_conds(pos_cond_raw, neg_cond)
 
         # -- Generate K rollouts --
-        rollout_rewards = []
+        # Track: rewards, seeds, checkpoints (for grads), finals (for persist)
+        rollout_rewards: list[float] = []
+        rollout_seeds: list[int] = []
         rollout_checkpoints: list[dict[int, torch.Tensor]] = []
-        render_latent = None  # Keep first rollout final for render check
+        rollout_finals: list[torch.Tensor | None] = []
+        render_latent = None
 
         mid_idx = sparse_indices[len(sparse_indices) // 2]
+
+        def _extract_reward_and_parts(trajectory: dict, k: int) -> float:
+            """Score a trajectory, extract reward + checkpoints + final."""
+            btrm_scores = trajectory.pop("_btrm_scores", None)
+            if btrm_scores is not None:
+                reward = btrm_scores[0][0]
+            else:
+                step_key = f"step_{mid_idx:02d}"
+                if step_key in trajectory:
+                    x_for_score = trajectory[step_key]
+                    sigma_for_score = sigmas[mid_idx]
+                else:
+                    x_for_score = trajectory["final"]
+                    sigma_for_score = sigmas[-2]
+                sigma_tensor = torch.tensor([float(sigma_for_score)])
+                scores = client.score_btrm(
+                    x_for_score, sigma_tensor, pos_cond[:1],
+                    attention_backend="sdpa",
+                )
+                reward = scores[0][0]
+
+            rollout_rewards.append(reward)
+
+            # Checkpoints for gradient computation
+            ckpts: dict[int, torch.Tensor] = {}
+            for si in sparse_indices:
+                sk = f"step_{si:02d}"
+                if sk in trajectory:
+                    ckpts[si] = trajectory[sk]
+            rollout_checkpoints.append(ckpts)
+
+            # Keep final latent for persistence + render check
+            rollout_finals.append(trajectory.get("final"))
+            return reward
 
         if hasattr(client, 'generate_trajectories'):
             # Multi-GPU: parallel rollout generation across servers
             jobs = []
             for k in range(group_size):
                 seed = base_seed + iteration * 1000 + k
+                rollout_seeds.append(seed)
                 jobs.append({
                     "pos_cond": pos_cond, "neg_cond": neg_cond_padded,
                     "seed": seed, "n_steps": rollout_steps,
@@ -523,43 +565,13 @@ def phase_policy(
             trajectories = client.generate_trajectories(jobs)
 
             for k, trajectory in enumerate(trajectories):
-                # Extract reward (inline or fallback)
-                btrm_scores = trajectory.pop("_btrm_scores", None)
-                if btrm_scores is not None:
-                    reward = btrm_scores[0][0]
-                else:
-                    step_key = f"step_{mid_idx:02d}"
-                    if step_key in trajectory:
-                        x_for_score = trajectory[step_key]
-                        sigma_for_score = sigmas[mid_idx]
-                    else:
-                        x_for_score = trajectory["final"]
-                        sigma_for_score = sigmas[-2]
-                    sigma_tensor = torch.tensor([float(sigma_for_score)])
-                    scores = client.score_btrm(
-                        x_for_score, sigma_tensor, pos_cond[:1],
-                        attention_backend="sdpa",
-                    )
-                    reward = scores[0][0]
-
-                rollout_rewards.append(reward)
-
-                # Collect checkpoints for gradient computation
-                ckpts: dict[int, torch.Tensor] = {}
-                for si in sparse_indices:
-                    sk = f"step_{si:02d}"
-                    if sk in trajectory:
-                        ckpts[si] = trajectory[sk]
-                rollout_checkpoints.append(ckpts)
-
-                if k == 0 and render_every > 0:
-                    render_latent = trajectory.get("final")
-
-                del trajectory
+                _extract_reward_and_parts(trajectory, k)
+                # Don't del trajectory yet — finals/checkpoints hold refs
         else:
             # Single-GPU: sequential rollout generation
             for k in range(group_size):
                 seed = base_seed + iteration * 1000 + k
+                rollout_seeds.append(seed)
 
                 trajectory = client.sample_trajectory(
                     pos_cond, neg_cond_padded, seed=seed,
@@ -568,43 +580,11 @@ def phase_policy(
                     save_steps=sparse_indices,
                     score_at_step=mid_idx,
                 )
+                _extract_reward_and_parts(trajectory, k)
 
-                # Read BTRM scores from inline scoring (avoids separate RPC)
-                btrm_scores = trajectory.pop("_btrm_scores", None)
-                if btrm_scores is not None:
-                    reward = btrm_scores[0][0]
-                else:
-                    # Fallback: standalone BTRM scoring RPC
-                    step_key = f"step_{mid_idx:02d}"
-                    if step_key in trajectory:
-                        x_for_score = trajectory[step_key]
-                        sigma_for_score = sigmas[mid_idx]
-                    else:
-                        x_for_score = trajectory["final"]
-                        sigma_for_score = sigmas[-2]
-                    sigma_tensor = torch.tensor([float(sigma_for_score)])
-                    scores = client.score_btrm(
-                        x_for_score, sigma_tensor, pos_cond[:1],
-                        attention_backend="sdpa",
-                    )
-                    reward = scores[0][0]
-
-                # Use head 0 (scrimble / bit_quality) as reward signal
-                rollout_rewards.append(reward)
-
-                # Collect checkpoints for gradient computation
-                ckpts: dict[int, torch.Tensor] = {}
-                for si in sparse_indices:
-                    sk = f"step_{si:02d}"
-                    if sk in trajectory:
-                        ckpts[si] = trajectory[sk]
-                rollout_checkpoints.append(ckpts)
-
-                # Keep first rollout final for periodic render health check
-                if k == 0 and render_every > 0:
-                    render_latent = trajectory.get("final")
-
-                del trajectory
+        # Render latent = first rollout's final (before any cleanup)
+        if render_every > 0 and rollout_finals and rollout_finals[0] is not None:
+            render_latent = rollout_finals[0]
 
         t_rollout = time.monotonic() - t0
 
@@ -630,6 +610,47 @@ def phase_policy(
             max_grad_norm=1.0,
             lr=lr,
         )
+
+        # -- Persist top-k rollouts (by reward) to v2 dataset --
+        if _writer is not None and persist_count > 0:
+            # Rank by reward, persist the top persist_count
+            ranked = sorted(range(group_size), key=lambda i: rollout_rewards[i],
+                            reverse=True)
+            for rank_pos, k in enumerate(ranked[:persist_count]):
+                # Build tensors dict from checkpoints + final
+                tensors: dict[str, torch.Tensor] = {}
+                for si, t in rollout_checkpoints[k].items():
+                    tensors[f"step_{si:02d}"] = t
+                if rollout_finals[k] is not None:
+                    tensors["final"] = rollout_finals[k]
+                if not tensors:
+                    continue
+                try:
+                    _writer.add_trajectory(
+                        tensors=tensors,
+                        metadata={
+                            "prompt": PROMPT_TEMPLATES[prompt_idx],
+                            "prompt_idx": prompt_idx,
+                            "seed": rollout_seeds[k],
+                            "cfg": cfg,
+                            "width": 1280,
+                            "height": 832,
+                            "n_steps": rollout_steps,
+                            "attention_backend": "sage",
+                            "batch_type": "policy_rollout",
+                            "policy_iter": iteration,
+                            "reward": float(rollout_rewards[k]),
+                            "advantage": float(advantages[k]),
+                            "group_rank": rank_pos,
+                            "group_size": group_size,
+                        },
+                    )
+                    n_persisted_total += 1
+                except Exception as e:
+                    _stderr(f"  WARNING: rollout persist failed: {e}")
+
+        # Free trajectory tensors
+        del rollout_checkpoints, rollout_finals
 
         dt = time.monotonic() - t0
         mean_reward = rewards.mean().item()
@@ -675,7 +696,12 @@ def phase_policy(
         if checkpoint_every > 0 and (iteration + 1) % checkpoint_every == 0:
             _checkpoint(client, output_dir, f"policy_iter_{iteration + 1:04d}")
 
-    _stderr(f"\n  Phase 2 complete: {n_iterations} policy iterations.")
+    finally:
+        if _writer is not None:
+            _writer.__exit__(None, None, None)
+
+    _stderr(f"\n  Phase 2 complete: {n_iterations} policy iterations, "
+            f"{n_persisted_total} rollouts persisted to {persist_dir}")
 
 
 # ---------------------------------------------------------------------------
@@ -730,8 +756,9 @@ def main() -> int:
                              "First port is primary (handles training RPCs).")
 
     # Dataset
-    parser.add_argument("--dataset-dir", type=str, required=True,
-                        help="Path to btrm_dataset/ directory")
+    parser.add_argument("--dataset-dirs", type=str, nargs="+", required=True,
+                        help="Path(s) to dataset directories (v1 or v2 format). "
+                             "Multiple dirs are read as a union.")
 
     # Output
     parser.add_argument("--output-dir", type=str, required=True,
@@ -778,6 +805,13 @@ def main() -> int:
                         help="VAE-decode a rollout final every N steps/iters for "
                              "pathology checks (0 to disable)")
 
+    # Rollout persistence
+    parser.add_argument("--persist-fraction", type=float, default=0.01,
+                        help="Fraction of rollouts to persist per policy iteration")
+    parser.add_argument("--persist-min-k", type=int, default=1,
+                        help="Minimum rollouts to persist per policy iteration "
+                             "(0 to disable persistence)")
+
     # Phase control
     parser.add_argument("--skip-btrm", action="store_true",
                         help="Skip phase 1 (BTRM training)")
@@ -790,6 +824,8 @@ def main() -> int:
 
     # -- Setup --
     os.makedirs(args.output_dir, exist_ok=True)
+    global _console_log
+    _console_log = open(os.path.join(args.output_dir, "console.log"), "a", buffering=1)
     logger = MetricsLogger(args.output_dir)
 
     _section("futudiffu production training")
@@ -850,6 +886,48 @@ def main() -> int:
         pos_conds, neg_cond, prompt_cache = None, None, None
 
     # ===================================================================
+    # Allocate ALL adapter slots BEFORE compile.
+    # Graph-mutating allocation happens once. Compile captures the final
+    # graph with all adapter branches. Phase transitions just toggle
+    # scale (registered buffer) — no recompilation.
+    # ===================================================================
+
+    if run_btrm or run_policy:
+        # Step 1: Allocate slots (graph-mutating, no recompile)
+        n_rtheta = client.allocate_adapter(
+            "rtheta", rank=args.lora_rank, alpha=args.lora_alpha,
+            layer_indices=[28, 29],
+        )
+        _stderr(f"  Allocated rtheta: {n_rtheta} slots on layers 28-29")
+
+        if run_policy:
+            n_ptheta = client.allocate_adapter(
+                "ptheta", rank=args.lora_rank, alpha=args.lora_alpha,
+            )
+            _stderr(f"  Allocated ptheta: {n_ptheta} slots (all layers, silent)")
+
+        # Step 2: One compile warmup for all adapters
+        _stderr("  Warming up compiled model (all adapter slots allocated)...")
+        t0 = time.monotonic()
+        if isinstance(client, MultiGPUClient):
+            client.warmup_all(attention_backend="sdpa")
+        else:
+            client.warmup(attention_backend="sdpa")
+        warmup_dt = time.monotonic() - t0
+        _stderr(f"  Warmup done in {warmup_dt:.1f}s")
+        logger.log({"phase": "warmup", "event": "all_adapters_compiled",
+                     "dt_s": round(warmup_dt, 2)})
+
+        # Step 3: Initialize weights (graph-invariant, safe after compile)
+        client.init_adapter_weights("rtheta", init_b_std=0.0, scale=1.0)
+        _stderr("  rtheta initialized (scale=1.0, zero-init B)")
+
+        if run_policy:
+            # ptheta stays silent until Phase 2 — allocate gave it scale=0
+            # Don't init weights yet; Phase 2 will init with init_b_std=0.01
+            pass
+
+    # ===================================================================
     # Phase 1: BTRM Training
     # ===================================================================
 
@@ -858,10 +936,35 @@ def main() -> int:
                 + (" [--resume]" if args.resume else " [--skip-btrm]"))
         logger.log({"phase": "btrm", "event": "skipped",
                      "reason": "resume" if args.resume else "skip-btrm"})
+        # Phase 2 needs a BTRM head for rollout scoring. When BTRM training is
+        # skipped, inject an (untrained) head here so the server has one.
+        # TODO: load trained BTRM head weights from checkpoint if available.
+        if run_policy:
+            btrm_meta = client.inject_btrm_head(
+                head_names=["scrimble", "scrongle"],
+                logit_cap=10.0,
+                lr=args.btrm_lr,
+            )
+            _stderr(f"  BTRM head injected (untrained, for scoring): "
+                    f"{btrm_meta.get('n_params', '?')} params")
     else:
-        # Load trajectory pool
-        _stderr(f"\n  Loading trajectories from {args.dataset_dir}...")
-        pool = TrajectoryPool(args.dataset_dir, include_i2i=False)
+        # Load trajectory pool (auto-detect v1 vs v2 per directory)
+        v2_dirs = [d for d in args.dataset_dirs if os.path.exists(os.path.join(d, "index.parquet"))]
+        v1_dirs = [d for d in args.dataset_dirs if os.path.exists(os.path.join(d, "manifest.json"))]
+        _stderr(f"\n  Dataset dirs: {len(v2_dirs)} v2, {len(v1_dirs)} v1")
+
+        if v2_dirs:
+            _stderr(f"  Loading v2 datasets: {v2_dirs}")
+            pool = TrajectoryPoolV2(v2_dirs, include_i2i=False)
+        elif v1_dirs:
+            if len(v1_dirs) > 1:
+                _stderr(f"  WARNING: v1 format only supports single dir, using {v1_dirs[0]}")
+            _stderr(f"  Loading v1 dataset: {v1_dirs[0]}")
+            pool = TrajectoryPool(v1_dirs[0], include_i2i=False)
+        else:
+            _stderr(f"  ERROR: No valid dataset found in {args.dataset_dirs}")
+            return 1
+
         _stderr(f"  {len(pool.examples)} examples loaded")
 
         phase_btrm(
@@ -907,6 +1010,8 @@ def main() -> int:
             lora_rank=args.lora_rank,
             lora_alpha=args.lora_alpha,
             render_every=args.render_every,
+            persist_fraction=args.persist_fraction,
+            persist_min_k=args.persist_min_k,
         )
 
     # ===================================================================

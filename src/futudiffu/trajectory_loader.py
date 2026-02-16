@@ -167,3 +167,112 @@ class TrajectoryPool:
         drive = win_path[0].lower()
         rest = win_path[2:].replace("\\", "/")
         return f"/mnt/{drive}{rest}"
+
+
+class TrajectoryPoolV2:
+    """V2 dataset adapter: reads parquet+safetensors from multiple dirs.
+
+    Exposes the same API as TrajectoryPool (.examples, .load_checkpoint,
+    .scrimble_split, .scrongle_split) so phase_btrm works unchanged.
+    """
+
+    def __init__(self, dataset_dirs: list[str], include_i2i: bool = False):
+        from .dataset_v2 import DatasetReader
+
+        self._readers: list[DatasetReader] = []
+        self._readers_by_dir: dict[str, DatasetReader] = {}
+        self._examples: list[TrajectoryExample] = []
+        self._sigma_cache: dict[int, Tensor] = {}
+
+        for dir_path in dataset_dirs:
+            reader = DatasetReader(dir_path)
+            self._readers.append(reader)
+            self._readers_by_dir[dir_path] = reader
+
+            for _traj_id, meta in reader.iter_metadata():
+                batch_type = meta["batch_type"]
+                if batch_type == "i2i" and not include_i2i:
+                    continue
+
+                n_steps = meta["n_steps"]
+                sigmas = self._get_sigmas(n_steps)
+                attn_backend = meta["attention_backend"]
+                step_indices = meta["step_indices"]
+                # Encode reader dir + traj_id in traj_dir for load_checkpoint
+                traj_ref = f"v2:{dir_path}:{_traj_id}"
+
+                for step_idx in step_indices:
+                    if step_idx >= n_steps:
+                        continue
+                    self._examples.append(TrajectoryExample(
+                        traj_dir=traj_ref,
+                        step_key=f"step_{step_idx:02d}",
+                        step_idx=step_idx,
+                        sigma=float(sigmas[step_idx]),
+                        prompt=meta["prompt"],
+                        prompt_idx=meta.get("prompt_idx", -1),
+                        attn_backend=attn_backend,
+                        n_steps=n_steps,
+                        traj_type=batch_type,
+                        seed=meta["seed"],
+                    ))
+
+                if meta["has_final"]:
+                    self._examples.append(TrajectoryExample(
+                        traj_dir=traj_ref,
+                        step_key="final",
+                        step_idx=-1,
+                        sigma=0.0,
+                        prompt=meta["prompt"],
+                        prompt_idx=meta.get("prompt_idx", -1),
+                        attn_backend=attn_backend,
+                        n_steps=n_steps,
+                        traj_type=batch_type,
+                        seed=meta["seed"],
+                    ))
+
+    @property
+    def examples(self) -> list[TrajectoryExample]:
+        return self._examples
+
+    def load_checkpoint(self, example: TrajectoryExample) -> Tensor:
+        """Load latent tensor via v2 blob accessor."""
+        _, dir_path, traj_id_str = example.traj_dir.split(":", 2)
+        traj_id = int(traj_id_str)
+        reader = self._readers_by_dir[dir_path]
+        _, accessor = reader[traj_id]
+        return accessor[example.step_key]
+
+    def scrimble_split(self) -> tuple[list[int], list[int]]:
+        sdpa_indices = []
+        sage_indices = []
+        for i, ex in enumerate(self._examples):
+            if ex.traj_type != "t2i" or ex.n_steps != 30:
+                continue
+            if ex.step_idx == -1:
+                continue
+            if ex.attn_backend == "sdpa":
+                sdpa_indices.append(i)
+            else:
+                sage_indices.append(i)
+        return sdpa_indices, sage_indices
+
+    def scrongle_split(self) -> tuple[list[int], list[int]]:
+        full_indices = []
+        reduced_indices = []
+        for i, ex in enumerate(self._examples):
+            if ex.traj_type != "t2i":
+                continue
+            if ex.step_idx == -1:
+                continue
+            if ex.n_steps == 30:
+                full_indices.append(i)
+            else:
+                reduced_indices.append(i)
+        return full_indices, reduced_indices
+
+    def _get_sigmas(self, n_steps: int) -> Tensor:
+        if n_steps not in self._sigma_cache:
+            sigma_table = build_sigmas(shift=1.0, multiplier=1000.0)
+            self._sigma_cache[n_steps] = simple_scheduler(sigma_table, n_steps)
+        return self._sigma_cache[n_steps]

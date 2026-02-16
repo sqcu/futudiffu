@@ -36,6 +36,8 @@ Output structure:
 
 import argparse
 import json
+import math
+import multiprocessing
 import random
 import signal
 import sys
@@ -754,52 +756,45 @@ DEFAULT_SCHEDULE = [
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Generate BTRM training dataset (schedule-driven, server-backed)")
-    parser.add_argument("--output-dir", type=str,
-                        default=str(_REPO_ROOT / "btrm_dataset"))
-    parser.add_argument("--schedule", type=str, default=None,
-                        help="Path to schedule JSON file")
-    parser.add_argument("--rng-seed", type=int, default=42)
-    parser.add_argument("--server", type=str, default="tcp://localhost:5555",
-                        help="Inference server endpoint")
+def _worker_main(
+    server_url: str,
+    gpu_id: int,
+    schedule: list[dict],
+    output_dir: str,
+    rng_seed: int,
+    i2i_dir: str,
+    packed: bool,
+    dataset_format: str,
+) -> int:
+    """Single-server worker entry point. Runs in its own process when multi-server."""
+    out = Path(output_dir + f"_gpu{gpu_id}")
+    print(f"[gpu{gpu_id}] Connecting to {server_url}, writing to {out}")
 
-    # Shorthand: if no --schedule, build from counts
-    parser.add_argument("--t2i", type=int, default=None,
-                        help="Total t2i trajectories (split across gold/sage/scrongle)")
-    parser.add_argument("--i2i", type=int, default=None,
-                        help="Total i2i trajectories (split sdpa/sage)")
-    parser.add_argument("--render", type=int, default=6,
-                        help="Total trajectories to render across all batches")
+    with InferenceClient(server_url) as client:
+        try:
+            status = client.status()
+            print(f"[gpu{gpu_id}] Connected: {status.get('loaded_models', [])} loaded, "
+                  f"VRAM {status.get('vram_allocated_gb', '?')}GB allocated")
+        except Exception as e:
+            print(f"[gpu{gpu_id}] Cannot connect to {server_url}: {e}")
+            return 1
 
-    parser.add_argument("--i2i-dir", type=str,
-                        default=str(_REPO_ROOT / "i2i_off_policies"))
+        run_schedule(
+            schedule=schedule,
+            client=client,
+            output_dir=out,
+            rng_seed=rng_seed + gpu_id,  # offset seed per worker for diversity
+            i2i_dir=i2i_dir,
+            packed=packed,
+            dataset_format=dataset_format,
+        )
+    return 0
 
-    parser.add_argument("--packed", action="store_true", default=False,
-                        help="Use FlexAttention batch packing for t2i (~4x throughput)")
-    parser.add_argument("--no-packed", action="store_false", dest="packed",
-                        help="Use single-image generation (default, safe)")
 
-    parser.add_argument("--dataset-format", type=str, default="v1",
-                        choices=["v1", "v2"],
-                        help="Output format: v1 (per-dir .pt) or v2 (parquet + safetensors)")
-
-    parser.add_argument("--gpu-id", type=int, default=None,
-                        help="GPU ID for multi-GPU staging. Appends '_gpu{id}' to output dir. "
-                             "Each GPU writes to its own staging directory to avoid lock contention.")
-
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Print schedule and exit")
-
-    args = parser.parse_args()
-
-    if args.gpu_id is not None:
-        args.output_dir = str(args.output_dir) + f"_gpu{args.gpu_id}"
-
-    # Build schedule
+def _build_schedule(args: argparse.Namespace) -> list[dict]:
+    """Build generation schedule from CLI args."""
     if args.schedule:
-        schedule = json.loads(Path(args.schedule).read_text())
+        return json.loads(Path(args.schedule).read_text())
     elif args.t2i is not None or args.i2i is not None:
         schedule = []
         t2i_total = args.t2i or 0
@@ -837,8 +832,89 @@ def main():
             r = min(renders_left, max(1, (half + remainder) // 2))
             schedule.append({"type": "i2i", "count": half + remainder,
                              "precision": "sage", "render": r})
+        return schedule
     else:
-        schedule = DEFAULT_SCHEDULE
+        return list(DEFAULT_SCHEDULE)
+
+
+def _scale_schedule_for_worker(schedule: list[dict], worker_idx: int,
+                                n_workers: int) -> list[dict]:
+    """Scale per-batch counts so each worker gets ceil(count / n_workers) trajectories.
+
+    Worker 0 may get slightly more than others when counts are not evenly divisible.
+    """
+    scaled = []
+    for batch in schedule:
+        b = dict(batch)
+        total = b["count"]
+        per_worker = math.ceil(total / n_workers)
+        # Last workers may get fewer to avoid exceeding total
+        start = worker_idx * per_worker
+        end = min(start + per_worker, total)
+        b["count"] = max(0, end - start)
+        if b["count"] > 0:
+            scaled.append(b)
+    return scaled
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Generate BTRM training dataset (schedule-driven, server-backed)")
+    parser.add_argument("--output-dir", type=str,
+                        default=str(_REPO_ROOT / "btrm_dataset"))
+    parser.add_argument("--schedule", type=str, default=None,
+                        help="Path to schedule JSON file")
+    parser.add_argument("--rng-seed", type=int, default=42)
+
+    # Multi-server support: --servers takes one or more endpoints
+    parser.add_argument("--servers", type=str, nargs="+",
+                        default=["tcp://localhost:5555"],
+                        help="Inference server endpoint(s). When multiple are given, "
+                             "spawns one worker process per server.")
+    # Deprecated alias: --server (single endpoint, wrapped in list)
+    parser.add_argument("--server", type=str, default=None,
+                        help="(deprecated) Single inference server endpoint. "
+                             "Use --servers instead. Overrides --servers if given.")
+
+    # Shorthand: if no --schedule, build from counts
+    parser.add_argument("--t2i", type=int, default=None,
+                        help="Total t2i trajectories (split across gold/sage/scrongle)")
+    parser.add_argument("--i2i", type=int, default=None,
+                        help="Total i2i trajectories (split sdpa/sage)")
+    parser.add_argument("--render", type=int, default=6,
+                        help="Total trajectories to render across all batches")
+
+    parser.add_argument("--i2i-dir", type=str,
+                        default=str(_REPO_ROOT / "i2i_off_policies"))
+
+    parser.add_argument("--packed", action="store_true", default=False,
+                        help="Use FlexAttention batch packing for t2i (~4x throughput)")
+    parser.add_argument("--no-packed", action="store_false", dest="packed",
+                        help="Use single-image generation (default, safe)")
+
+    parser.add_argument("--dataset-format", type=str, default="v2",
+                        choices=["v1", "v2"],
+                        help="Output format: v1 (per-dir .pt) or v2 (parquet + safetensors). "
+                             "Default: v2")
+
+    parser.add_argument("--gpu-id", type=int, default=None,
+                        help="GPU ID for multi-GPU staging. Appends '_gpu{id}' to output dir. "
+                             "Auto-derived from server index when using --servers with multiple "
+                             "endpoints.")
+
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Print schedule and exit")
+
+    args = parser.parse_args()
+
+    # Handle deprecated --server flag
+    if args.server is not None:
+        print(f"  warning: --server is deprecated, use --servers instead",
+              file=sys.stderr)
+        args.servers = [args.server]
+
+    # Build schedule
+    schedule = _build_schedule(args)
 
     if args.dry_run:
         total = sum(b["count"] for b in schedule)
@@ -851,28 +927,86 @@ def main():
             print(f"  [{i}] {batch['type']:3s} x{batch['count']:4d}  "
                   f"prec={batch['precision']:4s}  steps={steps}"
                   f"{'  render=' + str(r) if r else ''}")
+        if len(args.servers) > 1:
+            print(f"\nMulti-server: {len(args.servers)} workers would be spawned")
+            for i, s in enumerate(args.servers):
+                worker_sched = _scale_schedule_for_worker(schedule, i, len(args.servers))
+                worker_total = sum(b["count"] for b in worker_sched)
+                print(f"  worker {i}: {s} -> {worker_total} trajectories")
         return 0
 
-    with InferenceClient(args.server) as client:
-        # Verify server is reachable
-        try:
-            status = client.status()
-            print(f"Connected to server: {status.get('loaded_models', [])} loaded, "
-                  f"VRAM {status.get('vram_allocated_gb', '?')}GB allocated")
-        except Exception as e:
-            print(f"Cannot connect to inference server at {args.server}: {e}")
-            print("Start the server first: python -m futudiffu.server ...")
-            return 1
+    n_servers = len(args.servers)
 
-        run_schedule(
-            schedule=schedule,
-            client=client,
-            output_dir=Path(args.output_dir),
-            rng_seed=args.rng_seed,
-            i2i_dir=args.i2i_dir,
-            packed=args.packed,
-            dataset_format=args.dataset_format,
+    if n_servers == 1:
+        # Single-server path: run in-process (no subprocess overhead)
+        server_url = args.servers[0]
+        if args.gpu_id is not None:
+            args.output_dir = str(args.output_dir) + f"_gpu{args.gpu_id}"
+
+        with InferenceClient(server_url) as client:
+            try:
+                status = client.status()
+                print(f"Connected to server: {status.get('loaded_models', [])} loaded, "
+                      f"VRAM {status.get('vram_allocated_gb', '?')}GB allocated")
+            except Exception as e:
+                print(f"Cannot connect to inference server at {server_url}: {e}")
+                print("Start the server first: python -m futudiffu.server ...")
+                return 1
+
+            run_schedule(
+                schedule=schedule,
+                client=client,
+                output_dir=Path(args.output_dir),
+                rng_seed=args.rng_seed,
+                i2i_dir=args.i2i_dir,
+                packed=args.packed,
+                dataset_format=args.dataset_format,
+            )
+        return 0
+
+    # Multi-server path: spawn one worker process per server
+    print(f"Multi-server mode: {n_servers} workers")
+    for i, s in enumerate(args.servers):
+        worker_sched = _scale_schedule_for_worker(schedule, i, n_servers)
+        worker_total = sum(b["count"] for b in worker_sched)
+        print(f"  worker {i}: {s} -> {worker_total} trajectories")
+
+    processes: list[multiprocessing.Process] = []
+    for i, server_url in enumerate(args.servers):
+        gpu_id = args.gpu_id if (args.gpu_id is not None and n_servers == 1) else i
+        worker_schedule = _scale_schedule_for_worker(schedule, i, n_servers)
+        if not worker_schedule:
+            continue
+
+        p = multiprocessing.Process(
+            target=_worker_main,
+            args=(
+                server_url,
+                gpu_id,
+                worker_schedule,
+                args.output_dir,
+                args.rng_seed,
+                args.i2i_dir,
+                args.packed,
+                args.dataset_format,
+            ),
+            name=f"gen_worker_{i}",
         )
+        processes.append(p)
+        p.start()
+
+    # Wait for all workers
+    exit_codes = []
+    for p in processes:
+        p.join()
+        exit_codes.append(p.exitcode)
+
+    failed = sum(1 for c in exit_codes if c != 0)
+    if failed:
+        print(f"\n{failed}/{len(processes)} workers failed")
+        return 1
+
+    print(f"\nAll {len(processes)} workers completed successfully.")
     return 0
 
 

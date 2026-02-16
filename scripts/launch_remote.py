@@ -289,7 +289,11 @@ def phase_0_env_check() -> tuple[str, dict]:
     if not hf_token:
         supersekrit = REPO_ROOT / ".supersekrit"
         if supersekrit.exists():
-            hf_token = supersekrit.read_text().strip()
+            for _line in supersekrit.read_text().splitlines():
+                _line = _line.strip()
+                if _line and not _line.startswith("#"):
+                    hf_token = _line
+                    break
             info["hf_token_source"] = ".supersekrit"
             print(f"  HF token: found in .supersekrit")
     else:

@@ -35,7 +35,7 @@ from huggingface_hub.errors import RepositoryNotFoundError
 
 
 # File extensions we care about. Everything else is ignored.
-UPLOAD_EXTENSIONS = {".safetensors", ".json", ".jsonl", ".pt", ".png"}
+UPLOAD_EXTENSIONS = {".safetensors", ".json", ".jsonl", ".pt", ".parquet"}
 
 MANIFEST_NAME = ".uploaded_manifest.json"
 
@@ -237,7 +237,11 @@ def main():
     if not token:
         supersekrit = Path(__file__).resolve().parent.parent / ".supersekrit"
         if supersekrit.exists():
-            token = supersekrit.read_text().strip()
+            for line in supersekrit.read_text().splitlines():
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    token = line
+                    break
     api = HfApi(token=token)
 
     # Verify auth works

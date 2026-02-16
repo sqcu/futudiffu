@@ -7,6 +7,7 @@ trajectory generation.
 
 from __future__ import annotations
 
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import torch
@@ -44,7 +45,13 @@ class MultiGPUClient:
 
         self.clients = [InferenceClient(e, timeout_ms=timeout_ms) for e in resolved]
         self._robin = 0
-        self._pool = ThreadPoolExecutor(max_workers=len(self.clients))
+        # Pool workers > clients: allows dispatching to all clients concurrently
+        # even when some clients have queued work. Per-client locks below prevent
+        # concurrent ZMQ socket access on the same client.
+        self._pool = ThreadPoolExecutor(max_workers=max(4, len(self.clients) * 2))
+        # Per-client locks: ZMQ REQ sockets are NOT thread-safe. Each client's
+        # socket must be accessed by at most one thread at a time.
+        self._client_locks = [threading.Lock() for _ in self.clients]
 
     @property
     def primary(self) -> InferenceClient:
@@ -114,10 +121,17 @@ class MultiGPUClient:
         """
         results: list[dict[str, torch.Tensor] | None] = [None] * len(jobs)
         futures = {}
+
+        def _locked_sample(client_idx: int, kwargs: dict):
+            """Run sample_trajectory while holding client's socket lock."""
+            with self._client_locks[client_idx]:
+                return self.clients[client_idx].sample_trajectory(**kwargs)
+
         for i, job_kwargs in enumerate(jobs):
             merged = {**shared_kwargs, **job_kwargs}
-            client = self._next()
-            fut = self._pool.submit(client.sample_trajectory, **merged)
+            client_idx = self._robin % len(self.clients)
+            self._robin += 1
+            fut = self._pool.submit(_locked_sample, client_idx, merged)
             futures[fut] = i
 
         first_error = None
@@ -141,13 +155,19 @@ class MultiGPUClient:
 
     def warmup_all(self, attention_backend: str = "sdpa") -> None:
         """Warmup all servers in parallel."""
-        futs = [self._pool.submit(c.warmup, attention_backend) for c in self.clients]
+        def _locked(i):
+            with self._client_locks[i]:
+                return self.clients[i].warmup(attention_backend)
+        futs = [self._pool.submit(_locked, i) for i in range(len(self.clients))]
         for f in futs:
             f.result()
 
     def warmup_packed_all(self, n_images: int = 2) -> None:
         """Warmup packed forward on all servers in parallel."""
-        futs = [self._pool.submit(c.warmup_packed, n_images) for c in self.clients]
+        def _locked(i):
+            with self._client_locks[i]:
+                return self.clients[i].warmup_packed(n_images)
+        futs = [self._pool.submit(_locked, i) for i in range(len(self.clients))]
         for f in futs:
             f.result()
 
@@ -157,18 +177,80 @@ class MultiGPUClient:
 
     def status_all(self) -> list[dict]:
         """Get status from all servers."""
-        futs = [self._pool.submit(c.status) for c in self.clients]
+        def _locked(i):
+            with self._client_locks[i]:
+                return self.clients[i].status()
+        futs = [self._pool.submit(_locked, i) for i in range(len(self.clients))]
         return [f.result() for f in futs]
 
     # ------------------------------------------------------------------
-    # Primary-only: training / mutation RPCs
+    # Broadcast RPCs: applied to ALL servers so workers have matching state
     # ------------------------------------------------------------------
 
+    def _broadcast_return_primary(self, method_name: str, *args, **kwargs):
+        """Broadcast an RPC to ALL servers, wait for ALL, return primary's result.
+
+        CRITICAL: Must wait for ALL futures before returning. If we only wait for
+        the primary, the next broadcast may assign a task for client[N] to a
+        different worker thread while the previous task is still using client[N]'s
+        ZMQ REQ socket — causing socket corruption and lost RPCs.
+        """
+        def _locked_call(idx):
+            with self._client_locks[idx]:
+                return getattr(self.clients[idx], method_name)(*args, **kwargs)
+
+        futs = [self._pool.submit(_locked_call, i) for i in range(len(self.clients))]
+        # Collect all results, re-raise first error
+        results = []
+        first_error = None
+        for f in futs:
+            try:
+                results.append(f.result())
+            except Exception as e:
+                if first_error is None:
+                    first_error = e
+                results.append(None)
+        if first_error is not None:
+            raise first_error
+        return results[0]
+
+    def allocate_adapter(self, *args, **kwargs) -> int:
+        """Allocate adapter slots on ALL servers (graph-mutating, no recompile)."""
+        return self._broadcast_return_primary("allocate_adapter", *args, **kwargs)
+
+    def init_adapter_weights(self, *args, **kwargs) -> int:
+        """Initialize adapter weights on ALL servers (graph-invariant)."""
+        return self._broadcast_return_primary("init_adapter_weights", *args, **kwargs)
+
     def inject_lora(self, *args, **kwargs) -> int:
-        return self.primary.inject_lora(*args, **kwargs)
+        """Legacy: inject LoRA on ALL servers (allocate+init+recompile)."""
+        return self._broadcast_return_primary("inject_lora", *args, **kwargs)
 
     def inject_btrm_head(self, *args, **kwargs) -> dict:
-        return self.primary.inject_btrm_head(*args, **kwargs)
+        """Inject BTRM head on ALL servers (needed for inline scoring)."""
+        return self._broadcast_return_primary("inject_btrm_head", *args, **kwargs)
+
+    def set_adapter_config(self, *args, **kwargs) -> None:
+        """Set adapter config on ALL servers."""
+        def _locked(i):
+            with self._client_locks[i]:
+                return self.clients[i].set_adapter_config(*args, **kwargs)
+        futs = [self._pool.submit(_locked, i) for i in range(len(self.clients))]
+        for f in futs:
+            f.result()
+
+    def free(self, *args, **kwargs) -> None:
+        """Free resources on ALL servers."""
+        def _locked(i):
+            with self._client_locks[i]:
+                return self.clients[i].free(*args, **kwargs)
+        futs = [self._pool.submit(_locked, i) for i in range(len(self.clients))]
+        for f in futs:
+            f.result()
+
+    # ------------------------------------------------------------------
+    # Primary-only: training RPCs (gradients/optimizer on primary only)
+    # ------------------------------------------------------------------
 
     def train_btrm_step(self, *args, **kwargs) -> dict:
         return self.primary.train_btrm_step(*args, **kwargs)
@@ -185,17 +267,11 @@ class MultiGPUClient:
     def dump_all_loras(self, *args, **kwargs) -> dict:
         return self.primary.dump_all_loras(*args, **kwargs)
 
-    def set_adapter_config(self, *args, **kwargs) -> None:
-        return self.primary.set_adapter_config(*args, **kwargs)
-
     def update_lora_weights(self, *args, **kwargs) -> None:
         return self.primary.update_lora_weights(*args, **kwargs)
 
     def get_lora_state_dict(self, *args, **kwargs) -> dict[str, torch.Tensor]:
         return self.primary.get_lora_state_dict(*args, **kwargs)
-
-    def free(self, *args, **kwargs) -> None:
-        return self.primary.free(*args, **kwargs)
 
     # ------------------------------------------------------------------
     # Weight synchronization
@@ -203,11 +279,12 @@ class MultiGPUClient:
 
     def sync_lora_to_all(self, adapter_name: str | None = None) -> None:
         """Pull LoRA weights from primary, push to all workers."""
-        sd = self.primary.get_lora_state_dict(adapter_name)
-        futs = [
-            self._pool.submit(c.update_lora_weights, sd)
-            for c in self.clients[1:]
-        ]
+        with self._client_locks[0]:
+            sd = self.primary.get_lora_state_dict(adapter_name)
+        def _locked_update(i):
+            with self._client_locks[i]:
+                return self.clients[i].update_lora_weights(sd)
+        futs = [self._pool.submit(_locked_update, i) for i in range(1, len(self.clients))]
         for f in futs:
             f.result()
 

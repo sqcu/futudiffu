@@ -92,10 +92,12 @@ class LoRAAdapter(nn.Module):
 
 
 class LoRALinear(nn.Module):
-    """Linear layer with N named low-rank adapters (fused scatter/gather).
+    """Linear layer with N named low-rank adapters (fused via Triton kernel).
 
-    For N=1: fast path, 2 matmuls (same as single LoRA).
-    For N>1: fused path, still 2 matmuls via concatenated A/B matrices.
+    All adapter counts (N>=1) dispatch to multi_lora_op, which is registered
+    as a custom_op opaque to torch.compile/inductor.  This keeps graph
+    topology constant regardless of adapter count — compile time does not
+    scale with number of adapters.
     """
 
     def __init__(self, base: nn.Module) -> None:
@@ -145,7 +147,7 @@ class LoRALinear(nn.Module):
         init_b_std: float = 0.0,
     ) -> LoRAAdapter:
         if name in self.adapters:
-            raise ValueError(f"Adapter '{name}' already exists")
+            return self.adapters[name]  # idempotent: re-injection is a no-op
         adapter = LoRAAdapter(
             rank, alpha, self.in_features, self.out_features, self._device,
             init_b_std=init_b_std,
@@ -162,12 +164,10 @@ class LoRALinear(nn.Module):
         x_bf16 = x.to(torch.bfloat16)
         adapters = list(self.adapters.values())
 
-        # --- Fast path: single adapter, skip kernel launch overhead ---
-        if n == 1:
-            return base_out + adapters[0](x_bf16).to(base_out.dtype)
-
-        # --- Multi-adapter: dispatch to Triton sparse kernel ---
-        # Assemble stacked weight tensors and scale operand.
+        # --- All adapter counts: dispatch to Triton sparse kernel ---
+        # multi_lora_op is a custom_op, opaque to inductor. Using it for
+        # N=1 replaces 2 visible matmul graph nodes with 1 opaque node,
+        # eliminating inductor GEMM analysis for LoRA paths entirely.
         B = x.shape[0]
         # x must be 3D (B, S, IN) for the kernel; flatten middle dims if needed
         orig_shape = x_bf16.shape
@@ -197,37 +197,17 @@ class LoRALinear(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Injection
+# Injection — split into graph-mutating allocation vs weight-only init
 # ---------------------------------------------------------------------------
 
-def inject_lora(
+def _find_lora_targets(
     model: nn.Module,
-    name: str = "default",
-    rank: int = 8,
-    alpha: float = 16.0,
     target_modules: Optional[list[str]] = None,
     layer_indices: Optional[set[int]] = None,
-    init_b_std: float = 0.0,
-) -> dict[str, LoRAAdapter]:
-    """Add a named adapter to matching linear layers.
+) -> list[tuple[str, str, str]]:
+    """Find candidate modules for LoRA injection.
 
-    If a target is already LoRALinear, adds a new adapter slot.
-    If a target is Linear/FP8Linear, wraps it first.
-
-    Args:
-        model: Model to inject into.
-        name: Adapter name (e.g. "rtheta", "ptheta").
-        rank: Low-rank dimension.
-        alpha: LoRA scaling factor.
-        target_modules: Suffixes to target. None = DEFAULT_TARGET_SUFFIXES.
-        layer_indices: If set, only target layers.N with N in set.
-            Excludes refiners when specified.
-        init_b_std: If > 0, initialize lora_B with N(0, init_b_std) instead
-            of zeros. Needed for policy gradient (zero B gives zero MSE
-            gradient at initialization).
-
-    Returns:
-        Dict mapping full module path -> LoRAAdapter instance.
+    Returns list of (full_path, parent_path, attr_name) tuples.
     """
     suffixes = tuple(target_modules) if target_modules else DEFAULT_TARGET_SUFFIXES
 
@@ -249,6 +229,117 @@ def inject_lora(
         parent_path, attr_name = (parts[0], parts[1]) if len(parts) == 2 else ("", parts[0])
         candidates.append((full_path, parent_path, attr_name))
 
+    return candidates
+
+
+def allocate_adapter(
+    model: nn.Module,
+    name: str = "default",
+    rank: int = 8,
+    alpha: float = 16.0,
+    target_modules: Optional[list[str]] = None,
+    layer_indices: Optional[set[int]] = None,
+) -> dict[str, LoRAAdapter]:
+    """Allocate adapter slots — GRAPH MUTATING. Must happen before torch.compile.
+
+    Wraps Linear/FP8Linear → LoRALinear if not already wrapped, then creates
+    adapter with zero-init B and scale=0.0 (silent by default). Does NOT
+    initialize weights for training — call init_adapter_weights() for that.
+
+    This is the expensive, compile-invalidating operation. After all adapters
+    are allocated, compile once, then use init_adapter_weights() and
+    set_lora_scale() freely without recompilation.
+
+    Returns:
+        Dict mapping full module path -> LoRAAdapter instance.
+    """
+    candidates = _find_lora_targets(model, target_modules, layer_indices)
+    module_map = dict(model.named_modules())
+    injected: dict[str, LoRAAdapter] = {}
+
+    for full_path, parent_path, attr_name in candidates:
+        parent = module_map[parent_path] if parent_path else model
+        child = getattr(parent, attr_name)
+
+        if not isinstance(child, LoRALinear):
+            wrapper = LoRALinear(child)
+            setattr(parent, attr_name, wrapper)
+            module_map = dict(model.named_modules())
+            child = wrapper
+
+        # Zero-init B, scale=0.0 — silent until explicitly activated
+        adapter = child.add_adapter(name, rank=rank, alpha=alpha, init_b_std=0.0)
+        injected[full_path] = adapter
+
+    # Default to silent (scale=0) — caller activates via set_lora_scale
+    set_lora_scale(
+        model,
+        torch.zeros(1, dtype=torch.bfloat16, device=next(model.parameters()).device),
+        adapter_name=name,
+    )
+    return injected
+
+
+def init_adapter_weights(
+    model: nn.Module,
+    name: str,
+    init_b_std: float = 0.0,
+    scale: float = 1.0,
+) -> int:
+    """(Re-)initialize adapter weights. Graph-INVARIANT — safe after compile.
+
+    Reinitializes lora_A (kaiming uniform) and lora_B (zeros or normal).
+    Sets lora_scale to the given value. Does not add/remove modules or
+    change the compute graph.
+
+    Args:
+        name: Adapter name to initialize.
+        init_b_std: If > 0, N(0, std) for B. If 0, zeros (standard LoRA).
+        scale: Initial scale value (1.0 = active, 0.0 = silent).
+
+    Returns:
+        Number of adapter modules initialized.
+    """
+    n = 0
+    for module in model.modules():
+        if not isinstance(module, LoRALinear):
+            continue
+        if name not in module.adapters:
+            continue
+        adapter = module.adapters[name]
+        nn.init.kaiming_uniform_(adapter.lora_A, a=math.sqrt(5))
+        if init_b_std > 0:
+            nn.init.normal_(adapter.lora_B, mean=0.0, std=init_b_std)
+        else:
+            nn.init.zeros_(adapter.lora_B)
+        n += 1
+
+    # Set scale
+    device = next(model.parameters()).device
+    scale_t = torch.tensor([scale], dtype=torch.bfloat16, device=device)
+    set_lora_scale(model, scale_t, adapter_name=name)
+    return n
+
+
+def inject_lora(
+    model: nn.Module,
+    name: str = "default",
+    rank: int = 8,
+    alpha: float = 16.0,
+    target_modules: Optional[list[str]] = None,
+    layer_indices: Optional[set[int]] = None,
+    init_b_std: float = 0.0,
+) -> dict[str, LoRAAdapter]:
+    """Add a named adapter to matching linear layers (legacy convenience wrapper).
+
+    Combines allocate_adapter() + weight initialization in one call.
+    Prefer allocate_adapter() + init_adapter_weights() for new code to
+    separate graph-mutating allocation from weight-only initialization.
+
+    If a target is already LoRALinear, adds a new adapter slot.
+    If a target is Linear/FP8Linear, wraps it first.
+    """
+    candidates = _find_lora_targets(model, target_modules, layer_indices)
     module_map = dict(model.named_modules())
     injected: dict[str, LoRAAdapter] = {}
 

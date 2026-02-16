@@ -8,7 +8,7 @@ Compares three attention implementations for packed multi-image inference:
 All three should produce equivalent results (within quantization noise).
 
 Usage:
-    .venv/Scripts/python.exe F:\dox\repos\ai\futudiffu\tests\test_sage_block_mask.py
+    .venv/Scripts/python.exe tests/test_sage_block_mask.py
 """
 
 import sys
@@ -161,7 +161,7 @@ def test_attention_level():
     # --- Reference: SDPA with explicit mask ---
     sdpa_mask = build_sdpa_mask_from_document_id(document_id, seq_len, device)
     # Convert bool mask to float mask for SDPA: True -> 0.0, False -> -inf
-    sdpa_float_mask = torch.where(sdpa_mask, 0.0, float("-inf"))
+    sdpa_float_mask = torch.where(sdpa_mask, 0.0, float("-inf")).to(q.dtype)
     sdpa_float_mask = sdpa_float_mask.unsqueeze(0).unsqueeze(0)  # (1, 1, S, S)
 
     out_ref = F.scaled_dot_product_attention(

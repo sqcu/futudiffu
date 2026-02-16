@@ -102,11 +102,14 @@ RSYNC_PUSH_EXCLUDE = [
 ]
 
 RSYNC_PULL_PATTERNS = [
+    "btrm_dataset/",
     "remote_validation/",
     "training_output/",
     "*.jsonl",
     "*.json",
     "*.png",
+    "*.pt",
+    "*.safetensors",
 ]
 
 
@@ -588,32 +591,46 @@ def cmd_logs(args: argparse.Namespace) -> None:
 
 
 def cmd_pull(args: argparse.Namespace) -> None:
-    """Rsync training outputs / renders from remote to local."""
+    """Rsync btrm_dataset + training_output from remote to local repo root."""
     config = RemoteConfig.load()
-    local_dest = REPO_ROOT / "remote_output"
-    local_dest.mkdir(parents=True, exist_ok=True)
 
-    # Pull everything interesting (no --delete: append-only)
-    include_args = []
-    for pat in RSYNC_PULL_PATTERNS:
-        include_args.extend(["--include", pat])
+    # Pull btrm_dataset/ directly into local btrm_dataset/ (append-only)
+    for ds_name in ["btrm_dataset", "btrm_dataset_v2", "btrm_dataset_v2_gpu0", "btrm_dataset_v2_gpu1"]:
+        try:
+            print(f"  Pulling {ds_name}/...")
+            _rsync(
+                config,
+                src=f"{config.host}:{config.remote_dir}/{ds_name}/",
+                dst=str(REPO_ROOT / ds_name) + "/",
+                timeout=3600,
+            )
+        except subprocess.CalledProcessError:
+            print(f"  ({ds_name}/ not yet present on remote, skipping)")
 
-    # Include directories needed for recursion, exclude the rest
-    cmd = [
-        "rsync", "-avz", "--progress",
-        "-e", f"ssh -i {config.ssh_key} -o StrictHostKeyChecking=accept-new",
-        "--include", "*/",  # recurse into dirs
-    ]
-    for pat in RSYNC_PULL_PATTERNS:
-        cmd.extend(["--include", pat])
-    cmd.extend([
-        "--exclude", "*",  # exclude everything else
-        f"{config.host}:{config.remote_dir}/",
-        str(local_dest) + "/",
-    ])
+    # Pull training_output/ if it exists on remote
+    try:
+        print("  Pulling training_output/...")
+        _rsync(
+            config,
+            src=f"{config.host}:{config.remote_dir}/training_output/",
+            dst=str(REPO_ROOT / "training_output") + "/",
+            timeout=3600,
+        )
+    except subprocess.CalledProcessError:
+        print("  (training_output/ not yet present on remote, skipping)")
 
-    print(f"  Pulling outputs to {local_dest}/")
-    subprocess.run(cmd, timeout=3600)
+    # Pull remote_validation/ reports
+    try:
+        print("  Pulling remote_validation/...")
+        _rsync(
+            config,
+            src=f"{config.host}:{config.remote_dir}/remote_validation/",
+            dst=str(REPO_ROOT / "remote_validation") + "/",
+            timeout=600,
+        )
+    except subprocess.CalledProcessError:
+        print("  (remote_validation/ not yet present on remote, skipping)")
+
     print("  Pull complete.")
 
 

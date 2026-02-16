@@ -302,8 +302,73 @@ class ModelManager:
             "sage_configured": self.sage_configured,
         }
 
+    def allocate_adapter_rpc(self, params: dict) -> dict:
+        """Allocate adapter slots — graph-mutating, NO recompile.
+
+        Call this for all adapters BEFORE compile_and_warmup(). The adapter
+        starts silent (scale=0, zero weights). Use set_adapter_config to
+        activate and init_adapter_weights to initialize for training.
+        """
+        from .lora import allocate_adapter
+
+        adapter_name = params["adapter_name"]
+        rank = params.get("rank", 8)
+        alpha = params.get("alpha", 16.0)
+        layer_indices = params.get("layer_indices")
+        if layer_indices is not None:
+            layer_indices = set(layer_indices)
+
+        injected = allocate_adapter(
+            self.diff_model,
+            name=adapter_name,
+            rank=rank,
+            alpha=alpha,
+            layer_indices=layer_indices,
+        )
+
+        self.lora_configs.append({
+            "adapter_name": adapter_name,
+            "rank": rank,
+            "alpha": alpha,
+            "layer_indices": layer_indices,
+            "init_b_std": 0.0,
+        })
+
+        n_params = sum(
+            a.lora_A.numel() + a.lora_B.numel() for a in injected.values()
+        )
+        return {
+            "adapter_name": adapter_name,
+            "n_adapters": len(injected),
+            "n_params": n_params,
+            "graph_mutated": True,
+        }
+
+    def init_adapter_weights_rpc(self, params: dict) -> dict:
+        """(Re-)initialize adapter weights — graph-invariant, safe after compile."""
+        from .lora import init_adapter_weights
+
+        adapter_name = params["adapter_name"]
+        init_b_std = params.get("init_b_std", 0.0)
+        scale = params.get("scale", 1.0)
+
+        n = init_adapter_weights(
+            self.diff_model,
+            name=adapter_name,
+            init_b_std=init_b_std,
+            scale=scale,
+        )
+        return {
+            "adapter_name": adapter_name,
+            "n_modules_initialized": n,
+        }
+
     def inject_lora_adapter(self, params: dict) -> dict:
-        """Inject LoRA adapter, record config, recompile. Returns metadata."""
+        """Legacy: allocate + init + recompile in one call.
+
+        Prefer allocate_adapter_rpc() + init_adapter_weights_rpc() for new
+        code to avoid mid-session recompilation.
+        """
         from .lora import inject_lora
 
         adapter_name = params["adapter_name"]

@@ -1223,39 +1223,40 @@ if _HAS_TRITON:
 
         loop_n_blocks = tl.cdiv(seq_len, BLOCK_N)
         for n_idx in range(loop_n_blocks):
+            do_block: tl.constexpr = True
             if HAS_BLOCK_MASK:
                 should_compute = tl.load(bm_base + pid_m * n_kv_blocks + n_idx)
-                if should_compute == 0:
-                    continue
+                do_block = should_compute != 0
 
-            n_start = n_idx * BLOCK_N
-            offs_n = n_start + tl.arange(0, BLOCK_N)
-            n_mask = offs_n < seq_len
+            if do_block:
+                n_start = n_idx * BLOCK_N
+                offs_n = n_start + tl.arange(0, BLOCK_N)
+                n_mask = offs_n < seq_len
 
-            k_ptrs = k_base + offs_n[None, :] * D + offs_d[:, None]
-            k_f32 = tl.load(k_ptrs, mask=n_mask[None, :], other=0.0).to(tl.float32)
+                k_ptrs = k_base + offs_n[None, :] * D + offs_d[:, None]
+                k_f32 = tl.load(k_ptrs, mask=n_mask[None, :], other=0.0).to(tl.float32)
 
-            k_abs_max = tl.max(tl.abs(k_f32), axis=0)
-            k_inv_scale = FP8_MAX / tl.maximum(k_abs_max, 1e-12)
-            k_fp8 = (k_f32 * k_inv_scale[None, :]).to(tl.float8e4nv)
-            k_descale = k_abs_max / FP8_MAX
+                k_abs_max = tl.max(tl.abs(k_f32), axis=0)
+                k_inv_scale = FP8_MAX / tl.maximum(k_abs_max, 1e-12)
+                k_fp8 = (k_f32 * k_inv_scale[None, :]).to(tl.float8e4nv)
+                k_descale = k_abs_max / FP8_MAX
 
-            s = tl.dot(q_fp8, k_fp8, out_dtype=tl.float32)
-            s = s * q_descale[:, None] * k_descale[None, :]
-            s = tl.where(n_mask[None, :], s, float('-inf'))
+                s = tl.dot(q_fp8, k_fp8, out_dtype=tl.float32)
+                s = s * q_descale[:, None] * k_descale[None, :]
+                s = tl.where(n_mask[None, :], s, float('-inf'))
 
-            m_new = tl.maximum(m_i, tl.max(s, axis=1))
-            alpha = tl.math.exp2(m_i - m_new)
-            p = tl.math.exp2(s - m_new[:, None])
+                m_new = tl.maximum(m_i, tl.max(s, axis=1))
+                alpha = tl.math.exp2(m_i - m_new)
+                p = tl.math.exp2(s - m_new[:, None])
 
-            l_i = alpha * l_i + tl.sum(p, axis=1)
-            o_acc = o_acc * alpha[:, None]
+                l_i = alpha * l_i + tl.sum(p, axis=1)
+                o_acc = o_acc * alpha[:, None]
 
-            v_ptrs = v_base + offs_n[:, None] * D + offs_d[None, :]
-            v_tile = tl.load(v_ptrs, mask=n_mask[:, None], other=0.0)
-            o_acc += tl.dot(p.to(tl.bfloat16), v_tile, out_dtype=tl.float32)
+                v_ptrs = v_base + offs_n[:, None] * D + offs_d[None, :]
+                v_tile = tl.load(v_ptrs, mask=n_mask[:, None], other=0.0)
+                o_acc += tl.dot(p.to(tl.bfloat16), v_tile, out_dtype=tl.float32)
 
-            m_i = m_new
+                m_i = m_new
 
         o_acc = o_acc / l_i[:, None]
 
@@ -1314,39 +1315,40 @@ if _HAS_TRITON:
 
         loop_n_blocks = tl.cdiv(seq_len, BLOCK_N)
         for n_idx in range(loop_n_blocks):
+            do_block: tl.constexpr = True
             if HAS_BLOCK_MASK:
                 should_compute = tl.load(bm_base + pid_m * n_kv_blocks + n_idx)
-                if should_compute == 0:
-                    continue
+                do_block = should_compute != 0
 
-            n_start = n_idx * BLOCK_N
-            offs_n = n_start + tl.arange(0, BLOCK_N)
-            n_mask = offs_n < seq_len
+            if do_block:
+                n_start = n_idx * BLOCK_N
+                offs_n = n_start + tl.arange(0, BLOCK_N)
+                n_mask = offs_n < seq_len
 
-            k_ptrs = k_base + offs_n[None, :] * D + offs_d[:, None]
-            k_f32 = tl.load(k_ptrs, mask=n_mask[None, :], other=0.0).to(tl.float32)
+                k_ptrs = k_base + offs_n[None, :] * D + offs_d[:, None]
+                k_f32 = tl.load(k_ptrs, mask=n_mask[None, :], other=0.0).to(tl.float32)
 
-            k_abs_max = tl.max(tl.abs(k_f32), axis=0)
-            k_inv_scale = 127.0 / tl.maximum(k_abs_max, 1e-12)
-            k_int8 = (k_f32 * k_inv_scale[None, :]).to(tl.int8)
-            k_descale = k_abs_max / 127.0
+                k_abs_max = tl.max(tl.abs(k_f32), axis=0)
+                k_inv_scale = 127.0 / tl.maximum(k_abs_max, 1e-12)
+                k_int8 = (k_f32 * k_inv_scale[None, :]).to(tl.int8)
+                k_descale = k_abs_max / 127.0
 
-            s = tl.dot(q_int8, k_int8, out_dtype=tl.float32)
-            s = s * q_descale[:, None] * k_descale[None, :]
-            s = tl.where(n_mask[None, :], s, float('-inf'))
+                s = tl.dot(q_int8, k_int8, out_dtype=tl.float32)
+                s = s * q_descale[:, None] * k_descale[None, :]
+                s = tl.where(n_mask[None, :], s, float('-inf'))
 
-            m_new = tl.maximum(m_i, tl.max(s, axis=1))
-            alpha = tl.math.exp2(m_i - m_new)
-            p = tl.math.exp2(s - m_new[:, None])
+                m_new = tl.maximum(m_i, tl.max(s, axis=1))
+                alpha = tl.math.exp2(m_i - m_new)
+                p = tl.math.exp2(s - m_new[:, None])
 
-            l_i = alpha * l_i + tl.sum(p, axis=1)
-            o_acc = o_acc * alpha[:, None]
+                l_i = alpha * l_i + tl.sum(p, axis=1)
+                o_acc = o_acc * alpha[:, None]
 
-            v_ptrs = v_base + offs_n[:, None] * D + offs_d[None, :]
-            v_tile = tl.load(v_ptrs, mask=n_mask[:, None], other=0.0)
-            o_acc += tl.dot(p.to(tl.bfloat16), v_tile, out_dtype=tl.float32)
+                v_ptrs = v_base + offs_n[:, None] * D + offs_d[None, :]
+                v_tile = tl.load(v_ptrs, mask=n_mask[:, None], other=0.0)
+                o_acc += tl.dot(p.to(tl.bfloat16), v_tile, out_dtype=tl.float32)
 
-            m_i = m_new
+                m_i = m_new
 
         o_acc = o_acc / l_i[:, None]
 

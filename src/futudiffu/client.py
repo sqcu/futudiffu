@@ -286,6 +286,51 @@ class InferenceClient:
     # LoRA management
     # ------------------------------------------------------------------
 
+    def allocate_adapter(
+        self,
+        adapter_name: str,
+        rank: int = 8,
+        alpha: float = 16.0,
+        layer_indices: list[int] | None = None,
+    ) -> int:
+        """Allocate adapter slots — graph-mutating, NO recompile.
+
+        Call for all adapters BEFORE warmup(). Adapter starts silent
+        (scale=0, zero weights). Use set_adapter_config() to activate
+        and init_adapter_weights() to prepare for training.
+
+        Returns:
+            Number of adapter slots allocated.
+        """
+        params = {
+            "adapter_name": adapter_name,
+            "rank": rank,
+            "alpha": alpha,
+        }
+        if layer_indices is not None:
+            params["layer_indices"] = layer_indices
+        _, metadata = self._call("allocate_adapter", params)
+        return metadata.get("n_adapters", 0)
+
+    def init_adapter_weights(
+        self,
+        adapter_name: str,
+        init_b_std: float = 0.0,
+        scale: float = 1.0,
+    ) -> int:
+        """(Re-)initialize adapter weights — graph-invariant, safe after compile.
+
+        Returns:
+            Number of modules initialized.
+        """
+        params = {
+            "adapter_name": adapter_name,
+            "init_b_std": init_b_std,
+            "scale": scale,
+        }
+        _, metadata = self._call("init_adapter_weights", params)
+        return metadata.get("n_modules_initialized", 0)
+
     def inject_lora(
         self,
         adapter_name: str,
@@ -294,20 +339,9 @@ class InferenceClient:
         layer_indices: list[int] | None = None,
         init_b_std: float = 0.0,
     ) -> int:
-        """Inject a named LoRA adapter into the server's diffusion model.
+        """Legacy: allocate + init + recompile in one call.
 
-        After injection, the client must call warmup() to recompile.
-
-        Args:
-            adapter_name: Name for the adapter (e.g. "ptheta").
-            rank: LoRA rank.
-            alpha: LoRA alpha.
-            layer_indices: If set, only inject on these layer indices.
-            init_b_std: If > 0, initialize lora_B with N(0, init_b_std)
-                instead of zeros. Needed for policy gradient.
-
-        Returns:
-            Number of adapters injected.
+        Prefer allocate_adapter() + init_adapter_weights() for new code.
         """
         params = {
             "adapter_name": adapter_name,

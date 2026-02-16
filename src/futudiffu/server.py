@@ -152,11 +152,27 @@ class InferenceServer:
         return pack_response("ok")
 
     def handle_inject_lora(self, params, tensors):
-        """Inject LoRA adapter into diffusion model."""
+        """Inject LoRA adapter into diffusion model (legacy: allocate+init+recompile)."""
         self._mm.ensure_diffusion()
         metadata = self._mm.inject_lora_adapter(params)
         print(f"  [inject_lora] {metadata['adapter_name']}: "
               f"{metadata['n_adapters']} adapters, {metadata['n_params']:,} params")
+        return pack_response("ok", metadata=metadata)
+
+    def handle_allocate_adapter(self, params, tensors):
+        """Allocate adapter slots (graph-mutating, no recompile)."""
+        self._mm.ensure_diffusion()
+        metadata = self._mm.allocate_adapter_rpc(params)
+        print(f"  [allocate_adapter] {metadata['adapter_name']}: "
+              f"{metadata['n_adapters']} slots, {metadata['n_params']:,} params (silent)")
+        return pack_response("ok", metadata=metadata)
+
+    def handle_init_adapter_weights(self, params, tensors):
+        """Initialize adapter weights (graph-invariant, safe after compile)."""
+        self._mm.ensure_diffusion()
+        metadata = self._mm.init_adapter_weights_rpc(params)
+        print(f"  [init_adapter_weights] {metadata['adapter_name']}: "
+              f"{metadata['n_modules_initialized']} modules initialized")
         return pack_response("ok", metadata=metadata)
 
     def handle_update_lora_weights(self, params, tensors):
@@ -269,6 +285,8 @@ class InferenceServer:
         "status": "handle_status",
         "free": "handle_free",
         "inject_lora": "handle_inject_lora",
+        "allocate_adapter": "handle_allocate_adapter",
+        "init_adapter_weights": "handle_init_adapter_weights",
         "update_lora_weights": "handle_update_lora_weights",
         "set_adapter_config": "handle_set_adapter_config",
         "get_lora_state_dict": "handle_get_lora_state_dict",
