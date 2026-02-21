@@ -10,15 +10,20 @@ dependencies = [
     "einops",
     "numpy",
     "pillow",
-    "pyzmq>=25.0",
+    # pyzmq removed: ZMQ is dead architecture (2026-02-17). Use FastAPI server.
     "pyarrow>=14.0",
     "tzdata",
     "huggingface_hub",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "pydantic>=2.0",
+    "httpx>=0.27",
 ]
 
 [project.optional-dependencies]
 triton-linux = ["triton>=3.0"]
 triton-windows = ["triton-windows>=3.0"]
+dev = ["pytest>=8.0", "starlette[full]"]
 
 [build-system]
 requires = ["hatchling"]

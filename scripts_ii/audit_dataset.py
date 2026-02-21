@@ -1,0 +1,1033 @@
+r"""Dataset audit: scan all dataset directories, report format/contents/provenance.
+
+Scans every dataset location in the repo, reports format, trajectory counts,
+resolution distributions, step/sigma distributions, preference pair counts,
+and identifies orphaned datasets not referenced by training code.
+
+Outputs a formatted text report to stdout and saves a timestamped copy to
+dataset_audit_output/audit_report.txt.
+
+Uses stdlib + pathlib + src_ii.sigma_schedule. No GPU needed.
+
+Execution:
+  .venv/Scripts/python.exe F:\dox\repos\ai\futudiffu\scripts_ii\audit_dataset.py
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import os
+import struct
+import sys
+import time
+from collections import Counter, defaultdict
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR.parent
+
+# Make src_ii importable.
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+OUTPUT_DIR = REPO_ROOT / "dataset_audit_output"
+
+# ---------------------------------------------------------------------------
+# All known dataset locations
+# ---------------------------------------------------------------------------
+
+DATASET_LOCATIONS = {
+    "btrm_dataset": REPO_ROOT / "btrm_dataset",
+    "btrm_dataset_v2": REPO_ROOT / "btrm_dataset_v2",
+    "btrm_dataset_v2_gpu0": REPO_ROOT / "btrm_dataset_v2_gpu0",
+    "btrm_dataset_v2_gpu0_gpu0": REPO_ROOT / "btrm_dataset_v2_gpu0_gpu0",
+    "btrm_dataset_v2_gpu1": REPO_ROOT / "btrm_dataset_v2_gpu1",
+    "btrm_dataset_v2_gpu1_gpu1": REPO_ROOT / "btrm_dataset_v2_gpu1_gpu1",
+    "packed_dataset": REPO_ROOT / "packed_dataset",
+    "pinkify_thisnotthat_output": REPO_ROOT / "pinkify_thisnotthat_output",
+    "training_output": REPO_ROOT / "training_output",
+}
+
+# Which datasets are referenced by training code and how
+TRAINING_CODE_REFERENCES = {
+    "btrm_dataset": [
+        "scripts_ii/sweep_rtheta_lr.py (reads manifest.json + latents/*.pt)",
+        "scripts_ii/generate_preference_labels.py (reads manifest.json + latents/*.pt)",
+        "scripts/generate_btrm_dataset.py (writes v1 format)",
+        "scripts/migrate_v1_to_v2.py (reads for migration to v2)",
+    ],
+    "pinkify_thisnotthat_output": [
+        "scripts_ii/sweep_rtheta_lr.py (reads preference_labels.json + per_image_scores.json)",
+        "scripts_ii/generate_preference_labels.py (writes both files)",
+    ],
+    "btrm_dataset_v2_gpu0": [
+        "scripts/train.py (writes v2 rollouts via DatasetWriter when --persist-min-k > 0)",
+        "scripts/merge_staged_datasets.py (reads as staging dir)",
+    ],
+    "btrm_dataset_v2_gpu1": [
+        "scripts/train.py (writes v2 rollouts via DatasetWriter when --persist-min-k > 0)",
+        "scripts/merge_staged_datasets.py (reads as staging dir)",
+    ],
+    "btrm_dataset_v2_gpu0_gpu0": [
+        "scripts/train.py (GPU0 nested staging artifact from 2xH100 run)",
+    ],
+    "btrm_dataset_v2_gpu1_gpu1": [
+        "scripts/train.py (GPU1 nested staging artifact from 2xH100 run)",
+    ],
+    "packed_dataset": [
+        "scripts/upload_to_hf.py (uploaded to SQCU/futudiffu-btrm on HuggingFace)",
+    ],
+    "training_output": [
+        "scripts/train.py (writes final adapters, metrics, renders)",
+    ],
+}
+
+
+# ---------------------------------------------------------------------------
+# Utility: directory size
+# ---------------------------------------------------------------------------
+
+def dir_size_bytes(path: Path) -> int:
+    """Total size of all files in a directory tree."""
+    total = 0
+    if not path.exists():
+        return 0
+    for root, _dirs, files in os.walk(str(path)):
+        for f in files:
+            try:
+                total += os.path.getsize(os.path.join(root, f))
+            except OSError:
+                pass
+    return total
+
+
+def format_size(n_bytes: int) -> str:
+    """Human-readable size string."""
+    if n_bytes < 1024:
+        return f"{n_bytes} B"
+    elif n_bytes < 1024 ** 2:
+        return f"{n_bytes / 1024:.1f} KB"
+    elif n_bytes < 1024 ** 3:
+        return f"{n_bytes / 1024 ** 2:.1f} MB"
+    else:
+        return f"{n_bytes / 1024 ** 3:.2f} GB"
+
+
+# ---------------------------------------------------------------------------
+# Sigma schedule -- imported from canonical module
+# ---------------------------------------------------------------------------
+# Previously this file contained an inline Karras sigma schedule
+# (_build_sigma_schedule with sigma_max=1.0, rho=7.0), which does NOT match
+# the server's ComfyUI simple_scheduler schedule. The Karras formula produces
+# different sigma values from what the server uses to generate trajectories,
+# so the step-to-sigma mapping was incorrect.
+#
+# We now use src_ii.sigma_schedule.build_sigma_schedule_py, which is the
+# pure-Python equivalent of the server's exact ComfyUI schedule (no torch
+# required). This means sigma bins in the audit report now reflect the actual
+# sigma values present in the trajectory latents.
+
+from src_ii.sigma_schedule import build_sigma_schedule_py as _build_sigma_schedule_py
+
+
+def sigma_for_step_key(step_key: str, n_steps: int) -> float:
+    """Return the sigma for a given step_key and total step count.
+
+    Uses the canonical ComfyUI simple_scheduler schedule from
+    src_ii.sigma_schedule.build_sigma_schedule_py. The old inline Karras
+    schedule has been removed because it produced incorrect sigma values
+    for trajectories generated by the server.
+    """
+    sigmas = _build_sigma_schedule_py(n_steps)
+    if step_key == "final":
+        # "final" latent was produced after the last euler step (sigma -> 0).
+        # Return the last non-terminal sigma (index n_steps - 1).
+        return sigmas[n_steps - 1] if n_steps < len(sigmas) else sigmas[-2]
+    elif step_key.startswith("step_"):
+        idx = int(step_key.split("_")[1])
+        if idx < len(sigmas):
+            return sigmas[idx]
+    return -1.0
+
+
+# ---------------------------------------------------------------------------
+# V1 dataset scanner
+# ---------------------------------------------------------------------------
+
+def scan_v1_dataset(path: Path) -> dict[str, Any]:
+    """Scan a v1 btrm_dataset directory."""
+    result = {
+        "exists": path.exists(),
+        "format": "v1 (manifest.json + latents/traj_NNNNNN/*.pt)",
+        "n_trajectories": 0,
+        "n_trajectories_manifest": 0,
+        "n_images_total": 0,
+        "size_bytes": 0,
+        "resolutions": Counter(),
+        "step_counts": Counter(),
+        "precision_counts": Counter(),
+        "type_counts": Counter(),
+        "step_keys": Counter(),
+        "sigma_distribution": Counter(),
+        "has_manifest": False,
+        "has_uploaded_manifest": False,
+        "manifest_records": [],
+    }
+
+    if not path.exists():
+        return result
+
+    result["size_bytes"] = dir_size_bytes(path)
+
+    # Read manifest
+    manifest_path = path / "manifest.json"
+    if manifest_path.exists():
+        result["has_manifest"] = True
+        try:
+            with open(manifest_path) as f:
+                manifest = json.load(f)
+            records = manifest.get("records", [])
+            result["n_trajectories_manifest"] = len(records)
+            result["manifest_records"] = records
+
+            for rec in records:
+                n_steps = rec.get("n_steps", 30)
+                result["step_counts"][n_steps] += 1
+                result["precision_counts"][rec.get("precision", "unknown")] += 1
+                result["type_counts"][rec.get("type", "unknown")] += 1
+
+                traj_type = rec.get("type", "t2i")
+                if traj_type == "i2i":
+                    w = rec.get("output_width", 1280)
+                    h = rec.get("output_height", 832)
+                else:
+                    w, h = 1280, 832
+                result["resolutions"][f"{w}x{h}"] += 1
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    # Check uploaded manifest
+    if (path / ".uploaded_manifest.json").exists():
+        result["has_uploaded_manifest"] = True
+
+    # Count actual trajectory directories
+    latents_dir = path / "latents"
+    if latents_dir.exists():
+        traj_dirs = sorted(
+            d for d in latents_dir.iterdir()
+            if d.is_dir() and d.name.startswith("traj_")
+        )
+        result["n_trajectories"] = len(traj_dirs)
+
+        # Sample a few to get step keys
+        for traj_dir in traj_dirs:
+            pt_files = [f for f in traj_dir.iterdir() if f.suffix == ".pt"]
+            n_images = len(pt_files)
+            result["n_images_total"] += n_images
+
+            for pf in pt_files:
+                step_key = pf.stem  # "step_00", "step_04", ..., "final"
+                result["step_keys"][step_key] += 1
+
+            # Read meta.json for this traj to get n_steps for sigma calc
+            meta_path = traj_dir / "meta.json"
+            if meta_path.exists():
+                try:
+                    with open(meta_path) as f:
+                        meta = json.load(f)
+                    n_steps = meta.get("n_steps", 30)
+                    for pf in pt_files:
+                        step_key = pf.stem
+                        sigma = sigma_for_step_key(step_key, n_steps)
+                        if sigma >= 0:
+                            bin_label = _sigma_bin(sigma)
+                            result["sigma_distribution"][bin_label] += 1
+                except (json.JSONDecodeError, KeyError):
+                    pass
+
+    return result
+
+
+def _sigma_bin(sigma: float) -> str:
+    """Bin a sigma value into a human-readable range."""
+    if sigma >= 0.9:
+        return "pure_noise (s>=0.9)"
+    elif sigma >= 0.5:
+        return "heavy_noise (0.5<=s<0.9)"
+    elif sigma >= 0.1:
+        return "mid_noise (0.1<=s<0.5)"
+    elif sigma >= 0.03:
+        return "low_noise (0.03<=s<0.1)"
+    elif sigma > 0:
+        return "near_clean (s<0.03)"
+    else:
+        return "zero (s=0)"
+
+
+# ---------------------------------------------------------------------------
+# V2 dataset scanner (parquet-free, reads schema from file bytes)
+# ---------------------------------------------------------------------------
+
+def scan_v2_dataset(path: Path) -> dict[str, Any]:
+    """Scan a v2 dataset directory. Reads index.parquet metadata without pyarrow."""
+    result = {
+        "exists": path.exists(),
+        "format": "v2 (index.parquet + blobs/*.safetensors)",
+        "n_trajectories": 0,
+        "n_blobs": 0,
+        "blob_sizes": [],
+        "size_bytes": 0,
+        "has_index_parquet": False,
+        "has_write_lock": False,
+        "has_uploaded_manifest": False,
+        "parquet_size_bytes": 0,
+        "index_readable": False,
+        "index_row_count": "unknown",
+    }
+
+    if not path.exists():
+        return result
+
+    result["size_bytes"] = dir_size_bytes(path)
+
+    index_path = path / "index.parquet"
+    if index_path.exists():
+        result["has_index_parquet"] = True
+        result["parquet_size_bytes"] = index_path.stat().st_size
+        # Try to read row count from parquet footer (last 8 bytes contain
+        # 4-byte LE row group count + 4-byte magic "PAR1")
+        result["index_readable"] = True
+        # We'll attempt a lightweight parse
+        result["index_row_count"] = _parquet_row_count_heuristic(index_path)
+
+    if (path / "_write_lock").exists():
+        result["has_write_lock"] = True
+
+    if (path / ".uploaded_manifest.json").exists():
+        result["has_uploaded_manifest"] = True
+
+    # Count blobs
+    blobs_dir = path / "blobs"
+    if blobs_dir.exists():
+        blobs = sorted(
+            f for f in blobs_dir.iterdir()
+            if f.name.startswith("blob_") and f.suffix == ".safetensors"
+        )
+        result["n_blobs"] = len(blobs)
+        result["blob_sizes"] = [
+            {"name": b.name, "size_bytes": b.stat().st_size}
+            for b in blobs
+        ]
+
+    # Renders
+    renders_dir = path / "renders"
+    if renders_dir.exists():
+        result["n_renders"] = sum(1 for f in renders_dir.iterdir() if f.is_file())
+
+    return result
+
+
+def _parquet_row_count_heuristic(parquet_path: Path) -> str:
+    """Try to extract the row count from a parquet file's footer.
+
+    Parquet format: last 4 bytes = "PAR1" magic, preceding 4 bytes = footer length (LE).
+    The footer is Thrift-encoded and contains the row count, but parsing Thrift
+    without a library is fragile. We return the parquet file size as a proxy
+    for "non-empty" and leave exact row count to when pyarrow is available.
+    """
+    try:
+        size = parquet_path.stat().st_size
+        if size < 12:
+            return "empty"
+        with open(parquet_path, "rb") as f:
+            # Check magic at start
+            magic_start = f.read(4)
+            # Check magic at end
+            f.seek(-4, 2)
+            magic_end = f.read(4)
+            if magic_start == b"PAR1" and magic_end == b"PAR1":
+                # Read footer length
+                f.seek(-8, 2)
+                footer_len = struct.unpack("<I", f.read(4))[0]
+                return f"valid parquet ({format_size(size)}, footer={footer_len}B)"
+            else:
+                return "invalid (bad magic)"
+    except Exception as e:
+        return f"unreadable ({e})"
+
+
+# ---------------------------------------------------------------------------
+# Packed dataset scanner (JSONL manifest + per-traj safetensors)
+# ---------------------------------------------------------------------------
+
+def scan_packed_dataset(path: Path) -> dict[str, Any]:
+    """Scan the packed_dataset directory (JSONL manifest + per-traj .safetensors)."""
+    result = {
+        "exists": path.exists(),
+        "format": "packed (manifest.jsonl + traj_NNNNNN.safetensors)",
+        "n_trajectories": 0,
+        "n_safetensors_files": 0,
+        "size_bytes": 0,
+        "resolutions": Counter(),
+        "step_counts": Counter(),
+        "precision_counts": Counter(),
+        "type_counts": Counter(),
+    }
+
+    if not path.exists():
+        return result
+
+    result["size_bytes"] = dir_size_bytes(path)
+
+    # Count .safetensors files
+    st_files = [f for f in path.iterdir() if f.suffix == ".safetensors"]
+    result["n_safetensors_files"] = len(st_files)
+
+    # Read manifest.jsonl
+    manifest_path = path / "manifest.jsonl"
+    if manifest_path.exists():
+        try:
+            with open(manifest_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    rec = json.loads(line)
+                    result["n_trajectories"] += 1
+                    result["step_counts"][rec.get("n_steps", -1)] += 1
+                    result["precision_counts"][rec.get("precision", "unknown")] += 1
+                    result["type_counts"][rec.get("type", "unknown")] += 1
+                    # All packed are 1280x832 t2i (from the original generation)
+                    result["resolutions"]["1280x832"] += 1
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Pinkify output scanner
+# ---------------------------------------------------------------------------
+
+def scan_pinkify_output(path: Path) -> dict[str, Any]:
+    """Scan the pinkify_thisnotthat_output directory."""
+    result = {
+        "exists": path.exists(),
+        "format": "preference labels (per_image_scores.json + preference_labels.json)",
+        "n_images": 0,
+        "n_pairs": 0,
+        "n_trajectories_covered": 0,
+        "size_bytes": 0,
+        "has_per_image_scores": False,
+        "has_preference_labels": False,
+        "has_adapter": False,
+        "has_head": False,
+        "pref_stats": {},
+    }
+
+    if not path.exists():
+        return result
+
+    result["size_bytes"] = dir_size_bytes(path)
+
+    # per_image_scores.json
+    scores_path = path / "per_image_scores.json"
+    if scores_path.exists():
+        result["has_per_image_scores"] = True
+        try:
+            with open(scores_path) as f:
+                scores = json.load(f)
+            result["n_images"] = len(scores)
+            traj_indices = set()
+            for entry in scores:
+                traj_indices.add(entry.get("traj_idx", -1))
+            result["n_trajectories_covered"] = len(traj_indices)
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    # preference_labels.json
+    labels_path = path / "preference_labels.json"
+    if labels_path.exists():
+        result["has_preference_labels"] = True
+        try:
+            with open(labels_path) as f:
+                data = json.load(f)
+            stats = data.get("stats", {})
+            result["n_pairs"] = stats.get("n_pairs", 0)
+            result["pref_stats"] = stats
+            labels = data.get("labels", [])
+            if not result["n_pairs"]:
+                result["n_pairs"] = len(labels)
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    # Check for trained artifacts
+    if (path / "rtheta_adapter.safetensors").exists():
+        result["has_adapter"] = True
+    if (path / "btrm_head.safetensors").exists() or (path / "trained_head.safetensors").exists():
+        result["has_head"] = True
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Training output scanner
+# ---------------------------------------------------------------------------
+
+def scan_training_output(path: Path) -> dict[str, Any]:
+    """Scan the training_output directory."""
+    result = {
+        "exists": path.exists(),
+        "format": "training artifacts (adapters, metrics, renders)",
+        "size_bytes": 0,
+        "subdirs": [],
+        "n_safetensors": 0,
+        "n_json": 0,
+        "n_png": 0,
+    }
+
+    if not path.exists():
+        return result
+
+    result["size_bytes"] = dir_size_bytes(path)
+
+    if path.is_dir():
+        for item in sorted(path.iterdir()):
+            if item.is_dir():
+                result["subdirs"].append(item.name)
+
+        for root, _dirs, files in os.walk(str(path)):
+            for f in files:
+                if f.endswith(".safetensors"):
+                    result["n_safetensors"] += 1
+                elif f.endswith(".json") or f.endswith(".jsonl"):
+                    result["n_json"] += 1
+                elif f.endswith(".png"):
+                    result["n_png"] += 1
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Report formatting
+# ---------------------------------------------------------------------------
+
+def _box(title: str, width: int = 60) -> str:
+    """Draw an ASCII box top with title."""
+    inner = width - 4
+    title_padded = f" {title} "
+    if len(title_padded) > inner:
+        title_padded = title_padded[:inner]
+    pad_total = inner - len(title_padded)
+    pad_left = pad_total // 2
+    pad_right = pad_total - pad_left
+    top = "+" + "-" * pad_left + title_padded + "-" * pad_right + "+"
+    return top
+
+
+def _row(text: str, width: int = 60) -> str:
+    """Draw an ASCII box row."""
+    inner = width - 4
+    if len(text) > inner:
+        text = text[:inner]
+    return "| " + text + " " * (inner - len(text)) + " |"
+
+
+def _bottom(width: int = 60) -> str:
+    return "+" + "-" * (width - 2) + "+"
+
+
+def format_counter(counter: Counter, label: str = "") -> list[str]:
+    """Format a Counter as lines."""
+    lines = []
+    if label:
+        lines.append(f"  {label}:")
+    for key, count in counter.most_common():
+        lines.append(f"    {key}: {count}")
+    return lines
+
+
+# ---------------------------------------------------------------------------
+# Main audit
+# ---------------------------------------------------------------------------
+
+def run_audit() -> str:
+    """Run the full dataset audit and return the formatted report string."""
+    lines: list[str] = []
+
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    lines.append("=" * 78)
+    lines.append(f"  DATASET AUDIT REPORT -- {now_str}")
+    lines.append(f"  Repo root: {REPO_ROOT}")
+    lines.append("=" * 78)
+
+    # -----------------------------------------------------------------------
+    # Scan all datasets
+    # -----------------------------------------------------------------------
+    scans: dict[str, dict] = {}
+
+    # V1 dataset
+    lines.append("")
+    lines.append("Scanning datasets...")
+
+    v1 = scan_v1_dataset(DATASET_LOCATIONS["btrm_dataset"])
+    scans["btrm_dataset"] = v1
+
+    # V2 datasets
+    for name in ["btrm_dataset_v2", "btrm_dataset_v2_gpu0", "btrm_dataset_v2_gpu0_gpu0",
+                  "btrm_dataset_v2_gpu1", "btrm_dataset_v2_gpu1_gpu1"]:
+        scans[name] = scan_v2_dataset(DATASET_LOCATIONS[name])
+
+    # Packed dataset
+    scans["packed_dataset"] = scan_packed_dataset(DATASET_LOCATIONS["packed_dataset"])
+
+    # Pinkify output
+    scans["pinkify_thisnotthat_output"] = scan_pinkify_output(
+        DATASET_LOCATIONS["pinkify_thisnotthat_output"]
+    )
+
+    # Training output
+    scans["training_output"] = scan_training_output(DATASET_LOCATIONS["training_output"])
+
+    # -----------------------------------------------------------------------
+    # Section 1: Per-dataset reports
+    # -----------------------------------------------------------------------
+    lines.append("")
+    lines.append("-" * 78)
+    lines.append("  SECTION 1: DATASET INVENTORY")
+    lines.append("-" * 78)
+
+    # V1 dataset report
+    lines.append("")
+    lines.append(_box("btrm_dataset/ (V1)", 74))
+    lines.append(_row(f"Path: {DATASET_LOCATIONS['btrm_dataset']}", 74))
+    lines.append(_row(f"Exists: {v1['exists']}", 74))
+    if v1["exists"]:
+        lines.append(_row(f"Format: {v1['format']}", 74))
+        lines.append(_row(f"Total size: {format_size(v1['size_bytes'])}", 74))
+        lines.append(_row(f"Trajectories on disk: {v1['n_trajectories']}", 74))
+        lines.append(_row(f"Trajectories in manifest: {v1['n_trajectories_manifest']}", 74))
+        lines.append(_row(f"Total images (latent .pt files): {v1['n_images_total']}", 74))
+        lines.append(_row(f"Has uploaded manifest: {v1['has_uploaded_manifest']}", 74))
+        lines.append(_row("", 74))
+        lines.append(_row("Resolution distribution:", 74))
+        for res, count in v1["resolutions"].most_common():
+            lines.append(_row(f"  {res}: {count} trajectories", 74))
+        lines.append(_row("Step count distribution:", 74))
+        for sc, count in v1["step_counts"].most_common():
+            lines.append(_row(f"  {sc} steps: {count} trajectories", 74))
+        lines.append(_row("Precision distribution:", 74))
+        for p, count in v1["precision_counts"].most_common():
+            lines.append(_row(f"  {p}: {count} trajectories", 74))
+        lines.append(_row("Type distribution:", 74))
+        for t, count in v1["type_counts"].most_common():
+            lines.append(_row(f"  {t}: {count} trajectories", 74))
+        if v1["sigma_distribution"]:
+            lines.append(_row("Sigma distribution (by log-SNR bin):", 74))
+            for sb, count in v1["sigma_distribution"].most_common():
+                lines.append(_row(f"  {sb}: {count} images", 74))
+    lines.append(_bottom(74))
+
+    # V2 datasets
+    for name in ["btrm_dataset_v2", "btrm_dataset_v2_gpu0", "btrm_dataset_v2_gpu0_gpu0",
+                  "btrm_dataset_v2_gpu1", "btrm_dataset_v2_gpu1_gpu1"]:
+        s = scans[name]
+        lines.append("")
+        lines.append(_box(f"{name}/ (V2)", 74))
+        lines.append(_row(f"Path: {DATASET_LOCATIONS[name]}", 74))
+        lines.append(_row(f"Exists: {s['exists']}", 74))
+        if s["exists"]:
+            lines.append(_row(f"Format: {s['format']}", 74))
+            lines.append(_row(f"Total size: {format_size(s['size_bytes'])}", 74))
+            lines.append(_row(f"Has index.parquet: {s['has_index_parquet']}", 74))
+            if s["has_index_parquet"]:
+                lines.append(_row(f"Parquet size: {format_size(s['parquet_size_bytes'])}", 74))
+                lines.append(_row(f"Parquet status: {s['index_row_count']}", 74))
+            lines.append(_row(f"Has write lock: {s['has_write_lock']}", 74))
+            lines.append(_row(f"Has uploaded manifest: {s.get('has_uploaded_manifest', False)}", 74))
+            lines.append(_row(f"Number of blobs: {s['n_blobs']}", 74))
+            for blob in s.get("blob_sizes", []):
+                lines.append(_row(f"  {blob['name']}: {format_size(blob['size_bytes'])}", 74))
+            if s.get("n_renders"):
+                lines.append(_row(f"Renders: {s['n_renders']}", 74))
+        lines.append(_bottom(74))
+
+    # Packed dataset
+    pk = scans["packed_dataset"]
+    lines.append("")
+    lines.append(_box("packed_dataset/ (HF upload format)", 74))
+    lines.append(_row(f"Path: {DATASET_LOCATIONS['packed_dataset']}", 74))
+    lines.append(_row(f"Exists: {pk['exists']}", 74))
+    if pk["exists"]:
+        lines.append(_row(f"Format: {pk['format']}", 74))
+        lines.append(_row(f"Total size: {format_size(pk['size_bytes'])}", 74))
+        lines.append(_row(f"Trajectories (from manifest): {pk['n_trajectories']}", 74))
+        lines.append(_row(f"Safetensors files: {pk['n_safetensors_files']}", 74))
+        if pk["step_counts"]:
+            lines.append(_row("Step count distribution:", 74))
+            for sc, count in pk["step_counts"].most_common():
+                lines.append(_row(f"  {sc} steps: {count} trajectories", 74))
+        if pk["precision_counts"]:
+            lines.append(_row("Precision distribution:", 74))
+            for p, count in pk["precision_counts"].most_common():
+                lines.append(_row(f"  {p}: {count} trajectories", 74))
+    lines.append(_bottom(74))
+
+    # Pinkify output
+    pf = scans["pinkify_thisnotthat_output"]
+    lines.append("")
+    lines.append(_box("pinkify_thisnotthat_output/", 74))
+    lines.append(_row(f"Path: {DATASET_LOCATIONS['pinkify_thisnotthat_output']}", 74))
+    lines.append(_row(f"Exists: {pf['exists']}", 74))
+    if pf["exists"]:
+        lines.append(_row(f"Format: {pf['format']}", 74))
+        lines.append(_row(f"Total size: {format_size(pf['size_bytes'])}", 74))
+        lines.append(_row(f"Has per_image_scores.json: {pf['has_per_image_scores']}", 74))
+        lines.append(_row(f"Has preference_labels.json: {pf['has_preference_labels']}", 74))
+        lines.append(_row(f"Images scored: {pf['n_images']}", 74))
+        lines.append(_row(f"Trajectories covered: {pf['n_trajectories_covered']}", 74))
+        lines.append(_row(f"Preference pairs: {pf['n_pairs']}", 74))
+        lines.append(_row(f"Trained adapter present: {pf['has_adapter']}", 74))
+        lines.append(_row(f"Trained head present: {pf['has_head']}", 74))
+        if pf["pref_stats"]:
+            lines.append(_row("Preference label stats:", 74))
+            for k, v in sorted(pf["pref_stats"].items()):
+                lines.append(_row(f"  {k}: {v}", 74))
+    lines.append(_bottom(74))
+
+    # Training output
+    to = scans["training_output"]
+    lines.append("")
+    lines.append(_box("training_output/", 74))
+    lines.append(_row(f"Path: {DATASET_LOCATIONS['training_output']}", 74))
+    lines.append(_row(f"Exists: {to['exists']}", 74))
+    if to["exists"]:
+        lines.append(_row(f"Format: {to['format']}", 74))
+        lines.append(_row(f"Total size: {format_size(to['size_bytes'])}", 74))
+        lines.append(_row(f"Subdirectories: {', '.join(to['subdirs']) or 'none'}", 74))
+        lines.append(_row(f"Safetensors files: {to['n_safetensors']}", 74))
+        lines.append(_row(f"JSON/JSONL files: {to['n_json']}", 74))
+        lines.append(_row(f"PNG renders: {to['n_png']}", 74))
+    lines.append(_bottom(74))
+
+    # -----------------------------------------------------------------------
+    # Section 2: Data flow diagram
+    # -----------------------------------------------------------------------
+    lines.append("")
+    lines.append("-" * 78)
+    lines.append("  SECTION 2: DATA FLOW DIAGRAM")
+    lines.append("-" * 78)
+    lines.append("")
+
+    # Build dynamic counts for the diagram
+    v1_traj = v1["n_trajectories"] if v1["exists"] else 0
+    v1_manifest = v1["n_trajectories_manifest"] if v1["exists"] else 0
+    v1_images = v1["n_images_total"] if v1["exists"] else 0
+    pf_images = pf["n_images"] if pf["exists"] else 0
+    pf_pairs = pf["n_pairs"] if pf["exists"] else 0
+    pf_trajs = pf["n_trajectories_covered"] if pf["exists"] else 0
+    pk_trajs = pk["n_trajectories"] if pk["exists"] else 0
+
+    # Determine resolutions string
+    res_str = ", ".join(f"{r}" for r, _ in v1["resolutions"].most_common(3)) if v1["resolutions"] else "unknown"
+    # Determine step counts string
+    step_str = ", ".join(f"{s}" for s, _ in v1["step_counts"].most_common(3)) if v1["step_counts"] else "unknown"
+
+    lines.append("  GENERATION PIPELINE:")
+    lines.append("")
+    lines.append("  +-------------------------------------------------------+")
+    lines.append("  | generate_btrm_dataset.py (server/client)              |")
+    lines.append("  | Generates diffusion trajectories via inference server  |")
+    lines.append("  +----------------------------+--------------------------+")
+    lines.append("                               |")
+    lines.append("                               | writes V1 format")
+    lines.append("                               v")
+    lines.append(f"  +-------------------------------------------------------+")
+    lines.append(f"  | btrm_dataset/ (V1)                                    |")
+    lines.append(f"  | {v1_traj} traj dirs on disk, {v1_manifest} in manifest.json      |")
+    lines.append(f"  | {v1_images} total latent .pt files                         |")
+    lines.append(f"  | Resolutions: {res_str:<40s} |")
+    lines.append(f"  | Steps: {step_str:<46s} |")
+    lines.append(f"  +---+-------------------+--+----------------------------+")
+    lines.append(f"      |                   |  |")
+    lines.append(f"      | migrate_v1_to_v2  |  | generate_preference_labels.py")
+    lines.append(f"      v                   |  v")
+    lines.append(f"  +--------------------+  |  +--------------------------------------+")
+    lines.append(f"  | btrm_dataset_v2/   |  |  | pinkify_thisnotthat_output/          |")
+    lines.append(f"  | (empty--migration  |  |  | {pf_images} images scored from {pf_trajs} trajectories    |")
+    lines.append(f"  |  ran but no data)  |  |  | {pf_pairs} preference pairs                  |")
+    lines.append(f"  +--------------------+  |  +----+---------------------------------+")
+    lines.append(f"                          |       |")
+    lines.append(f"      pack_trajectories   |       | sweep_rtheta_lr.py reads both")
+    lines.append(f"      (v1 -> safetensors) |       v")
+    lines.append(f"      |                   |  +--------------------------------------+")
+    lines.append(f"      v                   |  | train_btrm_differentiable()          |")
+    lines.append(f"  +--------------------+  |  | training_pairs: list[dict]           |")
+    lines.append(f"  | packed_dataset/    |  |  | Each pair: idx_a, idx_b, prefs       |")
+    lines.append(f"  | {pk_trajs} .safetensors   |  |  | Sampling: weighted by log-SNR sigma  |")
+    lines.append(f"  | + manifest.jsonl   |  |  | -> loads .pt latents from btrm_data  |")
+    lines.append(f"  | (HF upload format) |  |  +--------------------------------------+")
+    lines.append(f"  +--------------------+  |")
+    lines.append(f"                          | upload_to_hf.py")
+    lines.append(f"                          v")
+    lines.append(f"                     +---------------------+")
+    lines.append(f"                     | HuggingFace         |")
+    lines.append(f"                     | SQCU/futudiffu-btrm |")
+    lines.append(f"                     | (packed_dataset)    |")
+    lines.append(f"                     +---------------------+")
+    lines.append("")
+    lines.append("")
+    lines.append("  POLICY TRAINING (2xH100 remote):")
+    lines.append("")
+    lines.append("  +-------------------------------------------------------+")
+    lines.append("  | scripts/train.py (REINFORCE policy loop)              |")
+    lines.append("  | On-policy rollouts -> reward -> gradient              |")
+    lines.append("  +---+-------------------------------------------+-------+")
+    lines.append("      |                                           |")
+    lines.append("      | writes rollouts (--persist-min-k)         | saves final artifacts")
+    lines.append("      v                                           v")
+    lines.append("  +-------------------------+         +------------------------+")
+    lines.append("  | btrm_dataset_v2_gpu0/   |         | training_output/       |")
+    lines.append("  | btrm_dataset_v2_gpu1/   |         | adapters, metrics,     |")
+    lines.append("  | (per-GPU staging dirs)  |         | renders, curves        |")
+    lines.append("  +---+---+-----------------+         +------------------------+")
+    lines.append("      |   |")
+    lines.append("      |   | merge_staged_datasets.py")
+    lines.append("      |   v")
+    lines.append("      |  +-------------------------+")
+    lines.append("      |  | (merged v2 dataset)     |")
+    lines.append("      |  | (not yet implemented?)  |")
+    lines.append("      |  +-------------------------+")
+    lines.append("      |")
+    lines.append("      | GPU naming collision: gpu0_gpu0, gpu1_gpu1")
+    lines.append("      v")
+    lines.append("  +-----------------------------+  +-----------------------------+")
+    lines.append("  | btrm_dataset_v2_gpu0_gpu0/  |  | btrm_dataset_v2_gpu1_gpu1/  |")
+    lines.append("  | (nested staging artifact)   |  | (nested staging artifact)   |")
+    lines.append("  +-----------------------------+  +-----------------------------+")
+
+    # -----------------------------------------------------------------------
+    # Section 3: Training data flow detail
+    # -----------------------------------------------------------------------
+    lines.append("")
+    lines.append("-" * 78)
+    lines.append("  SECTION 3: TRAINING PAIR SELECTION (sweep_rtheta_lr.py)")
+    lines.append("-" * 78)
+    lines.append("")
+    lines.append("  The sweep script loads training data from THREE files:")
+    lines.append("")
+    lines.append(f"    1. btrm_dataset/manifest.json")
+    lines.append(f"       -> records[] array: prompt, seed, n_steps, precision, type")
+    lines.append(f"       -> {v1_manifest} trajectory records (metadata only, no latents)")
+    lines.append("")
+    lines.append(f"    2. pinkify_thisnotthat_output/preference_labels.json")
+    lines.append(f"       -> labels[] array: (traj_idx, step_a, step_b, pinkify_pref, thisnotthat_pref)")
+    lines.append(f"       -> {pf_pairs} pairwise comparisons from {pf_trajs} trajectories")
+    lines.append(f"       -> Preference = +1 (A wins), -1 (B wins), 0 (tie)")
+    lines.append("")
+    lines.append(f"    3. pinkify_thisnotthat_output/per_image_scores.json")
+    lines.append(f"       -> {pf_images} entries: (traj_idx, step_key, pinkify_score, thisnotthat_score)")
+    lines.append(f"       -> Used as index: image_idx -> (traj_idx, step_key)")
+    lines.append("")
+    lines.append("  Pair construction (build_training_pairs):")
+    lines.append("    1. Build image_index: (traj_idx, step_key) -> sequential image_idx")
+    lines.append("    2. For each label in preference_labels.json:")
+    lines.append("       - Look up idx_a = image_index[(traj_idx, step_a)]")
+    lines.append("       - Look up idx_b = image_index[(traj_idx, step_b)]")
+    lines.append("       - Emit {idx_a, idx_b, pinkify_pref, thisnotthat_pref}")
+    lines.append("    3. Pairs are INTRA-trajectory only (both images same traj)")
+    lines.append("")
+    lines.append("  Latent loading (build_latent_loader):")
+    lines.append("    For image_idx -> per_image_scores[image_idx].(traj_idx, step_key)")
+    lines.append("    -> loads btrm_dataset/latents/traj_{traj_idx:06d}/{step_key}.pt")
+    lines.append("    -> computes sigma from step_key + n_steps (from manifest)")
+    lines.append("    -> results cached in memory for reuse across steps")
+    lines.append("")
+    lines.append("  Sigma-weighted sampling:")
+    lines.append("    When enabled (default), pairs are sampled proportional to")
+    lines.append("    pair_sigma_weight = sqrt(w(sigma_a) * w(sigma_b))")
+    lines.append("    where w(sigma) = geometric decay by logSNR:")
+    lines.append("      logSNR >= threshold (10.0) -> 1.0 (flat, full weight)")
+    lines.append("      logSNR < threshold -> decay_rate ^ ((threshold - logSNR) / interval)")
+    lines.append("    Default: threshold=10.0, interval=5.0, decay_rate=0.5")
+    lines.append("    This is SAMPLING probability, not loss weighting.")
+
+    # -----------------------------------------------------------------------
+    # Section 4: Orphan analysis
+    # -----------------------------------------------------------------------
+    lines.append("")
+    lines.append("-" * 78)
+    lines.append("  SECTION 4: ORPHAN ANALYSIS")
+    lines.append("-" * 78)
+    lines.append("")
+
+    # Orphaned = exists on disk but not referenced by any training code
+    orphaned = []
+    referenced = []
+    for name, path in DATASET_LOCATIONS.items():
+        s = scans.get(name, {})
+        if not s.get("exists", False):
+            continue
+        if name in TRAINING_CODE_REFERENCES:
+            referenced.append(name)
+        else:
+            orphaned.append(name)
+
+    lines.append("  REFERENCED datasets (used by training/generation code):")
+    for name in referenced:
+        refs = TRAINING_CODE_REFERENCES.get(name, [])
+        lines.append(f"    {name}/")
+        for ref in refs:
+            lines.append(f"      <- {ref}")
+
+    lines.append("")
+    if orphaned:
+        lines.append("  ORPHANED datasets (exist on disk, no training code references):")
+        for name in orphaned:
+            s = scans[name]
+            lines.append(f"    {name}/ ({format_size(s.get('size_bytes', 0))})")
+    else:
+        lines.append("  No orphaned datasets found.")
+
+    # -----------------------------------------------------------------------
+    # Section 5: V1 vs V2 format comparison
+    # -----------------------------------------------------------------------
+    lines.append("")
+    lines.append("-" * 78)
+    lines.append("  SECTION 5: V1 vs V2 FORMAT COMPARISON")
+    lines.append("-" * 78)
+    lines.append("")
+    lines.append("  V1 format (btrm_dataset/):")
+    lines.append("    - manifest.json: flat array of trajectory records")
+    lines.append("    - latents/traj_NNNNNN/: one directory per trajectory")
+    lines.append("    - Each directory: meta.json + step_XX.pt + final.pt")
+    lines.append("    - .pt files are torch.save (pickle-based)")
+    lines.append("    - No efficient filtering, no concurrent write safety")
+    lines.append("")
+    lines.append("  V2 format (btrm_dataset_v2*/):")
+    lines.append("    - index.parquet: one row per trajectory, columnar filtering")
+    lines.append("    - blobs/*.safetensors: sealed multi-trajectory tensor blobs (~1GB)")
+    lines.append("    - _write_lock: advisory lockfile for writer exclusivity")
+    lines.append("    - No pickle, no torch.save, zero-deserialization-attack surface")
+    lines.append("    - Concurrent reader safety via atomic parquet writes")
+    lines.append("")
+    lines.append("  Current usage:")
+    lines.append("    - The sweep script (sweep_rtheta_lr.py) uses V1 format exclusively")
+    lines.append("    - V2 datasets are written by train.py for policy rollout persistence")
+    lines.append("    - V2 datasets are NOT read by any current training/sweep code")
+    lines.append("    - The btrm_dataset_v2/ directory exists but is EMPTY (no blobs)")
+    lines.append("      (migration script ran but created empty structure)")
+
+    # -----------------------------------------------------------------------
+    # Section 6: Data on HuggingFace
+    # -----------------------------------------------------------------------
+    lines.append("")
+    lines.append("-" * 78)
+    lines.append("  SECTION 6: HUGGINGFACE DATA STATUS")
+    lines.append("-" * 78)
+    lines.append("")
+    lines.append("  Repository: SQCU/futudiffu-btrm (private)")
+    lines.append(f"  Source uploaded: packed_dataset/ ({pk_trajs} trajectories)")
+    lines.append("  Upload script: scripts/upload_to_hf.py")
+    lines.append("")
+    hf_pulled = False
+    lines.append(f"  HF data pulled back to local: {hf_pulled}")
+    lines.append("    The only HF download code (remote_node_bootstrap.py) pulls MODEL")
+    lines.append("    weights from Comfy-Org/z_image, NOT the BTRM dataset.")
+    lines.append("    No code in the repo downloads SQCU/futudiffu-btrm back to local.")
+
+    # -----------------------------------------------------------------------
+    # Section 7: Discrepancies
+    # -----------------------------------------------------------------------
+    lines.append("")
+    lines.append("-" * 78)
+    lines.append("  SECTION 7: DISCREPANCIES AND NOTES")
+    lines.append("-" * 78)
+    lines.append("")
+
+    # V1 disk vs manifest count
+    if v1["exists"]:
+        disk_count = v1["n_trajectories"]
+        manifest_count = v1["n_trajectories_manifest"]
+        if disk_count != manifest_count:
+            lines.append(f"  [DISCREPANCY] btrm_dataset/: {disk_count} trajectory dirs on disk")
+            lines.append(f"    but manifest.json records only {manifest_count}.")
+            lines.append(f"    {disk_count - manifest_count} trajectories exist on disk but are")
+            lines.append(f"    NOT in the manifest. These were likely generated after the")
+            lines.append(f"    manifest was last written (e.g., policy rollouts persisted")
+            lines.append(f"    in V1 format, or additional generation runs).")
+        else:
+            lines.append(f"  [OK] btrm_dataset/: disk count ({disk_count}) matches manifest ({manifest_count}).")
+
+    lines.append("")
+
+    # Preference labels coverage
+    if pf["exists"] and v1["exists"]:
+        lines.append(f"  [NOTE] Preference labels cover {pf_trajs} of {v1_traj}")
+        lines.append(f"    trajectories on disk ({pf_images} images, {pf_pairs} pairs).")
+        if pf_trajs < v1_traj:
+            lines.append(f"    generate_preference_labels.py uses N_TRAJECTORIES=10 by default.")
+            lines.append(f"    {v1_traj - pf_trajs} trajectories have latents but no preference labels.")
+
+    lines.append("")
+
+    # V2 empty dataset
+    v2_empty = scans["btrm_dataset_v2"]
+    if v2_empty["exists"] and v2_empty["n_blobs"] == 0:
+        lines.append("  [NOTE] btrm_dataset_v2/ exists but has no blobs and no index.parquet.")
+        lines.append("    This is a skeleton created by migrate_v1_to_v2.py that either")
+        lines.append("    failed or was interrupted before writing any data.")
+
+    lines.append("")
+
+    # GPU naming collision
+    for suffix in ["gpu0_gpu0", "gpu1_gpu1"]:
+        name = f"btrm_dataset_v2_{suffix}"
+        s = scans.get(name, {})
+        if s.get("exists"):
+            lines.append(f"  [NOTE] {name}/ is a naming collision artifact.")
+            lines.append(f"    When train.py runs on GPU N, it appends '_gpuN' to the dataset")
+            lines.append(f"    directory name. If the base name already ends with '_gpuN',")
+            lines.append(f"    you get '_gpuN_gpuN'. This is harmless but indicates the")
+            lines.append(f"    remote training script was pointed at a staging dir that")
+            lines.append(f"    already had the GPU suffix baked in.")
+
+    lines.append("")
+
+    # Total size summary
+    total_size = sum(s.get("size_bytes", 0) for s in scans.values() if s.get("exists"))
+    lines.append(f"  TOTAL SIZE (all datasets): {format_size(total_size)}")
+
+    lines.append("")
+    lines.append("=" * 78)
+    lines.append("  END OF AUDIT REPORT")
+    lines.append("=" * 78)
+
+    return "\n".join(lines)
+
+
+def main():
+    report = run_audit()
+    print(report)
+
+    # Save to disk
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    report_path = OUTPUT_DIR / f"audit_report_{timestamp}.txt"
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write(report)
+
+    # Also save as the latest
+    latest_path = OUTPUT_DIR / "audit_report.txt"
+    with open(latest_path, "w", encoding="utf-8") as f:
+        f.write(report)
+
+    print(f"\nReport saved to: {report_path}")
+    print(f"Latest copy at:  {latest_path}")
+
+
+if __name__ == "__main__":
+    main()

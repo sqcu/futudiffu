@@ -1,0 +1,20 @@
+{
+  "status": "completed",
+  "steps_completed": 150,
+  "steps_total": 150,
+  "progress_pct": 100.0,
+  "elapsed_s": 3258.8417256996036,
+  "initial_loss": 0.6860668273533091,
+  "current_loss": 0.3513258704915643,
+  "min_loss": 0.3018833462681089,
+  "min_loss_step": 143,
+  "max_loss": 0.9110483229160309,
+  "mean_loss": 0.5289812003704509,
+  "mean_grad_norm": 0.4550863500436147,
+  "max_grad_norm": 1.1491637229919434,
+  "mean_step_time_s": 20.85640865866095,
+  "overall_accuracy_pinkify": 0.8375588383398765,
+  "last_20_accuracy_pinkify": 0.7922548213453786,
+  "overall_accuracy_thisnotthat": 0.6635129852797439,
+  "last_20_accuracy_thisnotthat": 0.6415834118581796
+}

@@ -1,0 +1,11 @@
+{
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [
+    "futudiffu-d20"
+  ],
+  "permissions": {
+    "allow": [
+      "mcp__futudiffu-d20__d20"
+    ]
+  }
+}

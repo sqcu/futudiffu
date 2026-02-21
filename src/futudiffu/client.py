@@ -167,10 +167,13 @@ class InferenceClient:
         seeds: list[int],
         n_steps: int,
         cfg: float = 4.0,
-        width: int = 1280,
-        height: int = 832,
+        width: int | None = None,
+        height: int | None = None,
+        widths: list[int] | None = None,
+        heights: list[int] | None = None,
         attention_backend: str = "sdpa",
-        sampling_shift: float = 1.0,
+        sampling_shift: float | None = None,
+        sampling_shifts: list[float] | None = None,
         multiplier: float = 1.0,
         save_steps: list[int] | None = None,
         denoise: float = 1.0,
@@ -178,17 +181,26 @@ class InferenceClient:
     ) -> list[dict[str, torch.Tensor]]:
         """Run N diffusion trajectories packed via FlexAttention.
 
-        All trajectories share the same schedule (n_steps, denoise, cfg, size).
-        Each has its own prompt (pos_cond) and seed.
+        Supports both uniform resolution (width/height) and mixed resolution
+        (widths/heights lists). Each image can have its own resolution and
+        corresponding sigma schedule shift (SD3 Eq.23).
 
         Args:
             pos_conds: N positive conditionings, each (1, seq_i, 2560).
             neg_cond: Shared negative conditioning (1, seq, 2560).
             seeds: N RNG seeds.
-            n_steps, cfg, width, height, sampling_shift, multiplier, denoise:
-                Shared trajectory parameters.
+            n_steps: Number of euler steps (shared by all images).
+            cfg: CFG scale.
+            width: Uniform image width (used if widths is None).
+            height: Uniform image height (used if heights is None).
+            widths: Per-image widths. Takes precedence over width.
+            heights: Per-image heights. Takes precedence over height.
             attention_backend: "sdpa" or "sage".
+            sampling_shift: Uniform sigma shift override. None = auto from resolution.
+            sampling_shifts: Per-image sigma shifts. Takes precedence over sampling_shift.
+            multiplier: Timestep multiplier.
             save_steps: Steps to save intermediates. None = all.
+            denoise: Denoise strength (0-1). Default 1.0 (t2i).
             clean_latents: N optional source image latents for i2i.
 
         Returns:
@@ -203,19 +215,39 @@ class InferenceClient:
                 if cl is not None:
                     req_tensors[f"clean_latent_{i}"] = cl
 
-        resp_tensors, metadata = self._call("sample_trajectory_packed", {
+        req_params: dict = {
             "n_images": n_images,
             "seeds": seeds,
             "n_steps": n_steps,
             "cfg": cfg,
-            "width": width,
-            "height": height,
             "attention_backend": attention_backend,
-            "sampling_shift": sampling_shift,
             "multiplier": multiplier,
             "save_steps": save_steps,
             "denoise": denoise,
-        }, req_tensors)
+        }
+
+        # Resolution: per-image lists take precedence over scalar
+        if widths is not None and heights is not None:
+            req_params["widths"] = widths
+            req_params["heights"] = heights
+        elif width is not None and height is not None:
+            req_params["width"] = width
+            req_params["height"] = height
+        else:
+            # Default to reference resolution
+            req_params["width"] = 1280
+            req_params["height"] = 832
+
+        # Sigma shift: per-image list takes precedence
+        if sampling_shifts is not None:
+            req_params["sampling_shifts"] = sampling_shifts
+        elif sampling_shift is not None:
+            req_params["sampling_shift"] = sampling_shift
+        # else: server auto-computes from resolution
+
+        resp_tensors, metadata = self._call(
+            "sample_trajectory_packed", req_params, req_tensors,
+        )
 
         # Unpack per-image results
         results = [{} for _ in range(n_images)]

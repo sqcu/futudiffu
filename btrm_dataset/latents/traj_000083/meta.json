@@ -1,0 +1,10 @@
+{
+  "type": "t2i",
+  "seed": 2510777721,
+  "prompt_idx": 23,
+  "prompt": "An isometric pixel art scene of a busy medieval marketplace with at least 20 distinct characters.",
+  "n_steps": 30,
+  "precision": "sage",
+  "batch_idx": 1,
+  "packed": false
+}

@@ -1,0 +1,10 @@
+{
+  "type": "t2i",
+  "seed": 3698408854,
+  "prompt_idx": 1,
+  "prompt": "qwen-3-4b, draw me a \"gigantic laser shark breaching out of the ocean at sunset\".",
+  "n_steps": 30,
+  "precision": "sage",
+  "batch_idx": 1,
+  "packed": false
+}

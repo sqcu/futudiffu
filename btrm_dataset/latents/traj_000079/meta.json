@@ -1,0 +1,10 @@
+{
+  "type": "t2i",
+  "seed": 2815087637,
+  "prompt_idx": 6,
+  "prompt": "A neon sign reading \"OPEN 24 HOURS\" above a rain-soaked Tokyo alleyway at night.",
+  "n_steps": 30,
+  "precision": "sage",
+  "batch_idx": 1,
+  "packed": false
+}

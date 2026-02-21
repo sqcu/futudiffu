@@ -92,6 +92,49 @@ One row per trajectory. All columns are required unless marked nullable.
 | `bytes_total` | `int64` | Total bytes of tensor data for this trajectory. |
 | `timing_seconds` | `float32` (nullable) | Wall-clock generation time. NULL if not recorded. |
 | `created_at` | `timestamp[us, tz=UTC]` | When this trajectory was generated. |
+| `parent_traj_id` | `int64` (nullable) | Parent trajectory ID for i2i2i chains. NULL for non-i2i2i. |
+| `parent_step` | `utf8` (nullable) | Parent step label (e.g., `"step_14"`). NULL for non-i2i2i. |
+| `parent_denoise` | `float32` (nullable) | Denoise strength used in i2i2i pass. NULL for non-i2i2i. |
+| `source_dir` | `utf8` (nullable) | Source directory name (provenance). |
+| `run_name` | `utf8` (nullable) | Training run name (provenance). E.g., `"original_v1"`, `"policy_rollout_v1"`, `"2xh100_20260216"`. |
+| `source_device` | `utf8` (nullable) | Source GPU device (provenance). E.g., `"local"`, `"gpu0"`, `"gpu1"`. |
+| `model_state_hash` | `utf8` (nullable) | SHA-256 hex digest identifying the exact model state (base + adapters). |
+| `base_model_hash` | `utf8` (nullable) | SHA-256 hex digest (or placeholder) identifying the base model weights. |
+| `adapter_set_hash` | `utf8` (nullable) | SHA-256 hex digest of the active adapter set. `""` = no adapters. NULL = unknown. |
+| `trajectory_hash` | `utf8` (nullable) | SHA-256 hex digest of the full trajectory identity (model state + sampling params). |
+| `active_adapters` | `utf8` (nullable) | JSON-serialized list of `{"name": str, "strength": float, "param_hash": str}`. `"[]"` = no adapters. NULL = unknown. |
+
+### Sampling state identity hashes
+
+The schema columns `(prompt, seed, cfg, n_steps, width, height, attention_backend)`
+identify a sampling configuration but NOT the model state. When the model has
+active LoRA adapters, the same sampling configuration produces different outputs.
+
+The hash columns form a hierarchy:
+
+1. **`base_model_hash`**: Identifies the frozen base model weights. Currently a
+   placeholder string `"z_image_v1"` (hashing 6 GB of FP8 weights is deferred).
+   When a policy adapter is materialized into the base model (base_new =
+   base_old + A @ B), the base_model_hash changes.
+
+2. **`adapter_set_hash`**: Identifies the UNORDERED SET of active adapters.
+   - Each adapter contributes `(strength, param_hash)` to the hash.
+   - Adapters with `strength=0` are excluded (disabled adapters don't affect output).
+   - Order-independent: `hash([(1.0, h_a), (0.5, h_b)]) == hash([(0.5, h_b), (1.0, h_a)])`.
+   - `""` (empty string) means no active adapters. NULL means unknown.
+   - `adapter_param_hash` = SHA-256 of the adapter's parameter tensors (they
+     mutate during training, so the hash captures a specific training checkpoint).
+
+3. **`model_state_hash`**: `SHA-256(base_model_hash || adapter_set_hash)`.
+   Uniquely identifies the exact model state for generation.
+
+4. **`trajectory_hash`**: `SHA-256(model_state_hash || prompt || seed || cfg || n_steps || width || height)`.
+   Uniquely identifies a specific diffusion sampling run.
+
+**Backfill status**: For `original_v1` trajectories, all hashes are computed.
+For `policy_rollout_v1` and `2xh100_20260216`, only `base_model_hash` is filled
+(the adapter state at generation time was not recorded). See
+`scripts_ii/backfill_v2_hashes.py`.
 
 ### Column rationale
 

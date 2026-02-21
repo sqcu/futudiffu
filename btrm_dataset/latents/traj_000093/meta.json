@@ -1,0 +1,10 @@
+{
+  "type": "t2i",
+  "seed": 1867302554,
+  "prompt_idx": 9,
+  "prompt": "A storefront window with painted gold lettering reading \"ANTIQUES & CURIOSITIES\" in a foggy English village.",
+  "n_steps": 30,
+  "precision": "sage",
+  "batch_idx": 1,
+  "packed": false
+}

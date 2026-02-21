@@ -1,0 +1,10 @@
+{
+  "type": "t2i",
+  "seed": 3582477022,
+  "prompt_idx": 8,
+  "prompt": "A chalkboard in a classroom with the equation \"E = mc\u00b2\" written in white chalk.",
+  "n_steps": 30,
+  "precision": "sdpa",
+  "batch_idx": 0,
+  "packed": false
+}

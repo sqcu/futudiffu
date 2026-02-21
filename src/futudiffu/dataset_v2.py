@@ -80,11 +80,18 @@ INDEX_SCHEMA = pa.schema([
     ("key_prefix", pa.utf8()),
     ("n_tensors", pa.int32()),
     ("bytes_total", pa.int64()),
+    ("sampling_shift", pa.float32()),    # nullable: SD3 Eq.23 alpha, null = 1.0 legacy
     ("timing_seconds", pa.float32()),   # nullable
     ("created_at", pa.timestamp("us", tz="UTC")),
     ("parent_traj_id", pa.int64()),       # nullable: null for non-i2i2i
     ("parent_step", pa.utf8()),           # nullable: e.g. "step_14"
     ("parent_denoise", pa.float32()),     # nullable: denoise used in i2i2i pass
+    # --- Sampling state identity hashes (nullable; backfilled for existing data) ---
+    ("model_state_hash", pa.utf8()),      # nullable: hex digest of model state
+    ("base_model_hash", pa.utf8()),       # nullable: hex digest of base model weights
+    ("adapter_set_hash", pa.utf8()),      # nullable: hex digest of active adapter set ("" = none)
+    ("trajectory_hash", pa.utf8()),       # nullable: hex digest of full trajectory identity
+    ("active_adapters", pa.utf8()),       # nullable: JSON list of {"name", "strength", "param_hash"}
 ])
 
 # Columns that get dictionary encoding (low cardinality).
@@ -349,11 +356,18 @@ class DatasetWriter:
             "key_prefix": key_prefix,
             "n_tensors": n_tensors,
             "bytes_total": traj_bytes,
+            "sampling_shift": float(metadata["sampling_shift"]) if metadata.get("sampling_shift") is not None else None,
             "timing_seconds": float(metadata["timing_seconds"]) if metadata.get("timing_seconds") is not None else None,
             "created_at": now,
             "parent_traj_id": int(metadata["parent_traj_id"]) if metadata.get("parent_traj_id") is not None else None,
             "parent_step": metadata.get("parent_step"),
             "parent_denoise": float(metadata["parent_denoise"]) if metadata.get("parent_denoise") is not None else None,
+            # Sampling state identity hashes (nullable)
+            "model_state_hash": metadata.get("model_state_hash"),
+            "base_model_hash": metadata.get("base_model_hash"),
+            "adapter_set_hash": metadata.get("adapter_set_hash"),
+            "trajectory_hash": metadata.get("trajectory_hash"),
+            "active_adapters": metadata.get("active_adapters"),
         }
         self._rows.append(row)
         return traj_id
@@ -679,9 +693,9 @@ class DatasetReader:
 
         Only 30-step t2i trajectories.
         """
-        mask = (
-            pc.equal(self._table.column("batch_type"), "t2i") &
-            pc.equal(self._table.column("n_steps"), 30)
+        mask = pc.and_(
+            pc.equal(self._table.column("batch_type"), "t2i"),
+            pc.equal(self._table.column("n_steps"), 30),
         )
         filtered = self._table.filter(mask)
         sdpa_ids = []

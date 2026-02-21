@@ -12,8 +12,13 @@ Pipeline:
       -> soft_tanh_cap
       -> (B, N_heads) scalar scores
 
-The BTRM head parameters are SEPARATE from the diffusion model and any LoRA
-parameters. The backbone is always frozen during BTRM inference.
+The score unembedder parameters are SEPARATE from the diffusion model and any
+LoRA parameters. The backbone is always frozen during BTRM inference.
+
+Naming convention:
+  - "BTRM model" = the compound triple (backbone + adapter + unembedder)
+  - "ScoreUnembedder" = the output layer (RMSNorm + Linear + tanh_cap)
+  - Never instantiate a ScoreUnembedder without a compound model in training code
 """
 
 from __future__ import annotations
@@ -59,14 +64,19 @@ class _RMSNorm(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# BTRM scoring head
+# Score unembedder (output layer)
 # ---------------------------------------------------------------------------
 
-class BTRMHead(nn.Module):
-    """Multi-head Bradley-Terry reward scoring head.
+class ScoreUnembedder(nn.Module):
+    """Multi-head Bradley-Terry reward score unembedder.
 
-    Takes pooled hidden states from a frozen NextDiT backbone and produces
-    per-head scalar scores.
+    Unembeds pooled hidden states from a frozen NextDiT backbone into
+    per-head scalar scores. Analogous to how an LM head unembeds hidden
+    states to token logits, this unembeds to reward scores.
+
+    This is the output layer of a BTRM model. A complete BTRM model is
+    the compound triple: backbone + LoRA adapter + ScoreUnembedder. For
+    training, always use BTRMCompoundModel which enforces this coupling.
 
     Args:
         hidden_dim: Dimension of the backbone hidden states (3840 for NextDiT Z-Image).
@@ -360,24 +370,24 @@ def compute_labeled_btrm_loss(
 # ---------------------------------------------------------------------------
 
 class BTRMWrapper(nn.Module):
-    """Combines a frozen NextDiT backbone with a trainable BTRMHead.
+    """Combines a frozen NextDiT backbone with a trainable ScoreUnembedder.
 
     The wrapper hooks into NextDiT's forward pass to capture the hidden
     states from the last transformer block (before ``final_layer``), pools
     them, and routes them through the BTRM head.
 
-    The backbone parameters are always frozen. Only the BTRMHead trains.
+    The backbone parameters are always frozen. Only the ScoreUnembedder trains.
 
     Args:
         model: A NextDiT instance (will be set to eval and frozen).
-        head: A BTRMHead instance. If None, one is created with default config
+        head: A ScoreUnembedder instance. If None, one is created with default config
               using the model's hidden dimension.
     """
 
-    def __init__(self, model: NextDiT, head: BTRMHead | None = None) -> None:
+    def __init__(self, model: NextDiT, head: ScoreUnembedder | None = None) -> None:
         super().__init__()
         self.model = model
-        self.head = head if head is not None else BTRMHead(hidden_dim=model.dim)
+        self.head = head if head is not None else ScoreUnembedder(hidden_dim=model.dim)
 
         # Freeze backbone
         self.model.eval()
@@ -419,7 +429,12 @@ class BTRMWrapper(nn.Module):
         attention_mask: Tensor | None = None,
         rope_cache: dict | None = None,
     ) -> Tensor:
-        """Run the frozen backbone and return captured hidden states.
+        """Run the frozen backbone and return captured hidden states (DETACHED).
+
+        WARNING: @torch.no_grad() means no computation graph is built.
+        Hidden states returned here have NO grad_fn. Any LoRA adapter on
+        the backbone will receive ZERO gradients if you train on these.
+        For adapter training, use BTRMCompoundModel.score_differentiable().
 
         Returns:
             (B, N_tokens, dim) hidden states from the final transformer block.

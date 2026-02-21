@@ -1,0 +1,10 @@
+{
+  "type": "t2i",
+  "seed": 4047709743,
+  "prompt_idx": 12,
+  "prompt": "A robot watering potted plants on a balcony overlooking a futuristic city skyline at dawn.",
+  "n_steps": 30,
+  "precision": "sage",
+  "batch_idx": 1,
+  "packed": false
+}

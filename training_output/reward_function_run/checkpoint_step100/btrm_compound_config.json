@@ -1,0 +1,13 @@
+{
+  "adapter_name": "rtheta",
+  "adapter_rank": 8,
+  "adapter_alpha": 16.0,
+  "adapter_init_b_std": 0.01,
+  "adapter_layer_indices": null,
+  "head_names": [
+    "pinkify",
+    "thisnotthat"
+  ],
+  "hidden_dim": 3840,
+  "logit_cap": 10.0
+}

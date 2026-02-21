@@ -458,6 +458,196 @@ def sage_attn_backward(
     return dq.reshape(B, H, N, D), dk.reshape(B, H, N, D), dv.reshape(B, H, N, D)
 
 
+def sage_attn_forward_masked_with_lse(
+    q: Tensor, k: Tensor, v: Tensor,
+    block_mask: Tensor,
+    sm_scale: float | None = None,
+) -> tuple[Tensor, Tensor]:
+    """SageAttention masked forward pass returning (output, LSE) for backward.
+
+    Combines block-masked attention (for packed multi-image sequences) with
+    LSE storage (needed for exact P recomputation in the backward pass).
+
+    Uses INT8 QK quantization — the masked backward kernels only exist in
+    INT8 variant, so the forward must match for correct P recomputation.
+
+    Args:
+        q, k, v: (B, H, N, D) tensors in BF16 on CUDA.
+        block_mask: uint8 tensor, (BH, n_q_blocks, n_kv_blocks) or
+            (n_q_blocks, n_kv_blocks). 1 = compute, 0 = skip.
+        sm_scale: Softmax scale factor (1/sqrt(D)). Computed from D if None.
+
+    Returns:
+        out: (B, H, N, D) tensor in BF16.
+        lse: (B*H, N) tensor in float32.
+    """
+    import triton
+
+    B, H, N, D = q.shape
+    assert D == 128, f"SageAttention currently requires head_dim=128, got {D}"
+    assert q.dtype == torch.bfloat16, f"Expected BF16 input, got {q.dtype}"
+
+    if _SAGE_SMOOTH_K:
+        k = _smooth_k(k)
+
+    if sm_scale is None:
+        sm_scale = 1.0 / math.sqrt(D)
+    sm_scale_log2e = sm_scale * _LOG2E
+
+    BH = B * H
+    q_flat = q.reshape(BH, N, D).contiguous()
+    k_flat = k.reshape(BH, N, D).contiguous()
+    v_flat = v.reshape(BH, N, D).contiguous()
+    out = torch.empty_like(q_flat)
+    lse = torch.empty(BH, N, dtype=torch.float32, device=q.device)
+
+    stride_z = N * D
+    BLOCK_M = 128
+    BLOCK_N = 64
+    grid = (triton.cdiv(N, BLOCK_M), BH)
+
+    n_q_blocks = triton.cdiv(N, BLOCK_M)
+    n_kv_blocks = triton.cdiv(N, BLOCK_N)
+
+    # Normalize block_mask shape
+    bm = block_mask.contiguous()
+    if bm.ndim == 2:
+        stride_bm_z = 0
+    elif bm.ndim == 3:
+        stride_bm_z = bm.shape[1] * bm.shape[2]
+    else:
+        raise ValueError(f"block_mask must be 2D or 3D, got {bm.ndim}D")
+
+    from .sage_kernels import _sage_attn_fwd_int8qk_bf16pv_masked_lse
+    _sage_attn_fwd_int8qk_bf16pv_masked_lse[grid](
+        q_flat, k_flat, v_flat, out, lse,
+        bm,
+        stride_z, stride_bm_z, N, n_kv_blocks, sm_scale_log2e,
+        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, D=D,
+        HAS_BLOCK_MASK=True,
+        num_warps=4, num_stages=1,
+    )
+
+    return out.reshape(B, H, N, D), lse
+
+
+def sage_attn_backward_masked(
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    out: Tensor,
+    lse: Tensor,
+    dout: Tensor,
+    block_mask: Tensor,
+    sm_scale: float,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Backward pass with block mask: compute dQ, dK, dV.
+
+    Uses saved LSE from the masked forward to exactly recompute attention
+    probabilities P via INT8 quantization, skipping tile pairs where the
+    block mask is 0. K-smoothing is re-applied if enabled (deterministic).
+
+    The block mask must be the same mask used in the forward pass. The mask
+    was created with forward's BLOCK_M=128, BLOCK_N=64 granularity. The dQ
+    kernel uses the same block sizes so mask indexing is trivial. The dK/dV
+    kernel uses BLOCK_M_BWD=64 for its inner Q loop, so it maps back to the
+    forward's Q block index via MASK_BLOCK_M=128.
+
+    Args:
+        q, k, v: (B, H, N, D) tensors in BF16 on CUDA (same as forward input).
+        out: (B, H, N, D) forward output in BF16.
+        lse: (B*H, N) log-sum-exp from forward in float32.
+        dout: (B, H, N, D) upstream gradient in BF16.
+        block_mask: uint8 tensor, (BH, n_q_blocks, n_kv_blocks) or
+            (n_q_blocks, n_kv_blocks). Same mask as used in forward.
+        sm_scale: 1/sqrt(D).
+
+    Returns:
+        dq, dk, dv: (B, H, N, D) gradients in BF16.
+    """
+    import triton
+
+    B, H, N, D = q.shape
+    BH = B * H
+
+    if _SAGE_SMOOTH_K:
+        k = _smooth_k(k)
+
+    sm_scale_log2e = sm_scale * _LOG2E
+    stride_z = N * D
+
+    # Block sizes — must match the forward kernel's mask granularity
+    BLOCK_M_FWD = 128     # forward's Q block size (mask granularity)
+    BLOCK_M = 128         # dQ outer block (matches forward)
+    BLOCK_N_BWD = 64      # dK/dV outer KV block (matches forward's BLOCK_N)
+    BLOCK_M_BWD = 64      # dK/dV inner Q loop (half of forward's BLOCK_M)
+    BLOCK_N_DQ = 64       # dQ inner KV loop (matches forward's BLOCK_N)
+
+    n_kv_blocks = triton.cdiv(N, BLOCK_N_BWD)  # same as forward's n_kv_blocks
+
+    # Normalize block_mask shape
+    bm = block_mask.contiguous()
+    if bm.ndim == 2:
+        stride_bm_z = 0
+    elif bm.ndim == 3:
+        stride_bm_z = bm.shape[1] * bm.shape[2]
+    else:
+        raise ValueError(f"block_mask must be 2D or 3D, got {bm.ndim}D")
+
+    # Reshape to (B*H, N, D) contiguous
+    q_flat = q.reshape(BH, N, D).contiguous()
+    k_flat = k.reshape(BH, N, D).contiguous()
+    v_flat = v.reshape(BH, N, D).contiguous()
+    out_flat = out.reshape(BH, N, D).contiguous()
+    dout_flat = dout.reshape(BH, N, D).contiguous()
+
+    # Step 1: D pre-pass — Delta_i = rowsum(dO_i * O_i)
+    # (no masking needed — D_i depends only on dO and O, not on Q/K attention)
+    from .sage_kernels import _sage_attn_d_prepass
+    delta = torch.empty(BH, N, dtype=torch.float32, device=q.device)
+    grid_d = (triton.cdiv(N, BLOCK_M), BH)
+    _sage_attn_d_prepass[grid_d](
+        dout_flat, out_flat, delta,
+        stride_z, N,
+        D_HEAD=D, BLOCK_M=BLOCK_M,
+        num_warps=4, num_stages=1,
+    )
+
+    # Step 2: dK/dV with masked inner loop
+    dk = torch.empty_like(q_flat)
+    dv = torch.empty_like(q_flat)
+    dq = torch.empty_like(q_flat)
+
+    from .sage_kernels import _sage_attn_bwd_dkdv_int8_masked, _sage_attn_bwd_dq_int8_masked
+
+    grid_kv = (triton.cdiv(N, BLOCK_N_BWD), BH)
+    _sage_attn_bwd_dkdv_int8_masked[grid_kv](
+        q_flat, k_flat, v_flat, dout_flat, out_flat, lse, delta,
+        dk, dv,
+        bm,
+        stride_z, stride_bm_z, N, n_kv_blocks,
+        sm_scale_log2e, sm_scale,
+        BLOCK_M=BLOCK_M_BWD, BLOCK_N=BLOCK_N_BWD, D=D,
+        HAS_BLOCK_MASK=True, MASK_BLOCK_M=BLOCK_M_FWD,
+        num_warps=4, num_stages=1,
+    )
+
+    # Step 3: dQ with masked inner loop
+    grid_q = (triton.cdiv(N, BLOCK_M), BH)
+    _sage_attn_bwd_dq_int8_masked[grid_q](
+        q_flat, k_flat, v_flat, dout_flat, out_flat, lse, delta,
+        dq,
+        bm,
+        stride_z, stride_bm_z, N, n_kv_blocks,
+        sm_scale_log2e, sm_scale,
+        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N_DQ, D=D,
+        HAS_BLOCK_MASK=True,
+        num_warps=4, num_stages=1,
+    )
+
+    return dq.reshape(B, H, N, D), dk.reshape(B, H, N, D), dv.reshape(B, H, N, D)
+
+
 # =============================================================================
 # Custom Op Registration for torch.compile compatibility
 # =============================================================================
@@ -532,4 +722,86 @@ if not _USE_CUSTOM_OP:
         # Compute LSE separately for the return value (not part of autograd graph)
         with torch.no_grad():
             _, lse = sage_attn_forward_with_lse(q, k, v, sm_scale)
+        return out, lse
+
+
+# =============================================================================
+# Masked Custom Op Registration for torch.compile compatibility
+# =============================================================================
+# Follows the exact same pattern as the unmasked sage_attn_op above, but
+# adds block_mask as an input. Only the INT8 QK variant is supported for
+# the masked backward path.
+
+_USE_MASKED_CUSTOM_OP = False
+
+try:
+    _custom_op_fn = torch.library.custom_op
+
+    @torch.library.custom_op("futudiffu::sage_attn_masked", mutates_args=())
+    def sage_attn_masked_op(
+        q: Tensor, k: Tensor, v: Tensor, block_mask: Tensor, sm_scale: float
+    ) -> tuple[Tensor, Tensor]:
+        """Masked SageAttention forward: returns (output, lse) for backward."""
+        return sage_attn_forward_masked_with_lse(q, k, v, block_mask, sm_scale)
+
+    @sage_attn_masked_op.register_fake
+    def _sage_attn_masked_op_fake(
+        q: Tensor, k: Tensor, v: Tensor, block_mask: Tensor, sm_scale: float
+    ) -> tuple[Tensor, Tensor]:
+        B, H, N, D = q.shape
+        # q.new_empty (not torch.empty_like) to get contiguous strides
+        return q.new_empty(B, H, N, D), q.new_empty(B * H, N, dtype=torch.float32)
+
+    def _masked_setup_context(ctx, inputs, output):
+        q, k, v, block_mask, sm_scale = inputs
+        out, lse = output
+        ctx.save_for_backward(q, k, v, out, lse, block_mask)
+        ctx.sm_scale = sm_scale
+
+    def _masked_backward(ctx, grad_out, grad_lse):
+        q, k, v, out, lse, block_mask = ctx.saved_tensors
+        dq, dk, dv = sage_attn_backward_masked(
+            q, k, v, out, lse, grad_out, block_mask, ctx.sm_scale
+        )
+        return dq, dk, dv, None, None  # 5 inputs -> 5 grads (block_mask, sm_scale get None)
+
+    sage_attn_masked_op.register_autograd(_masked_backward, setup_context=_masked_setup_context)
+    _USE_MASKED_CUSTOM_OP = True
+
+except (AttributeError, TypeError):
+    pass
+
+
+if not _USE_MASKED_CUSTOM_OP:
+    @torch.compiler.allow_in_graph
+    class _SageAttnMaskedFunction(torch.autograd.Function):
+        """Masked SageAttention with autograd, compatible with torch.compile."""
+
+        @staticmethod
+        def forward(
+            ctx, q: Tensor, k: Tensor, v: Tensor, block_mask: Tensor, sm_scale: float
+        ) -> Tensor:
+            out, lse = sage_attn_forward_masked_with_lse(q, k, v, block_mask, sm_scale)
+            ctx.save_for_backward(q, k, v, out, lse, block_mask)
+            ctx.sm_scale = sm_scale
+            return out
+
+        @staticmethod
+        def backward(ctx, grad_out: Tensor) -> tuple[Tensor, Tensor, Tensor, None, None]:
+            q, k, v, out, lse, block_mask = ctx.saved_tensors
+            dq, dk, dv = sage_attn_backward_masked(
+                q, k, v, out, lse, grad_out, block_mask, ctx.sm_scale
+            )
+            return dq, dk, dv, None, None
+
+    def sage_attn_masked_op(
+        q: Tensor, k: Tensor, v: Tensor, block_mask: Tensor, sm_scale: float
+    ) -> tuple[Tensor, Tensor]:
+        """Masked SageAttention forward with autograd (fallback path).
+
+        Returns (output, lse) for API compatibility, but lse is detached.
+        """
+        out = _SageAttnMaskedFunction.apply(q, k, v, block_mask, sm_scale)
+        with torch.no_grad():
+            _, lse = sage_attn_forward_masked_with_lse(q, k, v, block_mask, sm_scale)
         return out, lse

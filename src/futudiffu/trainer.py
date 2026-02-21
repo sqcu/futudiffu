@@ -25,8 +25,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
+from torch.optim.lr_scheduler import LinearLR
 
-from .btrm import BTRMHead, bradley_terry_loss, compute_multihead_loss, logsquare_regularizer
+from .btrm import ScoreUnembedder, bradley_terry_loss, compute_multihead_loss, logsquare_regularizer
 from .lora import (
     freeze_adapter,
     get_lora_params,
@@ -102,7 +103,7 @@ class TrainConfig:
     # DRGRPO policy config
     policy_lr: float = 1e-4
     policy_iterations: int = 20
-    grad_clip: float = 1.0
+    grad_clip: float = 0.01
     group_size: int = 4
     sparse_steps: int = 5
     s_churn: float = 0.0
@@ -127,6 +128,15 @@ class TrainConfig:
     # Output
     save_dir: str = "training_output"
 
+    # Optimizer config
+    optimizer_type: str = "adam"  # "adam" or "muon"
+    muon_lr: float = 0.02        # LR for Muon (LoRA params)
+    muon_momentum: float = 0.95  # Momentum for Muon
+
+    # Gradient accumulation
+    btrm_grad_accum_steps: int = 1   # microbatches per BTRM optimizer step
+    policy_grad_accum_steps: int = 1  # microbatches per policy optimizer step
+
     # Server-based training
     use_server: bool = False
     server_endpoint: str = "tcp://localhost:5555"
@@ -137,6 +147,63 @@ def _get_dtype(name: str) -> torch.dtype:
             "bfloat16": torch.bfloat16}[name]
 
 
+def _make_optimizer(
+    params: list[nn.Parameter],
+    lr: float,
+    optimizer_type: str = "adam",
+    muon_lr: float = 0.02,
+    muon_momentum: float = 0.95,
+) -> torch.optim.Optimizer:
+    """Create an optimizer for LoRA parameters.
+
+    Args:
+        params: List of trainable parameters (all LoRA A/B matrices).
+        lr: Learning rate for AdamW.
+        optimizer_type: "adam" or "muon".
+        muon_lr: Learning rate for Muon (ignored when optimizer_type="adam").
+        muon_momentum: Momentum for Muon.
+
+    Returns:
+        AdamW or Muon optimizer.
+    """
+    if optimizer_type == "muon":
+        from torch.optim import Muon
+        return Muon(muon_params=params, lr=muon_lr, momentum=muon_momentum)
+    return torch.optim.AdamW(params, lr=lr)
+
+
+def _make_btrm_optimizer(
+    lora_params: list[nn.Parameter],
+    head_params: list[nn.Parameter],
+    lr: float,
+    optimizer_type: str = "adam",
+    muon_lr: float = 0.02,
+    muon_momentum: float = 0.95,
+) -> torch.optim.Optimizer:
+    """Create a heterogeneous optimizer for BTRM compound model.
+
+    When optimizer_type="muon": Muon for LoRA A/B params, AdamW for
+    ScoreUnembedder params. The ScoreUnembedder is RMSNorm(1D) +
+    Linear(3840, N_heads) -- not suited for Newton-Schulz orthogonalization.
+
+    When optimizer_type="adam": AdamW for all params.
+    """
+    if optimizer_type == "muon":
+        from torch.optim import Muon
+        n_lora = sum(p.numel() for p in lora_params)
+        n_head = sum(p.numel() for p in head_params)
+        print(f"  Muon optimizer: {n_lora} LoRA params (lr={muon_lr}) + "
+              f"{n_head} head params (AdamW lr={lr})")
+        return Muon(
+            muon_params=lora_params,
+            lr=muon_lr,
+            momentum=muon_momentum,
+            adamw_params=head_params,
+            adamw_lr=lr,
+        )
+    return torch.optim.AdamW(lora_params + head_params, lr=lr)
+
+
 # ---------------------------------------------------------------------------
 # Training state
 # ---------------------------------------------------------------------------
@@ -145,7 +212,7 @@ def _get_dtype(name: str) -> torch.dtype:
 class TrainingState:
     """Mutable training state."""
     model: nn.Module
-    btrm_head: BTRMHead
+    btrm_head: ScoreUnembedder
     pos_cond: Tensor
     neg_cond: Tensor
     num_tokens: int
@@ -245,7 +312,7 @@ def setup_training(config: TrainConfig) -> TrainingState:
     )
 
     # --- BTRM head ---
-    btrm_head = BTRMHead(
+    btrm_head = ScoreUnembedder(
         hidden_dim=model.dim,
         head_names=config.btrm_head_names,
         logit_cap=10.0,
@@ -279,6 +346,9 @@ def train_btrm_epoch(
     config: TrainConfig,
     optimizer: torch.optim.Optimizer,
     pairs: list[tuple],
+    grad_clip: float = 0.01,
+    scheduler=None,
+    grad_accum_steps: int = 1,
 ) -> list[dict]:
     """One epoch of BTRM dual-head training using checkpointed forward.
 
@@ -287,7 +357,14 @@ def train_btrm_epoch(
       sigma_val is the sigma at which these were captured
       head_idx is 0 for bit_quality, 1 for step_quality
 
-    Returns list of per-step metric dicts.
+    Args:
+        scheduler: Optional LR scheduler. If provided, ``scheduler.step()``
+            is called after each ``optimizer.step()``.
+        grad_accum_steps: Number of pairs to accumulate gradients over before
+            each optimizer step. Loss is divided by grad_accum_steps for
+            correct scaling. Default 1 preserves existing behavior.
+
+    Returns list of per-step metric dicts (one per pair, not per optimizer step).
     """
     log = []
     model = state.model
@@ -295,6 +372,10 @@ def train_btrm_epoch(
 
     for i, (x_pos, x_neg, sigma_val, head_idx) in enumerate(pairs):
         t0 = time.time()
+
+        # Zero gradients at the start of each accumulation window
+        if i % grad_accum_steps == 0:
+            optimizer.zero_grad()
 
         x_pos = x_pos.to(device=state.device, dtype=state.dtype)
         x_neg = x_neg.to(device=state.device, dtype=state.dtype)
@@ -327,17 +408,38 @@ def train_btrm_epoch(
         )
         loss = result["loss"]
 
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        # Scale loss for gradient accumulation
+        scaled_loss = loss / grad_accum_steps
+        scaled_loss.backward()
+
+        # Step optimizer at the end of each accumulation window (or on last pair)
+        is_accum_boundary = (i + 1) % grad_accum_steps == 0 or (i + 1) == len(pairs)
+        pre_clip_val = 0.0
+        post_clip_val = 0.0
+
+        if is_accum_boundary:
+            # Gradient clipping -- pre_clip_norm is total norm before clipping
+            all_params = [p for group in optimizer.param_groups for p in group["params"] if p.grad is not None]
+            if all_params:
+                pre_clip_norm = torch.nn.utils.clip_grad_norm_(all_params, max_norm=grad_clip)
+                pre_clip_val = pre_clip_norm.item() if isinstance(pre_clip_norm, Tensor) else pre_clip_norm
+                post_clip_norm = torch.nn.utils.clip_grad_norm_(all_params, max_norm=float('inf'))
+                post_clip_val = post_clip_norm.item() if isinstance(post_clip_norm, Tensor) else post_clip_norm
+
+            optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
 
         dt = time.time() - t0
         margin = (pos_scores[:, head_idx] - neg_scores[:, head_idx]).detach().item()
+        current_lr = optimizer.param_groups[0]["lr"]
 
         entry = dict(
             step=i, sigma=sigma_val, loss=loss.item(),
             bt_loss=result["bt_loss"].item() if isinstance(result["bt_loss"], Tensor) else result["bt_loss"],
             margin=margin, head_idx=head_idx, time=dt,
+            pre_clip_grad_norm=pre_clip_val, grad_norm=post_clip_val,
+            lr=current_lr,
         )
         log.append(entry)
 
@@ -345,6 +447,8 @@ def train_btrm_epoch(
             print(
                 f"  btrm step {i:3d} | sigma={sigma_val:.4f} | "
                 f"loss={loss.item():.4f} margin={margin:+.4f} | "
+                f"gnorm={pre_clip_val:.3e}->{post_clip_val:.3e} | "
+                f"lr={current_lr:.3e} | "
                 f"head={config.btrm_head_names[head_idx]} | {dt:.1f}s"
             )
 
@@ -463,81 +567,124 @@ def policy_step(
     config: TrainConfig,
     optimizer: torch.optim.Optimizer,
     ptheta_params: list[nn.Parameter],
+    scheduler=None,
+    grad_accum_steps: int = 1,
 ) -> dict:
     """Single DRGRPO policy update with reference anchoring.
 
-    Runs one forward pass through a random sigma with gradient checkpointing.
-    Uses concurrent batch: batch[0] = LoRA (pi_theta), batch[1] = scale=0 (ref).
+    Runs grad_accum_steps forward passes through random sigmas with gradient
+    checkpointing, accumulating gradients before a single optimizer step.
+    Each microbatch uses concurrent batch: batch[0] = LoRA (pi_theta),
+    batch[1] = scale=0 (ref).
 
-    Returns dict of metrics.
+    Args:
+        scheduler: Optional LR scheduler. If provided, ``scheduler.step()``
+            is called after ``optimizer.step()``.
+        grad_accum_steps: Number of microbatches to accumulate before the
+            optimizer step. Each microbatch samples a different random sigma
+            and noise. Loss is divided by grad_accum_steps for correct
+            scaling. Default 1 preserves existing behavior.
+
+    Returns dict of metrics (averaged over microbatches where applicable).
     """
     t0 = time.time()
 
     model = state.model
     btrm = state.btrm_head
 
-    # Pick a random sigma from the schedule
-    n_sigmas = len(state.sigmas) - 1
-    sigma_idx = random.randint(0, n_sigmas - 1)
-    sigma = state.sigmas[sigma_idx]
-    timestep = (sigma * config.multiplier).unsqueeze(0)
-
-    # Random noise
-    noise = torch.randn(1, 16, state.latent_h, state.latent_w,
-                         dtype=state.dtype, device=state.device)
-    x_t = sigma * noise
-
-    # Reference anchoring: batch[0] = pi (LoRA active), batch[1] = ref (LoRA off)
-    set_lora_scale(model, torch.tensor([1.0, 0.0], device=state.device, dtype=state.dtype),
-                   adapter_name="ptheta")
-
-    x_batch = x_t.expand(2, -1, -1, -1)
-    timestep_batch = timestep.expand(2)
-    pos_batch = state.pos_cond.expand(2, -1, -1)
-
-    model_output, last_hidden = forward_checkpointed(
-        model, x_batch, timestep_batch, pos_batch,
-        num_tokens=state.num_tokens, rope_cache=state.rope_cache,
-    )
-
-    pi_output, ref_output = model_output.chunk(2, dim=0)
-    pi_hidden, ref_hidden = last_hidden.chunk(2, dim=0)
-
-    # BTRM reward from policy hidden states
-    pi_scores = btrm(pi_hidden)
-    reward_bq = pi_scores[:, 0].mean()
-
-    # Policy loss: maximize BTRM reward
-    policy_loss = -reward_bq
-
-    # Reference anchor
-    anchor_loss = reference_anchor_loss(pi_output, ref_output)
-
-    # Total loss
-    loss = policy_loss + config.lambda_anchor * anchor_loss
-
     optimizer.zero_grad()
-    loss.backward()
-    grad_norm = torch.nn.utils.clip_grad_norm_(ptheta_params, config.grad_clip)
+
+    accum_reward = 0.0
+    accum_policy_loss = 0.0
+    accum_anchor_loss = 0.0
+    accum_loss = 0.0
+    last_sigma = 0.0
+
+    for micro in range(grad_accum_steps):
+        # Pick a random sigma from the schedule
+        n_sigmas = len(state.sigmas) - 1
+        sigma_idx = random.randint(0, n_sigmas - 1)
+        sigma = state.sigmas[sigma_idx]
+        timestep = (sigma * config.multiplier).unsqueeze(0)
+        last_sigma = sigma.item()
+
+        # Random noise
+        noise = torch.randn(1, 16, state.latent_h, state.latent_w,
+                             dtype=state.dtype, device=state.device)
+        x_t = sigma * noise
+
+        # Reference anchoring: batch[0] = pi (LoRA active), batch[1] = ref (LoRA off)
+        set_lora_scale(model, torch.tensor([1.0, 0.0], device=state.device, dtype=state.dtype),
+                       adapter_name="ptheta")
+
+        x_batch = x_t.expand(2, -1, -1, -1)
+        timestep_batch = timestep.expand(2)
+        pos_batch = state.pos_cond.expand(2, -1, -1)
+
+        model_output, last_hidden = forward_checkpointed(
+            model, x_batch, timestep_batch, pos_batch,
+            num_tokens=state.num_tokens, rope_cache=state.rope_cache,
+        )
+
+        pi_output, ref_output = model_output.chunk(2, dim=0)
+        pi_hidden, ref_hidden = last_hidden.chunk(2, dim=0)
+
+        # BTRM reward from policy hidden states
+        pi_scores = btrm(pi_hidden)
+        reward_bq = pi_scores[:, 0].mean()
+
+        # Policy loss: maximize BTRM reward
+        policy_loss = -reward_bq
+
+        # Reference anchor
+        anchor_loss = reference_anchor_loss(pi_output, ref_output)
+
+        # Total loss
+        loss = policy_loss + config.lambda_anchor * anchor_loss
+
+        # Scale loss for gradient accumulation
+        scaled_loss = loss / grad_accum_steps
+        scaled_loss.backward()
+
+        accum_reward += reward_bq.item()
+        accum_policy_loss += policy_loss.item()
+        accum_anchor_loss += anchor_loss.item()
+        accum_loss += loss.item()
+
+        del noise, x_t, x_batch, model_output, last_hidden
+        del pi_output, ref_output, pi_hidden, ref_hidden, pi_scores
+        torch.cuda.empty_cache()
+
+    # Gradient clipping -- pre_clip_norm is the total norm BEFORE clipping
+    pre_clip_norm = torch.nn.utils.clip_grad_norm_(ptheta_params, config.grad_clip)
+    pre_clip_val = pre_clip_norm.item() if isinstance(pre_clip_norm, Tensor) else pre_clip_norm
+    # Compute post-clip norm for logging
+    post_clip_norm = torch.nn.utils.clip_grad_norm_(ptheta_params, float('inf'))
+    post_clip_val = post_clip_norm.item() if isinstance(post_clip_norm, Tensor) else post_clip_norm
     optimizer.step()
+    if scheduler is not None:
+        scheduler.step()
 
     # Restore LoRA scale to 1.0 for inference
     clear_lora_scale(model, adapter_name="ptheta")
 
     dt = time.time() - t0
     mem = torch.cuda.max_memory_allocated() / 1024**3
+    current_lr = optimizer.param_groups[0]["lr"]
 
     n_with_grad = sum(1 for p in ptheta_params
                       if p.grad is not None and p.grad.abs().sum() > 0)
 
     entry = dict(
         iteration=state.iteration,
-        sigma=sigma.item(),
-        reward_bq=reward_bq.item(),
-        policy_loss=policy_loss.item(),
-        anchor_loss=anchor_loss.item(),
-        loss=loss.item(),
-        grad_norm=grad_norm.item() if isinstance(grad_norm, Tensor) else grad_norm,
+        sigma=last_sigma,
+        reward_bq=accum_reward / grad_accum_steps,
+        policy_loss=accum_policy_loss / grad_accum_steps,
+        anchor_loss=accum_anchor_loss / grad_accum_steps,
+        loss=accum_loss / grad_accum_steps,
+        pre_clip_grad_norm=pre_clip_val,
+        grad_norm=post_clip_val,
+        lr=current_lr,
         n_with_grad=n_with_grad,
         n_total=len(ptheta_params),
         mem_gb=mem,
@@ -545,10 +692,6 @@ def policy_step(
     )
 
     state.iteration += 1
-
-    del noise, x_t, x_batch, model_output, last_hidden
-    del pi_output, ref_output, pi_hidden, ref_hidden, pi_scores
-    torch.cuda.empty_cache()
 
     return entry
 
@@ -586,7 +729,17 @@ def train_loop(state: TrainingState, config: TrainConfig) -> dict:
           f"{n_rtheta:,} params ({n_rtheta*2/1024**2:.1f} MB)")
 
     all_btrm_params = rtheta_params + list(state.btrm_head.parameters())
-    btrm_optimizer = torch.optim.AdamW(all_btrm_params, lr=config.btrm_lr)
+    btrm_optimizer = _make_btrm_optimizer(
+        lora_params=rtheta_params,
+        head_params=list(state.btrm_head.parameters()),
+        lr=config.btrm_lr,
+        optimizer_type=config.optimizer_type,
+        muon_lr=config.muon_lr,
+        muon_momentum=config.muon_momentum,
+    )
+    btrm_scheduler = LinearLR(
+        btrm_optimizer, start_factor=1e-8, end_factor=1.0, total_iters=40,
+    )
 
     # Generate probe pairs across sigma schedule
     n_sigmas = len(state.sigmas) - 1
@@ -629,15 +782,32 @@ def train_loop(state: TrainingState, config: TrainConfig) -> dict:
 
             btrm_optimizer.zero_grad()
             loss.backward()
+
+            # Gradient clipping
+            btrm_clip_params = [p for p in all_btrm_params if p.grad is not None]
+            if btrm_clip_params:
+                pre_clip_norm = torch.nn.utils.clip_grad_norm_(btrm_clip_params, max_norm=config.grad_clip)
+                pre_clip_val = pre_clip_norm.item() if isinstance(pre_clip_norm, Tensor) else pre_clip_norm
+                post_clip_norm = torch.nn.utils.clip_grad_norm_(btrm_clip_params, max_norm=float('inf'))
+                post_clip_val = post_clip_norm.item() if isinstance(post_clip_norm, Tensor) else post_clip_norm
+            else:
+                pre_clip_val = 0.0
+                post_clip_val = 0.0
+
             btrm_optimizer.step()
+            btrm_scheduler.step()
 
             margin = (pos_scores[:, 0] - neg_scores[:, 0]).detach().item()
+            btrm_lr = btrm_optimizer.param_groups[0]["lr"]
             btrm_log.append(dict(
                 epoch=epoch, sigma=sigma_val, loss=loss.item(),
                 margin=margin,
+                pre_clip_grad_norm=pre_clip_val, grad_norm=post_clip_val,
+                lr=btrm_lr,
             ))
             print(f"  ep{epoch} sigma={sigma_val:.4f} loss={loss.item():.4f} "
-                  f"margin={margin:+.4f}")
+                  f"margin={margin:+.4f} gnorm={pre_clip_val:.3e}->{post_clip_val:.3e} "
+                  f"lr={btrm_lr:.3e}")
 
             del noise, x_t, hidden_pos, hidden_neg
             torch.cuda.empty_cache()
@@ -667,7 +837,15 @@ def train_loop(state: TrainingState, config: TrainConfig) -> dict:
     print(f"  ptheta LoRA: {len(ptheta_injected)} adapters, "
           f"{n_ptheta:,} params ({n_ptheta*2/1024**2:.1f} MB)")
 
-    policy_optimizer = torch.optim.AdamW(ptheta_params, lr=config.policy_lr)
+    policy_optimizer = _make_optimizer(
+        ptheta_params, lr=config.policy_lr,
+        optimizer_type=config.optimizer_type,
+        muon_lr=config.muon_lr,
+        muon_momentum=config.muon_momentum,
+    )
+    policy_scheduler = LinearLR(
+        policy_optimizer, start_factor=1e-8, end_factor=1.0, total_iters=40,
+    )
 
     # Switch to Sage for policy training
     set_attention_backend("sage")
@@ -679,14 +857,17 @@ def train_loop(state: TrainingState, config: TrainConfig) -> dict:
     state.iteration = 0
 
     for i in range(config.policy_iterations):
-        entry = policy_step(state, config, policy_optimizer, ptheta_params)
+        entry = policy_step(state, config, policy_optimizer, ptheta_params,
+                            scheduler=policy_scheduler,
+                            grad_accum_steps=config.policy_grad_accum_steps)
         policy_log.append(entry)
 
         print(
             f"  iter {entry['iteration']:3d} | sigma={entry['sigma']:.4f} | "
             f"reward={entry['reward_bq']:+.4f} | loss={entry['loss']:.4f} | "
             f"anchor={entry['anchor_loss']:.4e} | "
-            f"grad_norm={entry['grad_norm']:.3e} | "
+            f"gnorm={entry['pre_clip_grad_norm']:.3e}->{entry['grad_norm']:.3e} | "
+            f"lr={entry['lr']:.3e} | "
             f"grads: {entry['n_with_grad']}/{entry['n_total']} | "
             f"mem={entry['mem_gb']:.1f}GB | {entry['time']:.1f}s"
         )

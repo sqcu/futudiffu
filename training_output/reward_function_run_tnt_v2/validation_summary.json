@@ -1,0 +1,748 @@
+{
+  "ground_truth": {
+    "pinkify": {
+      "passed": true,
+      "scores": {
+        "A": 0.0,
+        "B": 0.007069664541631937,
+        "C": 0.007593680173158646,
+        "D": 0.00898743700236082,
+        "E": 0.00898743700236082,
+        "F": 0.046157315373420715
+      },
+      "checks": [
+        {
+          "name": "A < B",
+          "passed": true,
+          "detail": "A=0.000000, B=0.007070, diff=0.007070"
+        },
+        {
+          "name": "B < C",
+          "passed": true,
+          "detail": "B=0.007070, C=0.007594, diff=0.000524"
+        },
+        {
+          "name": "max(A,B,C) < min(D,E)",
+          "passed": true,
+          "detail": "max(A,B,C)=0.007594, min(D,E)=0.008987, gap=0.001394"
+        },
+        {
+          "name": "D ~ E (relative diff < 50%)",
+          "passed": true,
+          "detail": "D=0.008987, E=0.008987, |D-E|/max=0.0000"
+        },
+        {
+          "name": "max(D,E) < F",
+          "passed": true,
+          "detail": "max(D,E)=0.008987, F=0.046157, gap=0.037170"
+        }
+      ],
+      "rank_order": [
+        "A",
+        "B",
+        "C",
+        "D",
+        "E",
+        "F"
+      ]
+    },
+    "tnt": {
+      "passed": true,
+      "scores": {
+        "THIS": 0.9999998211860657,
+        "THAT": -0.9999999403953552,
+        "1bit_redraw": 0.23765279352664948,
+        "bubblegum": 0.9683282375335693,
+        "clear_sky": 0.8571564555168152,
+        "deviantart": 0.9435494542121887,
+        "mspaint_enso": 0.9862245321273804,
+        "snek_heavy": 0.9112958908081055,
+        "widemeister": 0.9815632104873657,
+        "red_tonegraph": 0.4312882721424103,
+        "nightmode": 0.41587570309638977
+      },
+      "checks": [
+        {
+          "name": "THIS > THAT",
+          "passed": true,
+          "detail": "THIS=1.000000, THAT=-1.000000"
+        },
+        {
+          "name": "THIS > ALL",
+          "passed": true,
+          "detail": "THIS=1.000000, max(others)=0.986225"
+        },
+        {
+          "name": "THAT < ALL",
+          "passed": true,
+          "detail": "THAT=-1.000000, min(others)=0.237653"
+        },
+        {
+          "name": "THAT < NIGHT",
+          "passed": true,
+          "detail": "THAT=-1.000000, NIGHT=0.415876"
+        }
+      ],
+      "rank_order": [
+        "THAT",
+        "1bit_redraw",
+        "nightmode",
+        "red_tonegraph",
+        "clear_sky",
+        "snek_heavy",
+        "deviantart",
+        "bubblegum",
+        "widemeister",
+        "mspaint_enso",
+        "THIS"
+      ]
+    },
+    "cross_head": {
+      "cross_rho": {
+        "pinkify_vs_thisnotthat": -0.35454697122273693
+      },
+      "summary": "  pinkify_vs_thisnotthat: rho=-0.3545 [DECORRELATED]",
+      "n_images": 17
+    }
+  },
+  "pinkify_trajectory": [
+    {
+      "step": -1,
+      "n_passed": 2,
+      "passed": false,
+      "rank_order": [
+        "F",
+        "D",
+        "B",
+        "C",
+        "A",
+        "E"
+      ]
+    },
+    {
+      "step": 0,
+      "n_passed": 2,
+      "passed": false,
+      "rank_order": [
+        "F",
+        "D",
+        "B",
+        "C",
+        "A",
+        "E"
+      ]
+    },
+    {
+      "step": 10,
+      "n_passed": 2,
+      "passed": false,
+      "rank_order": [
+        "F",
+        "D",
+        "B",
+        "C",
+        "A",
+        "E"
+      ]
+    },
+    {
+      "step": 20,
+      "n_passed": 2,
+      "passed": false,
+      "rank_order": [
+        "F",
+        "D",
+        "B",
+        "C",
+        "A",
+        "E"
+      ]
+    },
+    {
+      "step": 30,
+      "n_passed": 2,
+      "passed": false,
+      "rank_order": [
+        "F",
+        "D",
+        "B",
+        "C",
+        "A",
+        "E"
+      ]
+    },
+    {
+      "step": 40,
+      "n_passed": 1,
+      "passed": false,
+      "rank_order": [
+        "F",
+        "D",
+        "C",
+        "B",
+        "A",
+        "E"
+      ]
+    },
+    {
+      "step": 50,
+      "n_passed": 1,
+      "passed": false,
+      "rank_order": [
+        "F",
+        "C",
+        "D",
+        "B",
+        "A",
+        "E"
+      ]
+    },
+    {
+      "step": 60,
+      "n_passed": 0,
+      "passed": false,
+      "rank_order": [
+        "F",
+        "C",
+        "D",
+        "B",
+        "A",
+        "E"
+      ]
+    },
+    {
+      "step": 70,
+      "n_passed": 0,
+      "passed": false,
+      "rank_order": [
+        "F",
+        "C",
+        "D",
+        "B",
+        "A",
+        "E"
+      ]
+    },
+    {
+      "step": 80,
+      "n_passed": 0,
+      "passed": false,
+      "rank_order": [
+        "F",
+        "C",
+        "D",
+        "B",
+        "A",
+        "E"
+      ]
+    },
+    {
+      "step": 90,
+      "n_passed": 0,
+      "passed": false,
+      "rank_order": [
+        "F",
+        "C",
+        "D",
+        "B",
+        "A",
+        "E"
+      ]
+    },
+    {
+      "step": 100,
+      "n_passed": 0,
+      "passed": false,
+      "rank_order": [
+        "F",
+        "C",
+        "B",
+        "D",
+        "A",
+        "E"
+      ]
+    },
+    {
+      "step": 110,
+      "n_passed": 0,
+      "passed": false,
+      "rank_order": [
+        "F",
+        "C",
+        "D",
+        "B",
+        "A",
+        "E"
+      ]
+    },
+    {
+      "step": 120,
+      "n_passed": 0,
+      "passed": false,
+      "rank_order": [
+        "F",
+        "C",
+        "D",
+        "B",
+        "A",
+        "E"
+      ]
+    },
+    {
+      "step": 130,
+      "n_passed": 1,
+      "passed": false,
+      "rank_order": [
+        "F",
+        "C",
+        "D",
+        "A",
+        "B",
+        "E"
+      ]
+    },
+    {
+      "step": 140,
+      "n_passed": 0,
+      "passed": false,
+      "rank_order": [
+        "F",
+        "C",
+        "B",
+        "D",
+        "A",
+        "E"
+      ]
+    },
+    {
+      "step": 149,
+      "n_passed": 0,
+      "passed": false,
+      "rank_order": [
+        "F",
+        "C",
+        "D",
+        "B",
+        "A",
+        "E"
+      ]
+    }
+  ],
+  "tnt_trajectory": [
+    {
+      "step": -1,
+      "n_passed": 1,
+      "passed": false,
+      "rank_order": [
+        "mspaint_enso",
+        "bubblegum",
+        "red_tonegraph",
+        "snek_heavy",
+        "clear_sky",
+        "deviantart",
+        "widemeister",
+        "THIS",
+        "1bit_redraw",
+        "THAT",
+        "nightmode"
+      ]
+    },
+    {
+      "step": 0,
+      "n_passed": 1,
+      "passed": false,
+      "rank_order": [
+        "bubblegum",
+        "snek_heavy",
+        "deviantart",
+        "mspaint_enso",
+        "clear_sky",
+        "red_tonegraph",
+        "widemeister",
+        "THIS",
+        "1bit_redraw",
+        "THAT",
+        "nightmode"
+      ]
+    },
+    {
+      "step": 10,
+      "n_passed": 2,
+      "passed": false,
+      "rank_order": [
+        "bubblegum",
+        "clear_sky",
+        "mspaint_enso",
+        "snek_heavy",
+        "red_tonegraph",
+        "THAT",
+        "deviantart",
+        "widemeister",
+        "THIS",
+        "1bit_redraw",
+        "nightmode"
+      ]
+    },
+    {
+      "step": 20,
+      "n_passed": 3,
+      "passed": false,
+      "rank_order": [
+        "THAT",
+        "red_tonegraph",
+        "clear_sky",
+        "snek_heavy",
+        "mspaint_enso",
+        "bubblegum",
+        "deviantart",
+        "widemeister",
+        "THIS",
+        "1bit_redraw",
+        "nightmode"
+      ]
+    },
+    {
+      "step": 30,
+      "n_passed": 3,
+      "passed": false,
+      "rank_order": [
+        "THAT",
+        "red_tonegraph",
+        "clear_sky",
+        "mspaint_enso",
+        "nightmode",
+        "snek_heavy",
+        "bubblegum",
+        "deviantart",
+        "widemeister",
+        "THIS",
+        "1bit_redraw"
+      ]
+    },
+    {
+      "step": 40,
+      "n_passed": 3,
+      "passed": false,
+      "rank_order": [
+        "THAT",
+        "nightmode",
+        "red_tonegraph",
+        "clear_sky",
+        "mspaint_enso",
+        "snek_heavy",
+        "bubblegum",
+        "deviantart",
+        "widemeister",
+        "THIS",
+        "1bit_redraw"
+      ]
+    },
+    {
+      "step": 50,
+      "n_passed": 1,
+      "passed": false,
+      "rank_order": [
+        "nightmode",
+        "THAT",
+        "red_tonegraph",
+        "clear_sky",
+        "snek_heavy",
+        "mspaint_enso",
+        "bubblegum",
+        "deviantart",
+        "THIS",
+        "widemeister",
+        "1bit_redraw"
+      ]
+    },
+    {
+      "step": 60,
+      "n_passed": 1,
+      "passed": false,
+      "rank_order": [
+        "nightmode",
+        "THAT",
+        "red_tonegraph",
+        "clear_sky",
+        "snek_heavy",
+        "mspaint_enso",
+        "bubblegum",
+        "deviantart",
+        "THIS",
+        "widemeister",
+        "1bit_redraw"
+      ]
+    },
+    {
+      "step": 70,
+      "n_passed": 1,
+      "passed": false,
+      "rank_order": [
+        "nightmode",
+        "THAT",
+        "red_tonegraph",
+        "clear_sky",
+        "mspaint_enso",
+        "snek_heavy",
+        "bubblegum",
+        "deviantart",
+        "THIS",
+        "widemeister",
+        "1bit_redraw"
+      ]
+    },
+    {
+      "step": 80,
+      "n_passed": 1,
+      "passed": false,
+      "rank_order": [
+        "nightmode",
+        "THAT",
+        "red_tonegraph",
+        "clear_sky",
+        "snek_heavy",
+        "bubblegum",
+        "deviantart",
+        "THIS",
+        "mspaint_enso",
+        "widemeister",
+        "1bit_redraw"
+      ]
+    },
+    {
+      "step": 90,
+      "n_passed": 1,
+      "passed": false,
+      "rank_order": [
+        "nightmode",
+        "THAT",
+        "red_tonegraph",
+        "clear_sky",
+        "snek_heavy",
+        "bubblegum",
+        "THIS",
+        "deviantart",
+        "mspaint_enso",
+        "widemeister",
+        "1bit_redraw"
+      ]
+    },
+    {
+      "step": 100,
+      "n_passed": 1,
+      "passed": false,
+      "rank_order": [
+        "nightmode",
+        "THAT",
+        "red_tonegraph",
+        "clear_sky",
+        "snek_heavy",
+        "mspaint_enso",
+        "deviantart",
+        "bubblegum",
+        "THIS",
+        "widemeister",
+        "1bit_redraw"
+      ]
+    },
+    {
+      "step": 110,
+      "n_passed": 1,
+      "passed": false,
+      "rank_order": [
+        "nightmode",
+        "THAT",
+        "red_tonegraph",
+        "clear_sky",
+        "snek_heavy",
+        "bubblegum",
+        "deviantart",
+        "mspaint_enso",
+        "THIS",
+        "widemeister",
+        "1bit_redraw"
+      ]
+    },
+    {
+      "step": 120,
+      "n_passed": 1,
+      "passed": false,
+      "rank_order": [
+        "nightmode",
+        "THAT",
+        "red_tonegraph",
+        "clear_sky",
+        "snek_heavy",
+        "bubblegum",
+        "deviantart",
+        "mspaint_enso",
+        "THIS",
+        "widemeister",
+        "1bit_redraw"
+      ]
+    },
+    {
+      "step": 130,
+      "n_passed": 1,
+      "passed": false,
+      "rank_order": [
+        "nightmode",
+        "THAT",
+        "red_tonegraph",
+        "clear_sky",
+        "snek_heavy",
+        "bubblegum",
+        "deviantart",
+        "THIS",
+        "mspaint_enso",
+        "widemeister",
+        "1bit_redraw"
+      ]
+    },
+    {
+      "step": 140,
+      "n_passed": 1,
+      "passed": false,
+      "rank_order": [
+        "nightmode",
+        "THAT",
+        "red_tonegraph",
+        "clear_sky",
+        "snek_heavy",
+        "bubblegum",
+        "deviantart",
+        "mspaint_enso",
+        "THIS",
+        "widemeister",
+        "1bit_redraw"
+      ]
+    },
+    {
+      "step": 149,
+      "n_passed": 1,
+      "passed": false,
+      "rank_order": [
+        "nightmode",
+        "THAT",
+        "red_tonegraph",
+        "clear_sky",
+        "snek_heavy",
+        "mspaint_enso",
+        "bubblegum",
+        "deviantart",
+        "THIS",
+        "widemeister",
+        "1bit_redraw"
+      ]
+    }
+  ],
+  "cross_head_trajectory": [
+    {
+      "step": -1,
+      "cross_rho": {
+        "pinkify_vs_thisnotthat": -0.7990196078431374
+      }
+    },
+    {
+      "step": 0,
+      "cross_rho": {
+        "pinkify_vs_thisnotthat": -0.7205882352941178
+      }
+    },
+    {
+      "step": 10,
+      "cross_rho": {
+        "pinkify_vs_thisnotthat": -0.44852941176470595
+      }
+    },
+    {
+      "step": 20,
+      "cross_rho": {
+        "pinkify_vs_thisnotthat": -0.11029411764705883
+      }
+    },
+    {
+      "step": 30,
+      "cross_rho": {
+        "pinkify_vs_thisnotthat": 0.17156862745098042
+      }
+    },
+    {
+      "step": 40,
+      "cross_rho": {
+        "pinkify_vs_thisnotthat": 0.38970588235294124
+      }
+    },
+    {
+      "step": 50,
+      "cross_rho": {
+        "pinkify_vs_thisnotthat": 0.556372549019608
+      }
+    },
+    {
+      "step": 60,
+      "cross_rho": {
+        "pinkify_vs_thisnotthat": 0.5122549019607844
+      }
+    },
+    {
+      "step": 70,
+      "cross_rho": {
+        "pinkify_vs_thisnotthat": 0.5122549019607844
+      }
+    },
+    {
+      "step": 80,
+      "cross_rho": {
+        "pinkify_vs_thisnotthat": 0.5220588235294118
+      }
+    },
+    {
+      "step": 90,
+      "cross_rho": {
+        "pinkify_vs_thisnotthat": 0.49019607843137264
+      }
+    },
+    {
+      "step": 100,
+      "cross_rho": {
+        "pinkify_vs_thisnotthat": 0.502450980392157
+      }
+    },
+    {
+      "step": 110,
+      "cross_rho": {
+        "pinkify_vs_thisnotthat": 0.4926470588235295
+      }
+    },
+    {
+      "step": 120,
+      "cross_rho": {
+        "pinkify_vs_thisnotthat": 0.4852941176470589
+      }
+    },
+    {
+      "step": 130,
+      "cross_rho": {
+        "pinkify_vs_thisnotthat": 0.502450980392157
+      }
+    },
+    {
+      "step": 140,
+      "cross_rho": {
+        "pinkify_vs_thisnotthat": 0.49509803921568635
+      }
+    },
+    {
+      "step": 149,
+      "cross_rho": {
+        "pinkify_vs_thisnotthat": 0.5245098039215687
+      }
+    }
+  ],
+  "first_pinkify_all_pass": null,
+  "first_tnt_all_pass": null,
+  "final_cross_rho": {
+    "pinkify_vs_thisnotthat": 0.5245098039215687
+  }
+}

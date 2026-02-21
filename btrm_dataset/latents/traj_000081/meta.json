@@ -1,0 +1,10 @@
+{
+  "type": "t2i",
+  "seed": 1137651678,
+  "prompt_idx": 4,
+  "prompt": "qwen-3-4b, draw me a \"tiny laser shark in a fishbowl on a desk, office background\".",
+  "n_steps": 30,
+  "precision": "sage",
+  "batch_idx": 1,
+  "packed": false
+}

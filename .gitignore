@@ -1,34 +1,165 @@
+# ============================================================
+# Python / venv
+# ============================================================
 .venv
 uv.lock
 __pycache__
 
-# rendered images (decode your own tensors)
-btrm_dataset/renders/
+# ============================================================
+# Secrets / ephemeral config
+# ============================================================
+.supersekrit
+remote_target.json
 
+# ============================================================
+# Model weights (global rule — large binaries, use your own)
+# ============================================================
+*.safetensors
+
+# ============================================================
+# Binary tensor / intermediate data (never version these)
+# ============================================================
+*.npy
+*.pt
+*.bin
+
+# ============================================================
+# Log files at repo root (server, training, heartbeat)
+# ============================================================
+*.log
+heartbeat.jsonl
+heartbeat_console.log
+server_heartbeat.bin
+catalog.json
+
+# ============================================================
+# Scratch / throwaway scripts at repo root
+# ============================================================
+snake_slayer.py
+snake_slayer_ii.py
+
+# ============================================================
 # i2i source images (copyrighted/personal art)
+# ============================================================
 i2i_off_policies/
 
-# validation tensor dumps (historical variants)
+# ============================================================
+# Rendered images / decode your own tensors
+# ============================================================
+btrm_dataset/renders/
+btrm_dataset/.uploaded_manifest.json
+
+# ============================================================
+# Validation tensor dumps (historical stream variants)
+# ============================================================
 stream_comfyui/
 stream_futudiffu_bf16/
 stream_futudiffu_f16te/
 stream_compat_bf16/
 # stream_futudiffu/ is the canonical FP8 reference trajectory — tracked
 
-# test artifacts
+# ============================================================
+# Legacy test artifact directories
+# ============================================================
 lora_dumps_test/
 lora_roundtrip_test/
 
-# benchmark runs
+# ============================================================
+# Legacy benchmark directories
+# ============================================================
 throughput_study/
 throughput_study_v2/
 bench_results.txt
 
-# model weights / lora checkpoints (use your own)
-*.safetensors
+# ============================================================
+# Large dataset directories (V2 datasets, multi-res, HF staging)
+# Reproduce from HuggingFace or generation scripts.
+# ============================================================
+btrm_dataset_v2/
+btrm_dataset_v2_from_v1/
+btrm_dataset_v2_gpu0/
+btrm_dataset_v2_gpu0_gpu0/
+btrm_dataset_v2_gpu1/
+btrm_dataset_v2_gpu1_gpu1/
+multi_res_trajectories/
+hf_download_staging/
 
-#shhh don't look
-.supersekrit
+# ============================================================
+# Debugging / validation / benchmark OUTPUT directories
+# These are regenerable intermediate computation artifacts.
+# ============================================================
+bench_compile_output/
+bench_warmup_output/
+bench_renders/
+bin_packing_audit/
+dataset_audit_output/
+flops_budget_100step_output/
+flops_budget_100step_v2_output/
+funfetti_100step_output/
+funfetti_e2e_output/
+funfetti_stratified_output/
+packed_vs_serial_validation/
+pinkify_test_output/
+pinkify_thisnotthat_output/
+pipeline_validation/
+rtheta_sweep_output/
+rtheta_sweep_output_v2/
+test_artifacts_tmp/
+test_packed_scoring_output/
+test_split_piref_output/
+validation_output_ii/
 
-# remote orchestration config (contains ephemeral IPs/keys)
-remote_target.json
+# TNT reward function validation iterations (regenerable)
+tnt_border_extrusion_validation/
+tnt_fractional_rotation_validation/
+tnt_invariance_validation/
+tnt_v2_validation/
+tnt_v4_zernike_validation/
+tnt_v5_validation/
+tnt_v6_validation/
+tnt_v7_validation/
+
+# ============================================================
+# Validation renders (PNG/NPY debugging output)
+# The tracked .json/.txt stats stay; binary renders are ignored.
+# ============================================================
+validation_renders/**/*.png
+validation_renders/**/*.npy
+
+# ============================================================
+# Heattest render trajectory subdirectories (PNG debugging)
+# The tracked manifest/summary files stay.
+# ============================================================
+heattest_renders/traj_*/
+
+# ============================================================
+# Remote validation generated stubs and extra logs
+# The tracked launch_report.json and server_gpu0.log stay.
+# ============================================================
+remote_validation/gen_stub_*/
+remote_validation/pipeline/
+remote_validation/server_gpu1.log
+
+# ============================================================
+# Training output — ignore everything by default, then
+# selectively un-ignore the two blessed reward model runs.
+#
+# Git will not descend into an ignored directory, so we must
+# NOT ignore training_output/ itself. Instead we ignore its
+# contents via a wildcard and negate the two blessed subdirs.
+# ============================================================
+training_output/*
+
+# UN-IGNORE: Two blessed reward model training runs
+#   reward_function_run      — first reward-function-validated BTRM run
+#   reward_function_run_tnt_v2 — TNT v2 corrected scoring run
+# These contain adapter weights, BTRM heads, training curves,
+# validation logs, charts, analysis markdown, and checkpoints
+# that others need for comparison and reproducibility.
+!training_output/reward_function_run/
+!training_output/reward_function_run_tnt_v2/
+
+# UN-IGNORE: .safetensors inside the two blessed runs
+# (overrides the global *.safetensors rule above)
+!training_output/reward_function_run/**
+!training_output/reward_function_run_tnt_v2/**

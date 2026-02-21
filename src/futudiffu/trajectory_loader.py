@@ -237,8 +237,16 @@ class TrajectoryPoolV2:
 
     def load_checkpoint(self, example: TrajectoryExample) -> Tensor:
         """Load latent tensor via v2 blob accessor."""
-        _, dir_path, traj_id_str = example.traj_dir.split(":", 2)
-        traj_id = int(traj_id_str)
+        # Format: "v2:{dir_path}:{traj_id}"
+        # Windows paths contain ":" (drive letter), so we split from the
+        # right to extract traj_id, and strip "v2:" prefix from the left.
+        traj_ref = example.traj_dir
+        assert traj_ref.startswith("v2:"), f"Unexpected traj_ref format: {traj_ref!r}"
+        remainder = traj_ref[3:]  # strip "v2:" prefix
+        # traj_id is an integer after the last ":"
+        last_colon = remainder.rfind(":")
+        dir_path = remainder[:last_colon]
+        traj_id = int(remainder[last_colon + 1:])
         reader = self._readers_by_dir[dir_path]
         _, accessor = reader[traj_id]
         return accessor[example.step_key]

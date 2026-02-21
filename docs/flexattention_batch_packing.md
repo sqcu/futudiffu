@@ -286,22 +286,108 @@ sequence layout:
 
 ## 8. SageAttention Interaction
 
-SageAttention custom Triton kernels implement dense attention with no masking
-support. **Incompatible with FlexAttention block masks.**
+SageAttention is **compatible with FlexAttention block masks** via uint8 block
+mask tensors. The incompatibility documented here originally was accidental, not
+fundamental — the SageAttention kernels had no mask parameter, but adding one
+required only a `HAS_BLOCK_MASK: tl.constexpr` path, which compiles away
+entirely when masking is not needed.
 
-**Decision**: Use FlexAttention for packed batches, keep SageAttention for
-unpacked single-image batches. Simple dispatch:
+### 8.1 Kernel Inventory
+
+The full set of masked Triton kernels (in `sage_kernels.py`):
+
+| Kernel | Quantization | Direction |
+|--------|-------------|-----------|
+| `_sage_attn_fwd_fp8qk_bf16pv_masked` | FP8 QK | Forward |
+| `_sage_attn_fwd_int8qk_bf16pv_masked` | INT8 QK | Forward |
+| `_sage_attn_fwd_int8qk_bf16pv_masked_lse` | INT8 QK | Forward + LSE (needed for backward) |
+| `_sage_attn_bwd_dkdv_int8_masked` | INT8 QK | Backward dK/dV |
+| `_sage_attn_bwd_dq_int8_masked` | INT8 QK | Backward dQ |
+
+`HAS_BLOCK_MASK: tl.constexpr` is present in all kernels. When compiled with
+`HAS_BLOCK_MASK=False` the mask-checking code is eliminated at compile time and
+the generated PTX is identical to the unmasked variants — zero overhead for
+unpacked batches.
+
+The masked backward is INT8-only (not FP8). The server runtime default is INT8
+QK, which is the path used for all packed training. FP8 masked backward is not
+implemented but would be mechanical to add if FP8-QK packed training is needed.
+
+### 8.2 Block Mask Format
+
+The mask type used by these kernels is a **uint8 tensor**, not a FlexAttention
+callable `BlockMask` object. Shape is `(n_q_blocks, n_kv_blocks)` where
+`n_q_blocks = ceil(total_len / BLOCK_M)` and `n_kv_blocks = ceil(total_len /
+BLOCK_N)` with `BLOCK_M=128`, `BLOCK_N=64`. The mask broadcasts across batch
+and head dimensions (`stride_bm_z=0` in the Triton kernel).
+
+FlexAttention callable `BlockMask` objects are not used anywhere in the
+masked SageAttention path. The two masking systems are entirely separate:
+uint8 tensors for SageAttention, callable mask objects for SDPA/FlexAttention.
+
+### 8.3 src_ii/ Modules
+
+Three modules in `src_ii/` close the integration gap:
+
+**`src_ii/block_mask.py`** — constructs the uint8 block mask from packing
+information. Core function:
 
 ```python
-if block_mask is not None:
-    out = flex_attention(q, k, v, block_mask=block_mask)
-else:
-    # Existing SDPA / SageAttention dispatch
+def build_block_mask(
+    segment_lengths: list[int],
+    total_len: int | None = None,
+    device: torch.device | str = "cuda",
+) -> torch.Tensor:  # (n_q_blocks, n_kv_blocks), dtype=uint8
     ...
+    mask = (q_doc.unsqueeze(1) == kv_doc.unsqueeze(0)).to(torch.uint8)
+    return mask
 ```
 
-For 4x 256x256 packed with 97% block sparsity, FlexAttention's sparsity
-savings dominate over SageAttention's FP8/INT8 quantization benefits.
+Construction is a single outer-product equality check — no Python loops over
+token positions. Executed once per packing configuration, before the compiled
+forward.
+
+**`src_ii/attention.py`** — unified attention dispatch keyed on a
+`Literal["sage", "sage_masked", "sdpa"]` backend string. String dispatch is
+resolved at torch.compile trace time (static constant), avoiding runtime guards
+that would cause graph breaks:
+
+```python
+def attention(q, k, v, backend, block_mask=None, sm_scale=None):
+    if backend == "sage_masked":
+        out, _lse = sage_attn_masked_op(q, k, v, block_mask, sm_scale)
+        return out
+    if backend == "sage":
+        out, _lse = sage_attn_op(q, k, v, sm_scale)
+        return out
+    if backend == "sdpa":
+        return F.scaled_dot_product_attention(q, k, v)
+```
+
+**`src_ii/forward_packed.py`** — orchestrates mask construction and backend
+configuration before each packed forward call. `prepare_packed_forward()`
+runs once per generation batch (computing refined captions, packing layout,
+RoPE, and uint8 mask). `packed_forward()` is called per euler step and
+delegates to `model.forward_packed()`.
+
+### 8.4 Dispatch Decision
+
+```python
+# select_backend() in src_ii/attention.py
+backend = "sage_masked" if is_packed and not force_sdpa else (
+    "sdpa" if force_sdpa else "sage"
+)
+```
+
+Packed batches use `"sage_masked"` by default, getting both block sparsity
+savings and INT8 QK quantization. Unpacked single-image batches continue using
+`"sage"` unchanged. SDPA fallback is available via `force_sdpa=True`.
+
+### 8.5 Decision Summary Update
+
+The row in section 15 that previously read "SageAttention: Disabled for
+packed" is superseded. SageAttention with masked kernels is the default
+path for packed batches in `src_ii/`.
 
 ---
 

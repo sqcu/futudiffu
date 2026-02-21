@@ -1,0 +1,378 @@
+{
+  "total_flops_weighted": 484.54726423816567,
+  "megapixel_flops_pct": 57.58663161139824,
+  "small_flops_pct": 42.41336838860177,
+  "per_resolution": {
+    "61440": {
+      "count": 59,
+      "flops_ratio": 0.003328402366863906,
+      "flops_weighted": 0.19637573964497043,
+      "flops_proportion": 0.0004052767482935316,
+      "is_megapixel": false
+    },
+    "64512": {
+      "count": 426,
+      "flops_ratio": 0.0036695636094674555,
+      "flops_weighted": 1.563234097633136,
+      "flops_proportion": 0.003226174643852229,
+      "is_megapixel": false
+    },
+    "65536": {
+      "count": 114,
+      "flops_ratio": 0.0037869822485207105,
+      "flops_weighted": 0.431715976331361,
+      "flops_proportion": 0.0008909677304857573,
+      "is_megapixel": false
+    },
+    "67584": {
+      "count": 136,
+      "flops_ratio": 0.004027366863905325,
+      "flops_weighted": 0.5477218934911242,
+      "flops_proportion": 0.0011303786728675178,
+      "is_megapixel": false
+    },
+    "71680": {
+      "count": 91,
+      "flops_ratio": 0.004530325443786982,
+      "flops_weighted": 0.41225961538461536,
+      "flops_proportion": 0.0008508140398497445,
+      "is_megapixel": false
+    },
+    "93184": {
+      "count": 48,
+      "flops_ratio": 0.007656249999999999,
+      "flops_weighted": 0.36749999999999994,
+      "flops_proportion": 0.0007584399440946293,
+      "is_megapixel": false
+    },
+    "98304": {
+      "count": 204,
+      "flops_ratio": 0.008520710059171599,
+      "flops_weighted": 1.7382248520710062,
+      "flops_proportion": 0.0035873174411663387,
+      "is_megapixel": false
+    },
+    "100352": {
+      "count": 155,
+      "flops_ratio": 0.008879437869822485,
+      "flops_weighted": 1.3763128698224851,
+      "flops_proportion": 0.0028404099484214546,
+      "is_megapixel": false
+    },
+    "101376": {
+      "count": 183,
+      "flops_ratio": 0.009061575443786982,
+      "flops_weighted": 1.6582683062130177,
+      "flops_proportion": 0.0034223045481852976,
+      "is_megapixel": false
+    },
+    "102400": {
+      "count": 59,
+      "flops_ratio": 0.009245562130177515,
+      "flops_weighted": 0.5454881656804734,
+      "flops_proportion": 0.0011257687452598101,
+      "is_megapixel": false
+    },
+    "106496": {
+      "count": 92,
+      "flops_ratio": 0.010000000000000002,
+      "flops_weighted": 0.9200000000000002,
+      "flops_proportion": 0.001898679587937576,
+      "is_megapixel": false
+    },
+    "110592": {
+      "count": 36,
+      "flops_ratio": 0.010784023668639054,
+      "flops_weighted": 0.38822485207100593,
+      "flops_proportion": 0.0008012115240840259,
+      "is_megapixel": false
+    },
+    "138240": {
+      "count": 52,
+      "flops_ratio": 0.016850036982248524,
+      "flops_weighted": 0.8762019230769232,
+      "flops_proportion": 0.0018082898981063088,
+      "is_megapixel": false
+    },
+    "143360": {
+      "count": 180,
+      "flops_ratio": 0.018121301775147928,
+      "flops_weighted": 3.261834319526627,
+      "flops_proportion": 0.0067317154801298466,
+      "is_megapixel": false
+    },
+    "146432": {
+      "count": 29,
+      "flops_ratio": 0.018906250000000003,
+      "flops_weighted": 0.54828125,
+      "flops_proportion": 0.0011315330628520642,
+      "is_megapixel": false
+    },
+    "147456": {
+      "count": 254,
+      "flops_ratio": 0.019171597633136098,
+      "flops_weighted": 4.869585798816569,
+      "flops_proportion": 0.010049764302090994,
+      "is_megapixel": false
+    },
+    "153600": {
+      "count": 42,
+      "flops_ratio": 0.020802514792899404,
+      "flops_weighted": 0.873705621301775,
+      "flops_proportion": 0.0018031380750347802,
+      "is_megapixel": false
+    },
+    "156672": {
+      "count": 85,
+      "flops_ratio": 0.021642936390532545,
+      "flops_weighted": 1.8396495931952663,
+      "flops_proportion": 0.0037966360125625187,
+      "is_megapixel": false
+    },
+    "157696": {
+      "count": 53,
+      "flops_ratio": 0.021926775147928994,
+      "flops_weighted": 1.1621190828402368,
+      "flops_proportion": 0.0023983606318929286,
+      "is_megapixel": false
+    },
+    "258048": {
+      "count": 217,
+      "flops_ratio": 0.05871301775147929,
+      "flops_weighted": 12.740724852071006,
+      "flops_proportion": 0.026294080665387184,
+      "is_megapixel": false
+    },
+    "259072": {
+      "count": 37,
+      "flops_ratio": 0.05917991863905325,
+      "flops_weighted": 2.1896569896449702,
+      "flops_proportion": 0.00451897503350407,
+      "is_megapixel": false
+    },
+    "261120": {
+      "count": 76,
+      "flops_ratio": 0.060119267751479286,
+      "flops_weighted": 4.569064349112426,
+      "flops_proportion": 0.009429553495253314,
+      "is_megapixel": false
+    },
+    "262144": {
+      "count": 28,
+      "flops_ratio": 0.06059171597633137,
+      "flops_weighted": 1.6965680473372782,
+      "flops_proportion": 0.0035013468706808705,
+      "is_megapixel": false
+    },
+    "266240": {
+      "count": 74,
+      "flops_ratio": 0.0625,
+      "flops_weighted": 4.625,
+      "flops_proportion": 0.009544992493707922,
+      "is_megapixel": false
+    },
+    "270336": {
+      "count": 70,
+      "flops_ratio": 0.0644378698224852,
+      "flops_weighted": 4.510650887573964,
+      "flops_proportion": 0.009309000835379558,
+      "is_megapixel": false
+    },
+    "272384": {
+      "count": 76,
+      "flops_ratio": 0.06541789940828402,
+      "flops_weighted": 4.971760355029586,
+      "flops_proportion": 0.01026063032849125,
+      "is_megapixel": false
+    },
+    "276480": {
+      "count": 15,
+      "flops_ratio": 0.0674001479289941,
+      "flops_weighted": 1.0110022189349115,
+      "flops_proportion": 0.002086488343968818,
+      "is_megapixel": false
+    },
+    "479232": {
+      "count": 13,
+      "flops_ratio": 0.2025,
+      "flops_weighted": 2.6325000000000003,
+      "flops_proportion": 0.005432906538310509,
+      "is_megapixel": false
+    },
+    "486400": {
+      "count": 16,
+      "flops_ratio": 0.20860299556213016,
+      "flops_weighted": 3.3376479289940826,
+      "flops_proportion": 0.006888178254894769,
+      "is_megapixel": false
+    },
+    "487424": {
+      "count": 23,
+      "flops_ratio": 0.20948224852071004,
+      "flops_weighted": 4.818091715976331,
+      "flops_proportion": 0.009943491732538463,
+      "is_megapixel": false
+    },
+    "491520": {
+      "count": 57,
+      "flops_ratio": 0.21301775147928997,
+      "flops_weighted": 12.14201183431953,
+      "flops_proportion": 0.025058467419911926,
+      "is_megapixel": false
+    },
+    "494592": {
+      "count": 27,
+      "flops_ratio": 0.21568879437869823,
+      "flops_weighted": 5.823597448224852,
+      "flops_proportion": 0.012018636525336825,
+      "is_megapixel": false
+    },
+    "495616": {
+      "count": 20,
+      "flops_ratio": 0.2165828402366864,
+      "flops_weighted": 4.331656804733727,
+      "flops_proportion": 0.008939596040324814,
+      "is_megapixel": false
+    },
+    "497664": {
+      "count": 76,
+      "flops_ratio": 0.21837647928994083,
+      "flops_weighted": 16.596612426035502,
+      "flops_proportion": 0.034251792654592106,
+      "is_megapixel": false
+    },
+    "504832": {
+      "count": 25,
+      "flops_ratio": 0.22471246301775147,
+      "flops_weighted": 5.6178115754437865,
+      "flops_proportion": 0.01159393931214625,
+      "is_megapixel": false
+    },
+    "505856": {
+      "count": 36,
+      "flops_ratio": 0.225625,
+      "flops_weighted": 8.1225,
+      "flops_proportion": 0.01676307060111191,
+      "is_megapixel": false
+    },
+    "507904": {
+      "count": 6,
+      "flops_ratio": 0.22745562130177518,
+      "flops_weighted": 1.364733727810651,
+      "flops_proportion": 0.002816513121700042,
+      "is_megapixel": false
+    },
+    "512000": {
+      "count": 42,
+      "flops_ratio": 0.23113905325443787,
+      "flops_weighted": 9.70784023668639,
+      "flops_proportion": 0.02003486750038645,
+      "is_megapixel": false
+    },
+    "1022976": {
+      "count": 1,
+      "flops_ratio": 0.922708025147929,
+      "flops_weighted": 0.922708025147929,
+      "flops_proportion": 0.001904268361928874,
+      "is_megapixel": false
+    },
+    "1024000": {
+      "count": 4,
+      "flops_ratio": 0.9245562130177515,
+      "flops_weighted": 3.698224852071006,
+      "flops_proportion": 0.007632330476337695,
+      "is_megapixel": false
+    },
+    "1032192": {
+      "count": 15,
+      "flops_ratio": 0.9394082840236686,
+      "flops_weighted": 14.091124260355029,
+      "flops_proportion": 0.02908101087416094,
+      "is_megapixel": false
+    },
+    "1036288": {
+      "count": 26,
+      "flops_ratio": 0.946878698224852,
+      "flops_weighted": 24.618846153846153,
+      "flops_proportion": 0.05080793551182955,
+      "is_megapixel": false
+    },
+    "1038336": {
+      "count": 8,
+      "flops_ratio": 0.9506249999999999,
+      "flops_weighted": 7.6049999999999995,
+      "flops_proportion": 0.015695063332897025,
+      "is_megapixel": false
+    },
+    "1039360": {
+      "count": 4,
+      "flops_ratio": 0.9525009245562129,
+      "flops_weighted": 3.8100036982248517,
+      "flops_proportion": 0.007863017664985001,
+      "is_megapixel": false
+    },
+    "1044480": {
+      "count": 12,
+      "flops_ratio": 0.9619082840236686,
+      "flops_weighted": 11.542899408284022,
+      "flops_proportion": 0.02382202988274521,
+      "is_megapixel": false
+    },
+    "1047552": {
+      "count": 5,
+      "flops_ratio": 0.9675748890532543,
+      "flops_weighted": 4.837874445266271,
+      "flops_proportion": 0.009984318976339012,
+      "is_megapixel": false
+    },
+    "1048576": {
+      "count": 40,
+      "flops_ratio": 0.9694674556213019,
+      "flops_weighted": 38.77869822485208,
+      "flops_proportion": 0.08003078561556276,
+      "is_megapixel": true
+    },
+    "1049600": {
+      "count": 25,
+      "flops_ratio": 0.9713618713017752,
+      "flops_weighted": 24.28404678254438,
+      "flops_proportion": 0.05011698254188932,
+      "is_megapixel": true
+    },
+    "1050624": {
+      "count": 39,
+      "flops_ratio": 0.9732581360946746,
+      "flops_weighted": 37.95706730769231,
+      "flops_proportion": 0.0783351183859653,
+      "is_megapixel": true
+    },
+    "1056768": {
+      "count": 37,
+      "flops_ratio": 0.9846745562130178,
+      "flops_weighted": 36.43295857988166,
+      "flops_proportion": 0.07518968998238747,
+      "is_megapixel": true
+    },
+    "1059840": {
+      "count": 22,
+      "flops_ratio": 0.9904077292899408,
+      "flops_weighted": 21.788970044378697,
+      "flops_proportion": 0.044967687679831655,
+      "is_megapixel": true
+    },
+    "1060864": {
+      "count": 27,
+      "flops_ratio": 0.9923224852071006,
+      "flops_weighted": 26.792707100591716,
+      "flops_proportion": 0.05529431095378656,
+      "is_megapixel": true
+    },
+    "1064960": {
+      "count": 93,
+      "flops_ratio": 1.0,
+      "flops_weighted": 93.0,
+      "flops_proportion": 0.19193174095455928,
+      "is_megapixel": true
+    }
+  }
+}

@@ -54,7 +54,7 @@ class ModelManager:
         self.lora_weights: dict[str, dict[str, torch.Tensor]] = {}  # CPU weights per adapter
         self.lora_scales: dict[str, float | list[float]] = {}  # Last-set scale per adapter
 
-        # BTRM head: lives alongside LoRA, persisted together (~30KB, permanent GPU resident)
+        # BTRM score unembedder: lives alongside LoRA, persisted together (~30KB, permanent GPU resident)
         self.btrm_head: torch.nn.Module | None = None
         self.btrm_optimizer: torch.optim.Optimizer | None = None
         self.btrm_config: dict | None = None  # For persistence/crash dump
@@ -263,6 +263,53 @@ class ModelManager:
             self.sage_configured = True
 
     # ------------------------------------------------------------------
+    # Per-layer compilation for training (gradient checkpointing compatible)
+    # ------------------------------------------------------------------
+
+    def compile_layers_for_training(self) -> list:
+        """Compile individual transformer layers for gradient-checkpointed training.
+
+        Unlike whole-model compile (which creates one graph for model.forward()),
+        this compiles each of the 30 main transformer layers independently.
+        This is compatible with torch.utils.checkpoint which needs to call
+        layers individually within grad_ckpt().
+
+        Falls back gracefully: if any layer fails to compile (e.g., SymPy
+        recursion with LoRA on torch 2.10.0), that layer runs eager while
+        others stay compiled. suppress_errors=True means dynamo doesn't raise;
+        it just falls back to eager for that layer.
+
+        Returns:
+            List of compiled (or fallback-eager) layer callables.
+            Also stored as self._compiled_training_layers for reuse.
+        """
+        if self.diff_model is None:
+            return []
+        import torch._dynamo
+        old_suppress = torch._dynamo.config.suppress_errors
+        torch._dynamo.config.suppress_errors = True
+        compiled = []
+        n_compiled = 0
+        try:
+            for i, layer in enumerate(self.diff_model.layers):
+                try:
+                    c = torch.compile(layer, mode="reduce-overhead")
+                    compiled.append(c)
+                    n_compiled += 1
+                except Exception as e:
+                    print(f"  [compile_layers] Layer {i} compile failed: {e}")
+                    compiled.append(layer)
+        finally:
+            torch._dynamo.config.suppress_errors = old_suppress
+        self._compiled_training_layers = compiled
+        print(f"  [compile_layers] {n_compiled}/{len(compiled)} layers compiled for training")
+        return compiled
+
+    def get_compiled_training_layers(self) -> list | None:
+        """Return compiled layers if available, None otherwise."""
+        return getattr(self, '_compiled_training_layers', None)
+
+    # ------------------------------------------------------------------
     # Compilation reset (after LoRA injection)
     # ------------------------------------------------------------------
 
@@ -461,7 +508,7 @@ class ModelManager:
 
     def inject_btrm_head_rpc(self, params: dict) -> dict:
         """Create BTRM head + optimizer + config. Returns metadata."""
-        from .btrm import BTRMHead
+        from .btrm import ScoreUnembedder
 
         hidden_dim = params.get("hidden_dim", 3840)
         head_names = params.get("head_names", ["bit_quality", "step_quality"])
@@ -469,7 +516,7 @@ class ModelManager:
         lr = params.get("lr")
         weight_decay = params.get("weight_decay", 0.0)
 
-        self.btrm_head = BTRMHead(
+        self.btrm_head = ScoreUnembedder(
             hidden_dim=hidden_dim,
             head_names=head_names,
             logit_cap=logit_cap,
@@ -483,8 +530,21 @@ class ModelManager:
         }
 
         if lr is not None:
+            # Include rtheta LoRA adapter params in the optimizer.
+            # Run 2 fix for Defect 24: optimizer must include adapter parameters
+            # so that rtheta LoRA receives gradient updates during BTRM training.
+            from .lora import get_lora_params
+            rtheta_params = list(get_lora_params(self.diff_model, adapter_name="rtheta")) \
+                if self.diff_model is not None else []
+
+            param_groups = [
+                {"params": list(self.btrm_head.parameters()), "lr": lr},
+            ]
+            if rtheta_params:
+                param_groups.append({"params": rtheta_params, "lr": lr})
+
             self.btrm_optimizer = torch.optim.AdamW(
-                self.btrm_head.parameters(), lr=lr, weight_decay=weight_decay,
+                param_groups, weight_decay=weight_decay,
             )
 
         n_params = sum(p.numel() for p in self.btrm_head.parameters())

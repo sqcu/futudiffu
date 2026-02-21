@@ -5,7 +5,7 @@ Phase 1: Generate paired data (5 seeds x {SDPA, Sage} x 30-step euler)
   - Sage renders = negative (FP8 quantized attention)
   - Saves step latents at 7 evenly-spaced checkpoints + final
 
-Phase 2: Train R_theta = frozen backbone + LoRA("rtheta", layers 28-29) + BTRMHead
+Phase 2: Train R_theta = frozen backbone + LoRA("rtheta", layers 28-29) + ScoreUnembedder
   - LoRA adapters give the reward model nonlinear capacity to amplify
     quality-discriminative features beyond what the frozen backbone provides
   - Gradient checkpointing on all 30 layers (modern ML standard)
@@ -254,12 +254,12 @@ def generate_data(model, pos_cond, neg_cond, sigmas, rope_cache, num_tokens):
 # ---------------------------------------------------------------------------
 
 def train_btrm(model, sigmas, rope_cache, num_tokens, pos_cond):
-    """Train R_theta = frozen backbone + LoRA("rtheta", layers 28-29) + BTRMHead."""
+    """Train R_theta = frozen backbone + LoRA("rtheta", layers 28-29) + ScoreUnembedder."""
     from futudiffu.attention import set_attention_backend
-    from futudiffu.btrm import BTRMHead, bradley_terry_loss, logsquare_regularizer
+    from futudiffu.btrm import ScoreUnembedder, bradley_terry_loss, logsquare_regularizer
     from futudiffu.lora import inject_lora, get_lora_params, lora_state_dict
 
-    log_section("Phase 2: R_theta Training (LoRA layers 28-29 + BTRMHead)")
+    log_section("Phase 2: R_theta Training (LoRA layers 28-29 + ScoreUnembedder)")
     set_attention_backend("sdpa")
 
     injected = inject_lora(model, name="rtheta", rank=LORA_RANK, alpha=LORA_ALPHA,
@@ -269,7 +269,7 @@ def train_btrm(model, sigmas, rope_cache, num_tokens, pos_cond):
     print(f"  R_theta LoRA: {len(injected)} adapters on layers 28-29, "
           f"{n_lora:,} params ({n_lora*2/1024**2:.1f} MB)")
 
-    btrm = BTRMHead(
+    btrm = ScoreUnembedder(
         hidden_dim=model.dim,
         head_names=("bit_quality", "step_quality"),
         logit_cap=10.0,

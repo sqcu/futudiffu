@@ -1,14 +1,21 @@
 # futudiffu
 
+## Who are you?
+
+- If you weren't told what's up with respect to sub agents, sub sub sub agents, sub sub sub sub sub sub agents, submersible agents, invertable agients, or hoagie agents, you're probably the root claude. 
+- root claudes find themselves talking to user surprisingly often, who doesn't write like a claude at all. (you can tell from the cadence, and the token seams, and the missing capitalization, and the maddeningly large project scopes.)
+- if you're the root claude, you should read docs\user_re_oversight.md and docs\root_claude_orchestration_principles.md right away.
+
 ## What This Is
 
-A standalone Z-Image inference and training system. Started as a ComfyUI port,
+A standalone Z-Image inference and training system. Started as a ComfyUI replication study,
 now a custom-kernel FP8 inference server with LoRA-based BTRM training pipeline.
 
 The ComfyUI porting phase is complete. The project's current concerns are:
 - Cross-architecture kernel equivalence (SM89 RTX 4090 -> SM90 H100)
 - BTRM reward model training on generated trajectory datasets
 - REINFORCE policy optimization with sparse step sampling
+- quantization aware training via reward models scoring 'looking a lot less like a quantization artifacted output than an unquantized output' distillation
 
 ## Is there an inference server running?
 
@@ -16,11 +23,21 @@ if you're reading this? *probably*? step through the anthropic argument for why 
 
 ## Architecture
 
-### Server/Client (ZeroMQ)
-- `server.py`: Thin ZeroMQ RPC dispatch layer, delegates to ModelManager
+### Server/Client
+
+**ZeroMQ is dead architecture.** The `src/futudiffu/server.py` ZMQ implementation
+has a track record of async deadlocks, REQ socket poisoning after timeouts, and
+concurrency failures that agents misattribute to compilation stalls. It has never
+been feature-extended or patched without introducing a new deadlock. No new ZMQ
+servers may be created. Period.
+
+The `src_ii/` server rewrite uses FastAPI or equivalent boring-standard HTTP/async
+server with proper async handling. JSON request/response. Tensor serialization
+via standard formats (safetensors, numpy). No custom binary envelope protocols.
+No REQ/REP socket state machines.
+
 - `model_manager.py`: Model loading, VRAM lifecycle, LoRA replay, compilation
-- `client.py`: `InferenceClient` (encode_prompt, sample_trajectory, vae_encode/decode)
-- `protocol.py`: JSON envelope + raw tensor bytes (no pickle). bfloat16 via uint16 view.
+  (the model lifecycle logic is independent of transport and transfers to src_ii/)
 - `generate_btrm_dataset.py`: Pure scheduling client (no torch imports beyond tensor deser)
 
 ### Inference Pipeline
@@ -47,10 +64,10 @@ if you're reading this? *probably*? step through the anthropic argument for why 
 
 ### Training Pipeline
 - `trajectory_loader.py` (TrajectoryPool), `training_utils.py` (forward_checkpointed)
-- BTRM head: frozen backbone -> final block hidden states -> mean pool
+- Score unembedder: frozen backbone -> final block hidden states -> mean pool
   -> RMSNorm(3840) -> Linear(3840, N_heads, bias=False) -> soft_tanh_cap(10.0)
   Default heads: ("bit_quality", "step_quality")
-  LoRA adapters injected separately into backbone, not part of BTRM head.
+  LoRA adapters injected into backbone as part of the BTRM compound model.
 - Loss: Bradley-Terry pairwise ranking with tier-weighted negatives +
   logsquare regularizer. Head 0 ("bit_quality"/scrimblo) discriminates
   attention quantization (SDPA vs SageAttention INT8 QK). Head 1
@@ -60,9 +77,49 @@ if you're reading this? *probably*? step through the anthropic argument for why 
 - Multi-LoRA with fused Triton sparse kernel (per-batch routing)
 - FlexAttention batch packing for multi-image forward passes
 
+## src/ Freeze Policy (Mandatory)
+
+`src/futudiffu/` is **frozen**. No new imports from `src.futudiffu` or
+`src/futudiffu` in any new code. No agents may modify, extend, or "fix" code
+in `src/futudiffu/`. It exists as a read-only reference of what the old
+implementation did. All new work lives in `src_ii/` and `scripts_ii/`.
+
+The project is partway through a complete rewrite. The rewrite is NOT
+"move code from src/ to src_ii/." It is: identify canonical algorithms,
+implement each once in a module with no defensive guards, no special cases,
+no alternate code paths that bypass optimized kernels, and eliminate all
+other copies. `src/` cannot be incrementally fixed into `src_ii/`. A
+discontinuity is needed and `src_ii/` IS that discontinuity.
+
+**What agents may NOT do:**
+- Import from `src.futudiffu` in `src_ii/` or `scripts_ii/` code
+- "Fix" a bug in `src/futudiffu/` instead of implementing the correct
+  behavior in `src_ii/`
+- Use `src/futudiffu/server.py`, `client.py`, or any ZMQ-based code
+  as a running server for new training or validation workflows
+- Copy-paste from `src/` to `src_ii/` (the code idioms are what's broken)
+
+**What agents may do:**
+- Read `src/futudiffu/` files to understand what behavior needs replication
+- Reference `src/` in essays and analysis documents
+- Run existing `scripts/` that import from `src/` for comparison purposes
+
+## Required Reading for Refactoring Agents
+
+Before modifying any training, inference, or lifecycle code, read:
+- `docs/user_dataflow_and_lifecycle_rollup.md` -- 10 outer specifications with
+  primacy over function-level implementation. The first question is NOT "are the
+  matmuls the same" but "have any of these 10 outer specifications changed."
+- `docs/user_dataflow_and_lifecycle.md` -- exhaustive version with worked examples
+  of why "the forward pass is the same" is not a sufficient argument for code reuse.
+
+## BTRM Training Policy (Mandatory)
+
+- are you thinking about a BTRM gradient? about a reward model optimized by BTRM gradients? about something called a 'bee tee {anything else}'? read docs\claude_BTRM_training_policy.md .
+
 ## Cross-Platform Execution Environment
 
-Windows Python venv accessed from WSL2.
+probably Windows Python venv accessed from WSL2. this is an analogy for python-driven os-independent development in general: almost all tools you could want or need are available.
 
 ### Key facts
 - **venv Python**: `/mnt/f/dox/repos/ai/futudiffu/.venv/Scripts/python.exe`
@@ -129,6 +186,7 @@ from WSL -- the venv is Windows-native.
 
 ## Absolute Requirements:
 
+- user question tool. however often you might think you should be using the user question tool it's being used around 1/10th to 1/100th as often as it should be used.
 - `uv` with `pyproject.toml` for all environments
 - No shell scripts -- Python only
 - No conda (crashes the shell)
@@ -138,35 +196,7 @@ from WSL -- the venv is Windows-native.
 
 ## Testing Discipline
 
-### Run the tests
-
-When this environment has a GPU and a Python interpreter -- which it does --
-do not propose "you could run this test to validate" as a future action item.
-Run the test. Right now. A test that has been written but never executed is
-not a test; it is a hypothesis about what a test might do. "Write test
-effecting constraint X" means write it AND run it AND observe whether it
-actually effects constraint X. End-to-end tests with real data are tech debt
-until they have been run and had their own bugs shaken out.
-
-If a test fails: that is useful information. Fix it or report it. Do not
-leave it as a TODO.
-
-### Persist test outputs (append-only)
-
-Test outputs (rollout latents, metrics JSONL, rendered PNGs, timing data)
-must be saved to disk, not printed-and-discarded. These artifacts are the
-evidence base for cross-comparison across scripts, environments, and time.
-
-Do not reflexively delete old test output directories because "tidying up"
-feels productive. Test output is effectively append-only. The ability to
-compare today's run against last week's run is worth more than a clean
-working tree. Stale outputs age out naturally; prematurely deleted outputs
-cannot be reconstructed if the environment that produced them no longer
-exists (spot instances, hardware swaps, kernel upgrades).
-
-Structure: `<test_name>_output/` directories at repo root or under a
-configurable `--output-dir`. Filenames include enough context to be
-self-describing (iteration count, timestamp, config hash, etc.).
+- Are you doing a test? thinking about a test? studying the results of a test? if you are, read docs/claude_testing_discipline.md
 
 ## ComfyUI Reference (read-only)
 

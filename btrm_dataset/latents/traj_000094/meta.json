@@ -1,0 +1,10 @@
+{
+  "type": "t2i",
+  "seed": 3091004939,
+  "prompt_idx": 14,
+  "prompt": "Macro photography of a mechanical pocket watch with visible gears, golden light.",
+  "n_steps": 30,
+  "precision": "sage",
+  "batch_idx": 1,
+  "packed": false
+}

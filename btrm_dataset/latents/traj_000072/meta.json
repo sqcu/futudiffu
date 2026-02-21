@@ -1,0 +1,10 @@
+{
+  "type": "t2i",
+  "seed": 3131575764,
+  "prompt_idx": 17,
+  "prompt": "A slice of layered cake showing distinct chocolate, cream, and raspberry layers, food photography.",
+  "n_steps": 30,
+  "precision": "sdpa",
+  "batch_idx": 0,
+  "packed": false
+}

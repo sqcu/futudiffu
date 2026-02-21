@@ -1,0 +1,10 @@
+{
+  "type": "t2i",
+  "seed": 2783290795,
+  "prompt_idx": 22,
+  "prompt": "A mirror reflecting a room that does not match the room it is placed in, surrealist.",
+  "n_steps": 30,
+  "precision": "sdpa",
+  "batch_idx": 0,
+  "packed": false
+}

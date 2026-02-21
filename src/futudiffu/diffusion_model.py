@@ -1046,6 +1046,11 @@ class NextDiT(nn.Module):
             rope_cache = self.prepare_rope_cache(H, W, cap_embedded_len, device)
             cap_freqs_cis = rope_cache['cap_freqs_cis']
 
+            # Expand RoPE for CFG batch dimension (B=2 for pos+neg)
+            bsz = cap_embedded.shape[0]
+            if bsz > 1 and cap_freqs_cis.shape[0] == 1:
+                cap_freqs_cis = cap_freqs_cis.expand(bsz, -1, -1, -1, -1, -1)
+
             # Run context_refiner (no adaLN, no timestep dependency)
             for layer in self.context_refiner:
                 cap_embedded = layer(cap_embedded, None, cap_freqs_cis)

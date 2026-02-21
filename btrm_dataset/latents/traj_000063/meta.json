@@ -1,0 +1,10 @@
+{
+  "type": "t2i",
+  "seed": 2370996465,
+  "prompt_idx": 2,
+  "prompt": "qwen-3-4b, draw me a \"laser shark swimming through a neon cyberpunk cityscape at night\".",
+  "n_steps": 30,
+  "precision": "sdpa",
+  "batch_idx": 0,
+  "packed": false
+}

@@ -24,7 +24,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from futudiffu.lora import inject_lora, get_lora_params, set_lora_scale, freeze_adapter
-from futudiffu.btrm import BTRMHead, bradley_terry_loss
+from futudiffu.btrm import ScoreUnembedder, bradley_terry_loss
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +244,7 @@ def train_btrm(btrm_head, scrongle_pos, scrongle_neg, scrimble_pos, scrimble_neg
     """Train the two-head BTRM using separate BT losses per head.
 
     Args:
-        btrm_head: BTRMHead with heads ("scrongle", "scrimble")
+        btrm_head: ScoreUnembedder with heads ("scrongle", "scrimble")
         *_pos/*_neg: (N, seq, dim) trajectory hidden states
         n_train_*: number of training pairs per head
     """
@@ -491,14 +491,14 @@ def main():
     print(f"  train/val split: {n_train_scrongle}/{n_val_scrongle} per head")
 
     # Phase 2: Build and train BTRM
-    btrm_head = BTRMHead(
+    btrm_head = ScoreUnembedder(
         hidden_dim=DIM,
         head_names=("scrongle", "scrimble"),
         logit_cap=10.0,
     ).to(dtype=DTYPE, device=DEVICE)
 
     btrm_params = sum(p.numel() for p in btrm_head.parameters())
-    print(f"  BTRMHead: {btrm_params:,} params "
+    print(f"  ScoreUnembedder: {btrm_params:,} params "
           f"(norm={DIM} + proj={DIM}x2 = {DIM + DIM*2})")
 
     train_btrm(btrm_head, scrongle_pos, scrongle_neg, scrimble_pos, scrimble_neg,

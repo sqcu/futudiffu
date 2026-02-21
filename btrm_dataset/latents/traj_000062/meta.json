@@ -1,0 +1,10 @@
+{
+  "type": "t2i",
+  "seed": 3961228449,
+  "prompt_idx": 19,
+  "prompt": "A vaporwave aesthetic rendering of ancient Greek ruins with pink and cyan gradients.",
+  "n_steps": 30,
+  "precision": "sdpa",
+  "batch_idx": 0,
+  "packed": false
+}

@@ -47,7 +47,7 @@ role but is NOT a trust region constraint.
 
 ### 1.2 Bounded Maximum Score (Soft Tanh Cap)
 
-The `BTRMHead` (lines 65-121) applies a soft tanh cap:
+The `ScoreUnembedder` (lines 65-121) applies a soft tanh cap:
 ```python
 if self.logit_cap > 0:
     scores = self.logit_cap * torch.tanh(scores / self.logit_cap)
@@ -96,8 +96,8 @@ The codebase defines three conceptual models that share a single physical
 NextDiT backbone:
 
 **r_theta (Reward Model)**:
-- Frozen NextDiT backbone + LoRA("rtheta", layers 28-29) + BTRMHead
-- `BTRMHead`: `RMSNorm(3840) -> Linear(3840, N_heads) -> soft_tanh_cap`
+- Frozen NextDiT backbone + LoRA("rtheta", layers 28-29) + ScoreUnembedder
+- `ScoreUnembedder`: `RMSNorm(3840) -> Linear(3840, N_heads) -> soft_tanh_cap`
 - Default heads: `("bit_quality", "step_quality")`
 - Captures hidden states from the last transformer block via forward hook
   (`BTRMWrapper._run_backbone`, `btrm.py` line 319)
@@ -132,11 +132,11 @@ multi-adapter stacking on the same `LoRALinear` wrapper. At any given time:
 ### 2.3 BTRMWrapper
 
 `btrm.py` lines 268-394 define `BTRMWrapper`:
-- Wraps a frozen NextDiT + BTRMHead
+- Wraps a frozen NextDiT + ScoreUnembedder
 - Installs a forward hook on `model.layers[-1]` to capture pre-final-layer
   hidden states
 - `score()` method: runs frozen backbone forward, captures hidden, passes to
-  BTRMHead
+  ScoreUnembedder
 - `train()` override: only head trains, backbone stays in eval
 
 However, `BTRMWrapper` is NOT used in the smoke tests. The smoke tests
@@ -307,7 +307,7 @@ The error taxonomy IS implemented in the dataset generation layer:
   explicit scrongle and scrimble pair lists from trajectory records
 - `btrm_dataset.py` `BTRMDatasetConfig` defines the variation axes:
   8 step schedules (8-22), 2 attention backends (sdpa, sage)
-- `test_scrongle_scrimble.py` validates a `BTRMHead` with two named heads
+- `test_scrongle_scrimble.py` validates a `ScoreUnembedder` with two named heads
   `("scrongle", "scrimble")` can discriminate both degradation types on
   synthetic MiniModel data. Target: 75% per-head classification accuracy.
 
@@ -444,7 +444,7 @@ requires careful VRAM management.
 
 | Component | File | Status |
 |-----------|------|--------|
-| BTRMHead (multi-head scoring) | `btrm.py:65-121` | Implemented, tested in smoke tests |
+| ScoreUnembedder (multi-head scoring) | `btrm.py:65-121` | Implemented, tested in smoke tests |
 | Bradley-Terry loss | `btrm.py:128-141` | Implemented, used in all training scripts |
 | Logsquare regularizer | `btrm.py:144-162` | Implemented, used in smoke test BTRM training |
 | Soft tanh score capping | `btrm.py:114-115` | Implemented, default logit_cap=10.0 |

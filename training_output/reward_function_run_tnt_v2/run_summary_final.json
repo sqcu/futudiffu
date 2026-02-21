@@ -1,0 +1,82 @@
+{
+  "run_name": "reward_function_validated_training_tnt_v2",
+  "preference_source": "reward_manifest",
+  "wall_time_s": 3364.5748498998582,
+  "train_time_s": 3258.8502439996228,
+  "n_steps": 150,
+  "macrobatch_budget": 3.0,
+  "clean_fraction": 0.8,
+  "lr": 0.0003,
+  "lr_schedule": "warmup_cosine",
+  "grad_clip": 0.1,
+  "n_trajectories": 420,
+  "n_unique_resolutions": 84,
+  "n_unique_prompts": 12,
+  "initial_loss": 0.6860668273533091,
+  "final_loss": 0.3513258704915643,
+  "min_loss": 0.3018833462681089,
+  "n_adapter_params": 10096640,
+  "n_head_params": 11520,
+  "eval_count": 16,
+  "pinkify_first_all_pass": null,
+  "tnt_first_all_pass": null,
+  "final_cross_rho": {
+    "pinkify_vs_thisnotthat": 0.5245098039215687
+  },
+  "pinkify_ground_truth_passed": true,
+  "tnt_ground_truth_passed": true,
+  "sampler_stats": {
+    "n_trajectories": 420,
+    "n_positions": 3360,
+    "pair_space_size": 5643120,
+    "n_sampled": 1795,
+    "n_retried": 12,
+    "retry_rate": 0.006640841173215274,
+    "n_megapixel_sampled": 0,
+    "n_small_sampled": 0,
+    "n_megapixel_trajectories": 28,
+    "n_small_trajectories": 392,
+    "populated_tiers": [
+      65536,
+      102400,
+      147456,
+      262144,
+      495616,
+      1048576
+    ],
+    "tier_trajectory_counts": {
+      "65536": 70,
+      "102400": 70,
+      "147456": 70,
+      "262144": 70,
+      "495616": 70,
+      "1048576": 70
+    },
+    "tier_sample_counts": {
+      "65536": 439,
+      "102400": 404,
+      "147456": 366,
+      "262144": 288,
+      "495616": 147,
+      "1048576": 151
+    },
+    "logsnr_histogram": {
+      "[-inf,-5)": 2,
+      "[-5,-2)": 2,
+      "[-2,0)": 29,
+      "[0,2)": 78,
+      "[2,5)": 387,
+      "[5,8)": 194,
+      "[8,+inf)": 0,
+      "sigma=0": 2922
+    },
+    "measured_clean_fraction": 0.8085224128389596,
+    "n_positions_sampled": 3614,
+    "clean_fraction_setting": 0.8
+  },
+  "end_time": "2026-02-21T03:22:39.850395+00:00",
+  "overall_accuracy_pinkify": 0.8375588383398765,
+  "last_20_accuracy_pinkify": 0.7922548213453786,
+  "overall_accuracy_thisnotthat": 0.6635129852797439,
+  "last_20_accuracy_thisnotthat": 0.6415834118581796
+}

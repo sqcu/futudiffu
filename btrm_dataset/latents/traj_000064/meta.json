@@ -1,0 +1,10 @@
+{
+  "type": "t2i",
+  "seed": 3701002945,
+  "prompt_idx": 20,
+  "prompt": "Bauhaus-inspired geometric composition of primary colored shapes on a white background.",
+  "n_steps": 30,
+  "precision": "sdpa",
+  "batch_idx": 0,
+  "packed": false
+}

@@ -1,0 +1,104 @@
+{
+  "pinkify": {
+    "passed": true,
+    "scores": {
+      "A": 0.0,
+      "B": 0.007069664541631937,
+      "C": 0.007593680173158646,
+      "D": 0.00898743700236082,
+      "E": 0.00898743700236082,
+      "F": 0.046157315373420715
+    },
+    "checks": [
+      {
+        "name": "A < B",
+        "passed": true,
+        "detail": "A=0.000000, B=0.007070, diff=0.007070"
+      },
+      {
+        "name": "B < C",
+        "passed": true,
+        "detail": "B=0.007070, C=0.007594, diff=0.000524"
+      },
+      {
+        "name": "max(A,B,C) < min(D,E)",
+        "passed": true,
+        "detail": "max(A,B,C)=0.007594, min(D,E)=0.008987, gap=0.001394"
+      },
+      {
+        "name": "D ~ E (relative diff < 50%)",
+        "passed": true,
+        "detail": "D=0.008987, E=0.008987, |D-E|/max=0.0000"
+      },
+      {
+        "name": "max(D,E) < F",
+        "passed": true,
+        "detail": "max(D,E)=0.008987, F=0.046157, gap=0.037170"
+      }
+    ],
+    "rank_order": [
+      "A",
+      "B",
+      "C",
+      "D",
+      "E",
+      "F"
+    ]
+  },
+  "tnt": {
+    "passed": false,
+    "scores": {
+      "THAT_REF": -0.5379794239997864,
+      "NIGHTMODE": 0.11055566370487213,
+      "RED_TONES": 0.014478243887424469,
+      "ENSO": 0.0023927874863147736,
+      "WIDEMEISTER": 0.004483811557292938,
+      "CLEAR_SKY": -0.014059487730264664,
+      "SNEK": 0.02027270197868347,
+      "DEVIANTART": -0.009081795811653137,
+      "BUBBLEGUM": -0.0028108619153499603,
+      "ONEBIT": -0.046986497938632965,
+      "THIS_REF": 0.5379794239997864
+    },
+    "checks": [
+      {
+        "name": "THIS_REF > THAT_REF",
+        "passed": true,
+        "detail": "THIS=0.537979, THAT=-0.537979, gap=1.075959"
+      },
+      {
+        "name": "THIS_REF > all others",
+        "passed": true,
+        "detail": "THIS=0.537979, max_other=0.110556 (NIGHTMODE)"
+      },
+      {
+        "name": "THAT_REF < all others",
+        "passed": true,
+        "detail": "THAT=-0.537979, min_other=-0.046986 (ONEBIT)"
+      },
+      {
+        "name": "min(SKETCH) > max(COLOR)",
+        "passed": false,
+        "detail": "min_sketch=-0.046986, max_color=0.110556, gap=-0.157542"
+      },
+      {
+        "name": "THAT_REF < NIGHTMODE",
+        "passed": true,
+        "detail": "THAT=-0.537979, NIGHTMODE=0.110556"
+      }
+    ],
+    "rank_order": [
+      "THAT_REF",
+      "ONEBIT",
+      "CLEAR_SKY",
+      "DEVIANTART",
+      "BUBBLEGUM",
+      "ENSO",
+      "WIDEMEISTER",
+      "RED_TONES",
+      "SNEK",
+      "NIGHTMODE",
+      "THIS_REF"
+    ]
+  }
+}

@@ -470,7 +470,7 @@ and `step_quality` (scrongle, step count). The dataset generation pipeline
 function (`btrm.py:compute_multihead_loss`) supports per-head masking with negative
 tier weighting. But all training scripts that actually ran used only
 `scores[:, 0]` (bit_quality). The step_quality head exists as a defined projection
-in the `BTRMHead` module but received no training signal.
+in the `ScoreUnembedder` module but received no training signal.
 
 This matters because the two degradation modes are orthogonal: scrimble affects
 texture (per-pixel noise from attention quantization), while scrongle affects

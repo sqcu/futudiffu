@@ -343,7 +343,7 @@ Verdict: Multi-LoRA is FULLY INTEGRATED into both training paths
 --- C. BTRM Training ---
 
 Implementation status:
-  - btrm.py: BTRMHead, bradley_terry_loss, compute_multihead_loss,
+  - btrm.py: ScoreUnembedder, bradley_terry_loss, compute_multihead_loss,
     logsquare_regularizer -- ALL PRESENT
   - trajectory_loader.py: TrajectoryPool, scrimble_split, scrongle_split
     -- PRESENT

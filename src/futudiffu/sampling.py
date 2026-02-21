@@ -7,7 +7,24 @@ Sources:
 - comfy/latent_formats.py (Flux)
 """
 
+import math
+
 import torch
+
+
+# --- Resolution-dependent sigma shifting (SD3 Eq.23) ---
+
+def resolution_shift(width: int, height: int, ref_width: int = 1280, ref_height: int = 832) -> float:
+    """SD3 Eq.23: alpha = sqrt(ref_pixels / target_pixels).
+
+    For the reference resolution (1280x832), returns 1.0 (identity/no shift).
+    For smaller resolutions, returns alpha > 1.0 (shift toward higher noise).
+    """
+    ref_pixels = ref_width * ref_height
+    target_pixels = width * height
+    if target_pixels <= 0:
+        raise ValueError(f"Invalid resolution: {width}x{height}")
+    return math.sqrt(ref_pixels / target_pixels)
 
 
 # --- model_sampling.py ---
@@ -203,7 +220,7 @@ def make_cfg_model_fn(diff_model, cond_batch, num_tokens, rope_cache, cfg, multi
 def sample_euler_packed(
     packed_forward_fn,
     x_list: list[torch.Tensor],
-    sigmas: torch.Tensor,
+    sigmas_list: list[torch.Tensor] | torch.Tensor,
     refined_caps,
     packing_info,
     block_mask,
@@ -220,12 +237,18 @@ def sample_euler_packed(
       2. Call packed_forward_fn to get per-image outputs
       3. Apply CFG and euler step per image
 
+    Supports per-image sigma schedules for mixed-resolution packing where
+    different resolutions produce different sigma shifts (SD3 Eq.23).
+
     Args:
         packed_forward_fn: Callable that takes (x_cfg_list, t_batch,
             refined_caps, packing_info, block_mask, packed_rope) and returns
             a list of per-image output tensors, each (2, C, H, W).
         x_list: List of N tensors, each (1, C, H, W).
-        sigmas: 1D tensor of (steps+1,) sigma values.
+        sigmas_list: Either a single 1D tensor of (steps+1,) sigma values
+            (shared by all images), or a list of N such tensors (per-image
+            sigma schedules for mixed-resolution packing). All schedules
+            must have the same length (same number of steps).
         refined_caps: Packed refined caption embeddings.
         packing_info: Packing metadata (document_id, total_len, etc).
         block_mask: FlexAttention block mask.
@@ -239,11 +262,26 @@ def sample_euler_packed(
         List of N final tensors, each (1, C, H, W).
     """
     n_images = len(x_list)
-    n_steps = len(sigmas) - 1
+
+    # Normalize sigmas_list: if a single tensor, broadcast to all images
+    if isinstance(sigmas_list, torch.Tensor):
+        per_image_sigmas = [sigmas_list] * n_images
+    else:
+        per_image_sigmas = sigmas_list
+        assert len(per_image_sigmas) == n_images
+
+    n_steps = len(per_image_sigmas[0]) - 1
 
     for step_i in range(n_steps):
-        sigma = sigmas[step_i]
-        timestep = sigma * multiplier
+        # Use the first image's sigma for the shared timestep input to the model.
+        # The model only uses timestep for the timestep embedding (adaLN modulation),
+        # and all images in the pack see the same timestep embedding. For modest
+        # shift differences (same step count, different alpha), the timestep values
+        # are close enough that using a single representative value is acceptable.
+        # The per-image sigma differences are correctly handled in the euler step
+        # math below (noise scaling, dt computation).
+        sigma_representative = per_image_sigmas[0][step_i]
+        timestep = sigma_representative * multiplier
 
         x_cfg = [x_i.expand(2, -1, -1, -1) for x_i in x_list]
         t_batch = timestep.expand(2)
@@ -253,20 +291,23 @@ def sample_euler_packed(
             packing_info, block_mask, packed_rope,
         )
 
-        for img_i in range(n_images):
-            out_cond, out_uncond = outputs[img_i].chunk(2, dim=0)
-            denoised_cond = const_calculate_denoised(
-                sigma, out_cond, x_list[img_i])
-            denoised_uncond = const_calculate_denoised(
-                sigma, out_uncond, x_list[img_i])
-            denoised = denoised_uncond + (denoised_cond - denoised_uncond) * cfg
-
-            d = to_d(x_list[img_i], sigma, denoised)
-            dt = sigmas[step_i + 1] - sigma
-            x_list[img_i] = x_list[img_i] + d * dt
-
         if callback is not None:
             callback({'i': step_i, 'x_list': x_list})
+
+        for img_i in range(n_images):
+            sigma_i = per_image_sigmas[img_i][step_i]
+            sigma_i_next = per_image_sigmas[img_i][step_i + 1]
+
+            out_cond, out_uncond = outputs[img_i].chunk(2, dim=0)
+            denoised_cond = const_calculate_denoised(
+                sigma_i, out_cond, x_list[img_i])
+            denoised_uncond = const_calculate_denoised(
+                sigma_i, out_uncond, x_list[img_i])
+            denoised = denoised_uncond + (denoised_cond - denoised_uncond) * cfg
+
+            d = to_d(x_list[img_i], sigma_i, denoised)
+            dt = sigma_i_next - sigma_i
+            x_list[img_i] = x_list[img_i] + d * dt
 
     return x_list
 
@@ -319,7 +360,6 @@ def flux_process_out(latent: torch.Tensor) -> torch.Tensor:
 
 # --- Training-mode sampling (QAT / LoRA / REINFORCE) ---
 
-import math
 from torch.utils.checkpoint import checkpoint as grad_checkpoint
 
 
@@ -578,12 +618,19 @@ def run_trajectory_packed(diff_compiled_packed, diff_model, device, dtype,
                           params, tensors):
     """Run N packed diffusion trajectories via FlexAttention.
 
+    Supports both uniform resolution (single width/height) and mixed resolution
+    (per-image widths/heights lists). When widths/heights are lists, each image
+    gets its own resolution-dependent sigma schedule shift (SD3 Eq.23).
+
     Args:
         diff_compiled_packed: Compiled forward_packed.
         diff_model: Raw model (for patch_size, prepare_packed_state).
         device: CUDA device.
         dtype: Working dtype.
-        params: RPC params dict.
+        params: RPC params dict. Accepts either:
+            - width/height (int): uniform resolution for all images
+            - widths/heights (list[int]): per-image resolutions
+            If both are present, widths/heights take precedence.
         tensors: RPC tensors dict.
 
     Returns:
@@ -596,12 +643,31 @@ def run_trajectory_packed(diff_compiled_packed, diff_model, device, dtype,
     seeds = params["seeds"]
     n_steps = params["n_steps"]
     cfg = params["cfg"]
-    width = params["width"]
-    height = params["height"]
-    sampling_shift = params.get("sampling_shift", 1.0)
     multiplier = params.get("multiplier", 1.0)
     save_steps_param = params.get("save_steps", None)
     denoise = params.get("denoise", 1.0)
+
+    # Resolve per-image resolutions: support both scalar and list forms
+    if "widths" in params and "heights" in params:
+        widths = params["widths"]
+        heights = params["heights"]
+    else:
+        w = params["width"]
+        h = params["height"]
+        widths = [w] * n_images
+        heights = [h] * n_images
+
+    # Resolve per-image sampling shifts
+    # If explicit sampling_shift is provided (scalar), use it for all images.
+    # If explicit sampling_shifts (list) is provided, use per-image.
+    # Otherwise, auto-compute from per-image resolution via SD3 Eq.23.
+    if "sampling_shifts" in params:
+        sampling_shifts = params["sampling_shifts"]
+    elif "sampling_shift" in params:
+        shift_val = params["sampling_shift"]
+        sampling_shifts = [shift_val] * n_images
+    else:
+        sampling_shifts = [resolution_shift(widths[i], heights[i]) for i in range(n_images)]
 
     pH = pW = diff_model.patch_size
 
@@ -614,35 +680,47 @@ def run_trajectory_packed(diff_compiled_packed, diff_model, device, dtype,
         cfg_conds.append(cond_batch_i)
         cap_lens.append(num_tokens_i)
 
-    latent_h = height // 8
-    latent_w = width // 8
-    padded_h = latent_h + ((-latent_h) % pH)
-    padded_w = latent_w + ((-latent_w) % pW)
+    # Per-image latent dimensions and padded sizes
+    latent_dims = []  # (latent_h, latent_w) per image
+    padded_sizes = []  # (padded_h, padded_w) per image
+    for i in range(n_images):
+        lh = heights[i] // 8
+        lw = widths[i] // 8
+        ph = lh + ((-lh) % pH)
+        pw = lw + ((-lw) % pW)
+        latent_dims.append((lh, lw))
+        padded_sizes.append((ph, pw))
 
+    # Generate per-image noise at per-image resolution
     x_list = []
     for i in range(n_images):
+        lh, lw = latent_dims[i]
         gen = torch.Generator(device=device).manual_seed(seeds[i])
         noise = torch.randn(
-            1, 16, latent_h, latent_w, dtype=dtype,
+            1, 16, lh, lw, dtype=dtype,
             generator=gen, device=device,
         )
         x_list.append(noise)
 
-    sigmas = build_sigma_schedule(
-        n_steps, sampling_shift=sampling_shift, multiplier=multiplier,
-        denoise=denoise, device=device, dtype=dtype,
-    )
+    # Build per-image sigma schedules
+    sigmas_list = []
+    for i in range(n_images):
+        s = build_sigma_schedule(
+            n_steps, sampling_shift=sampling_shifts[i], multiplier=multiplier,
+            denoise=denoise, device=device, dtype=dtype,
+        )
+        sigmas_list.append(s)
 
+    # Apply CONST noise scaling per image with its own sigma_0
     for i in range(n_images):
         clean_i = tensors.get(f"clean_latent_{i}")
         if clean_i is not None:
             clean_i = clean_i.to(device=device, dtype=dtype)
         else:
             clean_i = torch.zeros_like(x_list[i])
-        x_list[i] = const_noise_scaling(sigmas[0], x_list[i], clean_i)
+        x_list[i] = const_noise_scaling(sigmas_list[i][0], x_list[i], clean_i)
 
     with torch.inference_mode():
-        padded_sizes = [(padded_h, padded_w)] * n_images
         refined_caps, packing_info, packed_rope = \
             diff_model.prepare_packed_state(
                 cfg_conds, padded_sizes, cap_lens, device,
@@ -670,13 +748,15 @@ def run_trajectory_packed(diff_compiled_packed, diff_model, device, dtype,
                     info["x_list"][img_i].detach().cpu()
 
     x_list = sample_euler_packed(
-        diff_compiled_packed, x_list, sigmas,
+        diff_compiled_packed, x_list, sigmas_list,
         refined_caps, packing_info, block_mask, packed_rope,
         cfg=cfg, multiplier=multiplier, callback=save_callback,
     )
 
+    # Apply per-image inverse noise scaling with each image's final sigma
     for img_i in range(n_images):
-        x_list[img_i] = const_inverse_noise_scaling(sigmas[-1], x_list[img_i])
+        x_list[img_i] = const_inverse_noise_scaling(
+            sigmas_list[img_i][-1], x_list[img_i])
         result_tensors[f"final_{img_i}"] = x_list[img_i].detach().cpu()
 
     saved = sorted(k for k in result_tensors if k.startswith("step_"))

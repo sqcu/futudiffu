@@ -13,6 +13,13 @@ Kernel variants:
 - _sage_attn_bwd_dq: Backward kernel B: compute dQ
 - _smoke_fp8_dot_kernel: Standalone FP8 dot product validation (Phase 0)
 
+Block-masked variants (for packed multi-image attention):
+- _sage_attn_fwd_fp8qk_bf16pv_masked: Masked FP8 forward (no LSE)
+- _sage_attn_fwd_int8qk_bf16pv_masked: Masked INT8 forward (no LSE)
+- _sage_attn_fwd_int8qk_bf16pv_masked_lse: Masked INT8 forward WITH LSE for backward
+- _sage_attn_bwd_dkdv_int8_masked: Masked INT8 backward dK/dV
+- _sage_attn_bwd_dq_int8_masked: Masked INT8 backward dQ
+
 Design notes:
 - Q quantized to FP8 per-row (per query token), loaded once per program
 - K loaded transposed via pointer arithmetic (D, BLOCK_N), quantized per-column
@@ -26,6 +33,10 @@ Design notes:
 - Backward kernels recompute P via the same FP8/INT8 quantization path as
   forward, using saved LSE for exact softmax reconstruction. All gradient
   matmuls are BF16 (not FP8).
+- Block-masked backward kernels skip tile pairs where block_mask==0, matching
+  the forward's masking exactly for correct P recomputation. The dK/dV kernel
+  uses MASK_BLOCK_M to map its inner Q-block index back to the forward's
+  Q-block granularity (BLOCK_M_BWD may differ from forward BLOCK_M).
 """
 
 import logging
@@ -1354,3 +1365,358 @@ if _HAS_TRITON:
 
         o_ptrs = o_base + offs_m[:, None] * D + offs_d[None, :]
         tl.store(o_ptrs, o_acc.to(tl.bfloat16), mask=q_mask[:, None])
+
+    # =========================================================================
+    # Block-Masked INT8 QK + BF16 PV with LSE output (for backward pass)
+    #
+    # Combines the block-mask logic from _sage_attn_fwd_int8qk_bf16pv_masked
+    # with LSE output from _sage_attn_fwd_int8qk_bf16pv_lse. Needed because
+    # the backward pass requires saved LSE for exact P recomputation, and the
+    # existing masked forward kernels don't produce LSE.
+    # =========================================================================
+
+    @triton.jit
+    def _sage_attn_fwd_int8qk_bf16pv_masked_lse(
+        Q, K, V, Out, LSE,
+        block_mask_ptr,
+        stride_z,
+        stride_bm_z,
+        seq_len,
+        n_kv_blocks,
+        sm_scale_log2e,
+        BLOCK_M: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+        D: tl.constexpr,
+        HAS_BLOCK_MASK: tl.constexpr,
+    ):
+        """Fused flash-attention with INT8 QK^T, BF16 PV, block mask, AND LSE output.
+
+        Combines masked forward (for packed multi-image) with LSE storage (for
+        backward pass). When HAS_BLOCK_MASK=False, compiles to the same code as
+        the unmasked LSE variant (zero overhead).
+
+        LSE layout: (B*H, N) contiguous float32.
+        LSE[z, m] = m_i + log2(l_i) after the full softmax reduction.
+
+        Grid: (ceil(seq_len / BLOCK_M), batch * heads)
+        """
+        pid_m = tl.program_id(0)
+        pid_z = tl.program_id(1)
+
+        q_base = Q + pid_z * stride_z
+        k_base = K + pid_z * stride_z
+        v_base = V + pid_z * stride_z
+        o_base = Out + pid_z * stride_z
+
+        offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_d = tl.arange(0, D)
+        q_mask = offs_m < seq_len
+
+        # Load Q tile and quantize to INT8 per-row
+        q_ptrs = q_base + offs_m[:, None] * D + offs_d[None, :]
+        q_f32 = tl.load(q_ptrs, mask=q_mask[:, None], other=0.0).to(tl.float32)
+
+        q_abs_max = tl.max(tl.abs(q_f32), axis=1)
+        q_inv_scale = 127.0 / tl.maximum(q_abs_max, 1e-12)
+        q_int8 = (q_f32 * q_inv_scale[:, None]).to(tl.int8)
+        q_descale = (q_abs_max / 127.0) * sm_scale_log2e
+
+        m_i = tl.full([BLOCK_M], float('-inf'), dtype=tl.float32)
+        l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
+        o_acc = tl.zeros([BLOCK_M, D], dtype=tl.float32)
+
+        if HAS_BLOCK_MASK:
+            bm_base = block_mask_ptr + pid_z * stride_bm_z
+
+        loop_n_blocks = tl.cdiv(seq_len, BLOCK_N)
+        for n_idx in range(loop_n_blocks):
+            do_block: tl.constexpr = True
+            if HAS_BLOCK_MASK:
+                should_compute = tl.load(bm_base + pid_m * n_kv_blocks + n_idx)
+                do_block = should_compute != 0
+
+            if do_block:
+                n_start = n_idx * BLOCK_N
+                offs_n = n_start + tl.arange(0, BLOCK_N)
+                n_mask = offs_n < seq_len
+
+                k_ptrs = k_base + offs_n[None, :] * D + offs_d[:, None]
+                k_f32 = tl.load(k_ptrs, mask=n_mask[None, :], other=0.0).to(tl.float32)
+
+                k_abs_max = tl.max(tl.abs(k_f32), axis=0)
+                k_inv_scale = 127.0 / tl.maximum(k_abs_max, 1e-12)
+                k_int8 = (k_f32 * k_inv_scale[None, :]).to(tl.int8)
+                k_descale = k_abs_max / 127.0
+
+                s = tl.dot(q_int8, k_int8, out_dtype=tl.float32)
+                s = s * q_descale[:, None] * k_descale[None, :]
+                s = tl.where(n_mask[None, :], s, float('-inf'))
+
+                m_new = tl.maximum(m_i, tl.max(s, axis=1))
+                alpha = tl.math.exp2(m_i - m_new)
+                p = tl.math.exp2(s - m_new[:, None])
+
+                l_i = alpha * l_i + tl.sum(p, axis=1)
+                o_acc = o_acc * alpha[:, None]
+
+                v_ptrs = v_base + offs_n[:, None] * D + offs_d[None, :]
+                v_tile = tl.load(v_ptrs, mask=n_mask[:, None], other=0.0)
+                o_acc += tl.dot(p.to(tl.bfloat16), v_tile, out_dtype=tl.float32)
+
+                m_i = m_new
+
+        # Compute and store LSE = m_i + log2(l_i)
+        lse_i = m_i + tl.math.log2(l_i)
+        lse_ptrs = LSE + pid_z * seq_len + offs_m
+        tl.store(lse_ptrs, lse_i, mask=q_mask)
+
+        # Normalize and store output
+        o_acc = o_acc / l_i[:, None]
+
+        o_ptrs = o_base + offs_m[:, None] * D + offs_d[None, :]
+        tl.store(o_ptrs, o_acc.to(tl.bfloat16), mask=q_mask[:, None])
+
+    # =========================================================================
+    # Block-Masked Backward Kernel A (INT8): dK, dV
+    #
+    # Same as _sage_attn_bwd_dkdv_int8 but skips Q-block tiles where the
+    # block mask is 0. The outer loop is over KV blocks (pid_n), the inner
+    # loop is over Q blocks (m_idx). Since the backward's inner Q block size
+    # (BLOCK_M) may differ from the forward's Q block size used to create the
+    # mask, MASK_BLOCK_M maps the backward's m_start back to the forward's
+    # Q block index: mask_q_idx = m_start // MASK_BLOCK_M.
+    # =========================================================================
+
+    @triton.jit
+    def _sage_attn_bwd_dkdv_int8_masked(
+        Q, K, V, dO, O, LSE, Delta,  # inputs
+        dK, dV,                        # outputs
+        block_mask_ptr,
+        stride_z, stride_bm_z, seq_len,
+        n_kv_blocks,
+        sm_scale_log2e,
+        sm_scale,
+        BLOCK_M: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+        D: tl.constexpr,
+        HAS_BLOCK_MASK: tl.constexpr,
+        MASK_BLOCK_M: tl.constexpr,  # forward's Q block size for mask indexing
+    ):
+        """Backward dK/dV with INT8 P recomputation and optional block mask.
+
+        Outer loop over K/V blocks (one per program), inner loop over Q blocks.
+        When HAS_BLOCK_MASK=True, skips Q-block tiles where the mask is 0 for
+        this KV block. MASK_BLOCK_M is the forward kernel's BLOCK_M, used to
+        map inner-loop m_start to the mask's Q-block index.
+
+        Grid: (ceil(seq_len / BLOCK_N), B*H)
+        """
+        pid_n = tl.program_id(0)  # which K/V block
+        pid_z = tl.program_id(1)  # which batch*head
+
+        q_base = Q + pid_z * stride_z
+        k_base = K + pid_z * stride_z
+        v_base = V + pid_z * stride_z
+        do_base = dO + pid_z * stride_z
+
+        # K/V block offsets
+        offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        offs_d = tl.arange(0, D)
+        n_mask = offs_n < seq_len
+
+        # Load K transposed (D, BLOCK_N) and quantize to INT8 per-column
+        k_ptrs_T = k_base + offs_n[None, :] * D + offs_d[:, None]
+        k_f32 = tl.load(k_ptrs_T, mask=n_mask[None, :], other=0.0).to(tl.float32)
+        k_abs_max = tl.max(tl.abs(k_f32), axis=0)
+        k_inv_scale = 127.0 / tl.maximum(k_abs_max, 1e-12)
+        k_int8 = (k_f32 * k_inv_scale[None, :]).to(tl.int8)
+        k_descale = k_abs_max / 127.0
+
+        # Load V transposed (D, BLOCK_N) for dP computation
+        v_ptrs_T = v_base + offs_n[None, :] * D + offs_d[:, None]
+        v_T = tl.load(v_ptrs_T, mask=n_mask[None, :], other=0.0)
+
+        dk_acc = tl.zeros([BLOCK_N, D], dtype=tl.float32)
+        dv_acc = tl.zeros([BLOCK_N, D], dtype=tl.float32)
+
+        if HAS_BLOCK_MASK:
+            bm_base = block_mask_ptr + pid_z * stride_bm_z
+
+        m_blocks = tl.cdiv(seq_len, BLOCK_M)
+        for m_idx in range(m_blocks):
+            m_start = m_idx * BLOCK_M
+
+            do_block: tl.constexpr = True
+            if HAS_BLOCK_MASK:
+                # Map backward Q block index to forward's Q block index
+                mask_q_idx = m_start // MASK_BLOCK_M
+                should_compute = tl.load(bm_base + mask_q_idx * n_kv_blocks + pid_n)
+                do_block = should_compute != 0
+
+            if do_block:
+                offs_m = m_start + tl.arange(0, BLOCK_M)
+                q_mask = offs_m < seq_len
+
+                # Load Q and quantize to INT8 per-row
+                q_ptrs = q_base + offs_m[:, None] * D + offs_d[None, :]
+                q_f32 = tl.load(q_ptrs, mask=q_mask[:, None], other=0.0).to(tl.float32)
+
+                q_abs_max = tl.max(tl.abs(q_f32), axis=1)
+                q_inv_scale = 127.0 / tl.maximum(q_abs_max, 1e-12)
+                q_int8 = (q_f32 * q_inv_scale[:, None]).to(tl.int8)
+                q_descale = (q_abs_max / 127.0) * sm_scale_log2e
+
+                # Recompute P via INT8 QK^T
+                s = tl.dot(q_int8, k_int8, out_dtype=tl.float32)
+                s = s * q_descale[:, None] * k_descale[None, :]
+                s = tl.where(n_mask[None, :], s, float('-inf'))
+
+                # Reconstruct P from saved LSE
+                lse_ptrs = LSE + pid_z * seq_len + offs_m
+                lse_i = tl.load(lse_ptrs, mask=q_mask, other=0.0)
+                p = tl.math.exp2(s - lse_i[:, None])
+                p = tl.where(q_mask[:, None], p, 0.0)
+
+                # Load dO and Delta
+                do_ptrs = do_base + offs_m[:, None] * D + offs_d[None, :]
+                do_block_tile = tl.load(do_ptrs, mask=q_mask[:, None], other=0.0)
+
+                delta_ptrs = Delta + pid_z * seq_len + offs_m
+                delta_i = tl.load(delta_ptrs, mask=q_mask, other=0.0)
+
+                # dP = dO @ V^T
+                dp = tl.dot(do_block_tile, v_T, out_dtype=tl.float32)
+
+                # Softmax backward: ds = P * (dP - D_i)
+                ds = p * (dp - delta_i[:, None])
+                ds_scaled = ds * sm_scale
+
+                # Accumulate dV += P^T @ dO
+                dv_acc += tl.dot(tl.trans(p.to(tl.bfloat16)), do_block_tile, out_dtype=tl.float32)
+
+                # Accumulate dK += ds_scaled^T @ Q
+                q_bf16 = tl.load(q_ptrs, mask=q_mask[:, None], other=0.0)
+                dk_acc += tl.dot(tl.trans(ds_scaled.to(tl.bfloat16)), q_bf16, out_dtype=tl.float32)
+
+        # Store dK and dV as BF16
+        dk_ptrs = dK + pid_z * stride_z + offs_n[:, None] * D + offs_d[None, :]
+        dv_ptrs = dV + pid_z * stride_z + offs_n[:, None] * D + offs_d[None, :]
+        tl.store(dk_ptrs, dk_acc.to(tl.bfloat16), mask=n_mask[:, None])
+        tl.store(dv_ptrs, dv_acc.to(tl.bfloat16), mask=n_mask[:, None])
+
+    # =========================================================================
+    # Block-Masked Backward Kernel B (INT8): dQ
+    #
+    # Same as _sage_attn_bwd_dq_int8 but skips KV-block tiles where the
+    # block mask is 0. The outer loop is over Q blocks (pid_m), the inner
+    # loop is over KV blocks (n_idx). Mask indexing is straightforward:
+    # mask[pid_z, pid_m, n_idx] since the Q block size matches forward.
+    # =========================================================================
+
+    @triton.jit
+    def _sage_attn_bwd_dq_int8_masked(
+        Q, K, V, dO, O, LSE, Delta,  # inputs
+        dQ,                            # output
+        block_mask_ptr,
+        stride_z, stride_bm_z, seq_len,
+        n_kv_blocks,
+        sm_scale_log2e,
+        sm_scale,
+        BLOCK_M: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+        D: tl.constexpr,
+        HAS_BLOCK_MASK: tl.constexpr,
+    ):
+        """Backward dQ with INT8 P recomputation and optional block mask.
+
+        Outer loop over Q blocks (one per program), inner loop over K/V blocks.
+        When HAS_BLOCK_MASK=True, skips KV-block tiles where the mask is 0.
+        pid_m maps directly to the mask's Q block index since the dQ kernel
+        uses the same BLOCK_M as the forward kernel.
+
+        Grid: (ceil(seq_len / BLOCK_M), B*H)
+        """
+        pid_m = tl.program_id(0)  # which Q block
+        pid_z = tl.program_id(1)  # which batch*head
+
+        q_base = Q + pid_z * stride_z
+        k_base = K + pid_z * stride_z
+        v_base = V + pid_z * stride_z
+        do_base = dO + pid_z * stride_z
+
+        offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_d = tl.arange(0, D)
+        q_mask = offs_m < seq_len
+
+        # Load Q and quantize to INT8 per-row
+        q_ptrs = q_base + offs_m[:, None] * D + offs_d[None, :]
+        q_f32 = tl.load(q_ptrs, mask=q_mask[:, None], other=0.0).to(tl.float32)
+
+        q_abs_max = tl.max(tl.abs(q_f32), axis=1)
+        q_inv_scale = 127.0 / tl.maximum(q_abs_max, 1e-12)
+        q_int8 = (q_f32 * q_inv_scale[:, None]).to(tl.int8)
+        q_descale = (q_abs_max / 127.0) * sm_scale_log2e
+
+        # Load dO, LSE, Delta for this Q block
+        do_ptrs = do_base + offs_m[:, None] * D + offs_d[None, :]
+        do_block = tl.load(do_ptrs, mask=q_mask[:, None], other=0.0)
+
+        lse_ptrs = LSE + pid_z * seq_len + offs_m
+        lse_i = tl.load(lse_ptrs, mask=q_mask, other=0.0)
+
+        delta_ptrs = Delta + pid_z * seq_len + offs_m
+        delta_i = tl.load(delta_ptrs, mask=q_mask, other=0.0)
+
+        dq_acc = tl.zeros([BLOCK_M, D], dtype=tl.float32)
+
+        if HAS_BLOCK_MASK:
+            bm_base = block_mask_ptr + pid_z * stride_bm_z
+
+        loop_n_blocks = tl.cdiv(seq_len, BLOCK_N)
+        for n_idx in range(loop_n_blocks):
+            do_tile: tl.constexpr = True
+            if HAS_BLOCK_MASK:
+                should_compute = tl.load(bm_base + pid_m * n_kv_blocks + n_idx)
+                do_tile = should_compute != 0
+
+            if do_tile:
+                n_start = n_idx * BLOCK_N
+                offs_n = n_start + tl.arange(0, BLOCK_N)
+                n_mask = offs_n < seq_len
+
+                # Load K transposed and quantize to INT8 per-column
+                k_ptrs_T = k_base + offs_n[None, :] * D + offs_d[:, None]
+                k_f32 = tl.load(k_ptrs_T, mask=n_mask[None, :], other=0.0).to(tl.float32)
+
+                k_abs_max = tl.max(tl.abs(k_f32), axis=0)
+                k_inv_scale = 127.0 / tl.maximum(k_abs_max, 1e-12)
+                k_int8 = (k_f32 * k_inv_scale[None, :]).to(tl.int8)
+                k_descale = k_abs_max / 127.0
+
+                # Recompute P via INT8 QK^T
+                s = tl.dot(q_int8, k_int8, out_dtype=tl.float32)
+                s = s * q_descale[:, None] * k_descale[None, :]
+                s = tl.where(n_mask[None, :], s, float('-inf'))
+
+                # Reconstruct P from saved LSE
+                p = tl.math.exp2(s - lse_i[:, None])
+
+                # Load V transposed for dP computation
+                v_ptrs_T = v_base + offs_n[None, :] * D + offs_d[:, None]
+                v_T = tl.load(v_ptrs_T, mask=n_mask[None, :], other=0.0)
+
+                # dP = dO @ V^T
+                dp = tl.dot(do_block, v_T, out_dtype=tl.float32)
+
+                # Softmax backward: ds = P * (dP - D_i)
+                ds = p * (dp - delta_i[:, None])
+
+                # dQ += ds @ K * sm_scale
+                k_ptrs_normal = k_base + offs_n[:, None] * D + offs_d[None, :]
+                k_block = tl.load(k_ptrs_normal, mask=n_mask[:, None], other=0.0)
+                dq_acc += tl.dot(ds.to(tl.bfloat16), k_block, out_dtype=tl.float32)
+
+        # Scale by sm_scale and store dQ as BF16
+        dq_acc = dq_acc * sm_scale
+        dq_ptrs = dQ + pid_z * stride_z + offs_m[:, None] * D + offs_d[None, :]
+        tl.store(dq_ptrs, dq_acc.to(tl.bfloat16), mask=q_mask[:, None])

@@ -1,0 +1,10 @@
+{
+  "type": "t2i",
+  "seed": 3272602734,
+  "prompt_idx": 16,
+  "prompt": "Close-up of a dragonfly perched on a dewdrop-covered blade of grass, morning light.",
+  "n_steps": 30,
+  "precision": "sage",
+  "batch_idx": 1,
+  "packed": false
+}

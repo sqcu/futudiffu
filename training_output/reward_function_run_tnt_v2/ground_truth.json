@@ -1,0 +1,99 @@
+{
+  "pinkify": {
+    "passed": true,
+    "scores": {
+      "A": 0.0,
+      "B": 0.007069664541631937,
+      "C": 0.007593680173158646,
+      "D": 0.00898743700236082,
+      "E": 0.00898743700236082,
+      "F": 0.046157315373420715
+    },
+    "checks": [
+      {
+        "name": "A < B",
+        "passed": true,
+        "detail": "A=0.000000, B=0.007070, diff=0.007070"
+      },
+      {
+        "name": "B < C",
+        "passed": true,
+        "detail": "B=0.007070, C=0.007594, diff=0.000524"
+      },
+      {
+        "name": "max(A,B,C) < min(D,E)",
+        "passed": true,
+        "detail": "max(A,B,C)=0.007594, min(D,E)=0.008987, gap=0.001394"
+      },
+      {
+        "name": "D ~ E (relative diff < 50%)",
+        "passed": true,
+        "detail": "D=0.008987, E=0.008987, |D-E|/max=0.0000"
+      },
+      {
+        "name": "max(D,E) < F",
+        "passed": true,
+        "detail": "max(D,E)=0.008987, F=0.046157, gap=0.037170"
+      }
+    ],
+    "rank_order": [
+      "A",
+      "B",
+      "C",
+      "D",
+      "E",
+      "F"
+    ]
+  },
+  "tnt": {
+    "passed": true,
+    "scores": {
+      "THIS": 0.9999998211860657,
+      "THAT": -0.9999999403953552,
+      "1bit_redraw": 0.23765279352664948,
+      "bubblegum": 0.9683282375335693,
+      "clear_sky": 0.8571564555168152,
+      "deviantart": 0.9435494542121887,
+      "mspaint_enso": 0.9862245321273804,
+      "snek_heavy": 0.9112958908081055,
+      "widemeister": 0.9815632104873657,
+      "red_tonegraph": 0.4312882721424103,
+      "nightmode": 0.41587570309638977
+    },
+    "checks": [
+      {
+        "name": "THIS > THAT",
+        "passed": true,
+        "detail": "THIS=1.000000, THAT=-1.000000"
+      },
+      {
+        "name": "THIS > ALL",
+        "passed": true,
+        "detail": "THIS=1.000000, max(others)=0.986225"
+      },
+      {
+        "name": "THAT < ALL",
+        "passed": true,
+        "detail": "THAT=-1.000000, min(others)=0.237653"
+      },
+      {
+        "name": "THAT < NIGHT",
+        "passed": true,
+        "detail": "THAT=-1.000000, NIGHT=0.415876"
+      }
+    ],
+    "rank_order": [
+      "THAT",
+      "1bit_redraw",
+      "nightmode",
+      "red_tonegraph",
+      "clear_sky",
+      "snek_heavy",
+      "deviantart",
+      "bubblegum",
+      "widemeister",
+      "mspaint_enso",
+      "THIS"
+    ]
+  }
+}

@@ -122,7 +122,7 @@ backbone forward + BTRM scoring + BT loss + backward + optimizer step atomically
      Client                v               Server
   +-----------+    train_btrm_step()   +------------+
   | scheduling|-- labeled examples --> | FP8 NextDiT|
-  | (no GPU)  |<-- scalar metrics ---  | + BTRMHead |
+  | (no GPU)  |<-- scalar metrics ---  | + ScoreUnembedder |
   +-----------+                        | + optimizer|
                                        +------------+
 ```
@@ -136,7 +136,7 @@ After BTRM training, test the policy optimization loop:
 +-----------+    sample_trajectory()        +------------+
 | scheduling|<-- trajectories -----------  | FP8 NextDiT|
 | (no GPU)  |                              | + LoRA     |
-+-----------+                              | + BTRMHead |
++-----------+                              | + ScoreUnembedder |
      |                                     | + optimzrs |
   score_btrm() ---------------------------->           |
      |<-- scalar scores -----------------------        |
