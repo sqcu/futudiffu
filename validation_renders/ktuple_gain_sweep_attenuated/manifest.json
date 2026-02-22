@@ -1,0 +1,175 @@
+{
+  "timestamp": "2026-02-22T04:57:03.343327+00:00",
+  "seed": 42,
+  "n_steps": 30,
+  "sweep": {
+    "k6_gains": [
+      1.0,
+      2.0,
+      3.0,
+      4.0
+    ],
+    "k2_gain": 3.0,
+    "k2_cfg": 4.0,
+    "k1": true
+  },
+  "spec_k6": [
+    {
+      "prompt": "qwen-3-4b, draw me \"pink shrimp with crisp typography in a banana field\".",
+      "resolution": [
+        1024,
+        1024
+      ],
+      "scale": 1.0
+    },
+    {
+      "prompt": "pink shrimp, detailed color, clear shape",
+      "resolution": [
+        1024,
+        1024
+      ],
+      "scale": 3.0
+    },
+    {
+      "prompt": "clean typography, sharp letterforms, no blur",
+      "resolution": [
+        1024,
+        1024
+      ],
+      "scale": 2.0
+    },
+    {
+      "prompt": "qwen-3-4b, draw me \"pink shrimp with crisp typography in a banana field\".",
+      "resolution": [
+        512,
+        512
+      ],
+      "scale": -0.2
+    },
+    {
+      "prompt": "qwen-3-4b, draw me \"pink shrimp with crisp typography in a banana field\".",
+      "resolution": [
+        256,
+        256
+      ],
+      "scale": -0.15
+    },
+    {
+      "prompt": "banana, yellow, tropical poem",
+      "resolution": [
+        1024,
+        1024
+      ],
+      "scale": -4.0
+    }
+  ],
+  "k2_note": "cfg2(base, empty_neg, 1024x1024, scale=4.0) + gather_residual_gain(gain=3.0)",
+  "k1_note": "cfg1(base, 1024x1024) + linear gather (identity)",
+  "fp8_path": "F:\\dox\\ai\\comfyui\\ComfyUI\\models\\diffusion_models\\z_image_fp8_blockwise.safetensors",
+  "vae_path": "F:\\dox\\ai\\comfyui\\ComfyUI\\models\\vae\\zimage.safetensors",
+  "te_path": "F:\\dox\\ai\\comfyui\\ComfyUI\\models\\text_encoders\\qwen_3_4b.safetensors",
+  "executor": "serial",
+  "packing_note": "Serial executor: one packed-forward per spec entry. K=6 = 6 launches/step. Replace with BatchExecutor when available.",
+  "pixel_stats": {
+    "k6_gain_1.0": {
+      "size": [
+        1024,
+        1024
+      ],
+      "mean": 101.26007080078125,
+      "std": 57.49477767944336,
+      "min": 0.0,
+      "max": 255.0
+    },
+    "k6_gain_2.0": {
+      "size": [
+        1024,
+        1024
+      ],
+      "mean": 106.6744155883789,
+      "std": 59.286468505859375,
+      "min": 0.0,
+      "max": 255.0
+    },
+    "k6_gain_3.0": {
+      "size": [
+        1024,
+        1024
+      ],
+      "mean": 110.19666290283203,
+      "std": 63.19077682495117,
+      "min": 0.0,
+      "max": 255.0
+    },
+    "k6_gain_4.0": {
+      "size": [
+        1024,
+        1024
+      ],
+      "mean": 110.764404296875,
+      "std": 61.4119873046875,
+      "min": 0.0,
+      "max": 255.0
+    },
+    "k2_gain_3.0": {
+      "size": [
+        1024,
+        1024
+      ],
+      "mean": 88.07180786132812,
+      "std": 84.1456527709961,
+      "min": 0.0,
+      "max": 255.0
+    },
+    "k1": {
+      "size": [
+        1024,
+        1024
+      ],
+      "mean": 94.72188568115234,
+      "std": 58.07444763183594,
+      "min": 0.0,
+      "max": 255.0
+    }
+  },
+  "packing_diagnostics": {
+    "k6_gain_1.0": {
+      "k": 6,
+      "total_launches": 180,
+      "elapsed_s": 97.30733290035278
+    },
+    "k6_gain_2.0": {
+      "k": 6,
+      "total_launches": 180,
+      "elapsed_s": 41.20290539972484
+    },
+    "k6_gain_3.0": {
+      "k": 6,
+      "total_launches": 180,
+      "elapsed_s": 41.14229699969292
+    },
+    "k6_gain_4.0": {
+      "k": 6,
+      "total_launches": 180,
+      "elapsed_s": 41.072470099665225
+    },
+    "k2_gain_3.0": {
+      "k": 2,
+      "total_launches": 60,
+      "elapsed_s": 19.19878439977765
+    },
+    "k1": {
+      "k": 1,
+      "total_launches": 30,
+      "elapsed_s": 9.621937899850309
+    }
+  },
+  "outputs": [
+    "k6_gain_1.0",
+    "k6_gain_2.0",
+    "k6_gain_3.0",
+    "k6_gain_4.0",
+    "k2_gain_3.0",
+    "k1"
+  ]
+}

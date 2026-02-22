@@ -359,37 +359,33 @@ def main():
     print("  Phase 5: Loading backbone and creating compound model")
     print("=" * 60)
 
-    from src_ii.model_loading import load_fp8_diffusion_model
-    from src_ii.btrm_model import BTRMCompoundModel
-    from src_ii.rollout import make_rope_cache
+    from src_ii.zimage_model import load_zimage_rlaif
+    from src_ii.btrm_lifecycle import setup_btrm_training, persist_btrm, score_serial
+    from src_ii.multi_lora import get_adapter_params
     from src_ii.sigma_schedule import build_sigma_schedule, resolution_shift
 
     # Load WITHOUT compilation -- training uses gradient-checkpointed forward
-    _, diff_model = load_fp8_diffusion_model(
+    _, raw_model = load_zimage_rlaif(
         FP8_PATH, device=device, dtype=dtype,
         compile_model=False, fuse=True,
     )
 
     print(f"  VRAM after backbone load: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
-    # Create compound BTRM model (allocates adapter + head + hidden capture)
-    btrm_model = BTRMCompoundModel(
-        diff_model,
+    # Set up BTRM training (installs adapter + score head + optimizer)
+    optimizer = setup_btrm_training(
+        raw_model,
         adapter_name="rtheta",
         adapter_rank=8,
         adapter_alpha=16.0,
         adapter_init_b_std=0.01,
-        head_names=HEAD_NAMES,
-        hidden_dim=3840,
-        logit_cap=10.0,
-        device=device,
     )
 
     # Report parameter counts
-    adapter_params = btrm_model.adapter_params()
-    head_params = btrm_model.head_params()
-    n_adapter = sum(p.numel() for p in adapter_params)
-    n_head = sum(p.numel() for p in head_params)
+    adapter_params_dict = get_adapter_params(raw_model, "rtheta")
+    n_adapter = sum(p.numel() for p in adapter_params_dict.values())
+    n_head = sum(p.numel() for p in raw_model.score_proj.parameters()) + \
+             sum(p.numel() for p in raw_model.score_norm.parameters())
     print(f"  Adapter params: {n_adapter:,}")
     print(f"  Head params: {n_head:,}")
     print(f"  Total trainable: {n_adapter + n_head:,}")
@@ -409,7 +405,7 @@ def main():
         """Load a latent + conditioning for BTRM training.
 
         key is a (traj_id, step_key) tuple (from pair sampler).
-        Returns: (latent, timestep, conditioning, num_tokens, rope_cache)
+        Returns: (latent, timestep, conditioning, num_tokens)
         """
         traj_id, step_key = key
         meta, accessor = _get_meta(traj_id)
@@ -451,23 +447,16 @@ def main():
             raise ValueError(f"No cached prompt encoding for traj {traj_id}: '{prompt[:60]}...'")
         cond = cond.to(device=device, dtype=dtype)
 
-        # Build RoPE cache
-        latent_h = meta.get("latent_height") or (meta.get("height", 832) // 8)
-        latent_w = meta.get("latent_width") or (meta.get("width", 1280) // 8)
         num_tokens = cond.shape[1]
 
-        rope_cache = make_rope_cache(
-            diff_model, latent_h, latent_w, num_tokens, device,
-        )
-
-        return latent, timestep, cond, num_tokens, rope_cache
+        return latent, timestep, cond, num_tokens
 
     # Validate load_latent_fn with a test load
     test_key = (traj_ids[0], "step_00")
-    lat, ts, cond, nt, rc = load_latent_fn(test_key)
+    lat, ts, cond, nt = load_latent_fn(test_key)
     print(f"  Test load: latent={lat.shape}, timestep={ts.shape}, cond={cond.shape}, "
           f"num_tokens={nt}")
-    del lat, ts, cond, rc
+    del lat, ts, cond
     torch.cuda.empty_cache()
 
     # ===================================================================
@@ -548,13 +537,13 @@ def main():
     def save_checkpoint(step, model):
         ckpt_dir = OUTPUT_DIR / f"checkpoint_step{step:03d}"
         ckpt_dir.mkdir(parents=True, exist_ok=True)
-        model.persist(str(ckpt_dir))
+        persist_btrm(model, "rtheta", str(ckpt_dir))
         print(f"  [CHECKPOINT] Saved to {ckpt_dir}")
 
     t_train_start = time.perf_counter()
 
     training_curve = train_btrm_differentiable(
-        btrm_model=btrm_model,
+        model=raw_model,
         pair_sampler=sampler,
         load_latent_fn=load_latent_fn,
         preference_fn=preference_fn,
@@ -589,7 +578,8 @@ def main():
     print("  Phase 8: Scoring test inputs before persist")
     print("=" * 60)
 
-    btrm_model.eval_mode()
+    raw_model.gradient_checkpointing = False
+    raw_model.eval()
 
     # Score a sample of images to verify the trained model produces
     # different outputs than an untrained model
@@ -604,10 +594,10 @@ def main():
         steps = accessor.available_steps
         step_key = "final" if "final" in steps else steps[0]
 
-        lat, ts, cond, nt, rc = load_latent_fn((traj_id, step_key))
+        lat, ts, cond, nt = load_latent_fn((traj_id, step_key))
 
         with torch.no_grad():
-            scores = btrm_model.score(lat, ts, cond, nt, rc)
+            scores = score_serial(raw_model, lat, ts, cond, nt, gradient_checkpointing=False)
 
         score_dict = {
             "traj_id": traj_id,
@@ -617,7 +607,7 @@ def main():
             score_dict[f"score_{name}"] = float(scores[0, head_idx].item())
         test_scores.append(score_dict)
 
-        del lat, ts, cond, rc
+        del lat, ts, cond
         torch.cuda.empty_cache()
 
     with open(str(PRE_PERSIST_SCORES_PATH), "w") as f:
@@ -634,7 +624,7 @@ def main():
     print("  Phase 9: Persisting trained compound model")
     print("=" * 60)
 
-    persist_info = btrm_model.persist(str(OUTPUT_DIR))
+    persist_info = persist_btrm(raw_model, "rtheta", str(OUTPUT_DIR))
     print(f"  Persisted: {persist_info}")
 
     # ===================================================================
@@ -643,7 +633,7 @@ def main():
     wall_total = time.perf_counter() - wall_start
 
     # Report adapter weight statistics
-    adapter_params_list = btrm_model.adapter_params()
+    adapter_params_list = list(get_adapter_params(raw_model, "rtheta").values())
     if adapter_params_list:
         lora_b_stats = []
         for p in adapter_params_list:
@@ -717,7 +707,6 @@ def main():
     print(f"  Output: {OUTPUT_DIR}")
 
     # Cleanup
-    btrm_model.cleanup()
     del vae
     reader.close()
     torch.cuda.empty_cache()

@@ -1,0 +1,37 @@
+{
+  "n_steps": 5,
+  "n_queries": 3,
+  "total_entries": 9,
+  "n_bins": 2,
+  "total_elapsed_s": 46.23048110026866,
+  "peak_vram_gb": 0.574683648,
+  "queries": [
+    {
+      "name": "shrimp",
+      "resolution": [
+        512,
+        512
+      ],
+      "k": 4,
+      "final_norm": 5886.67822265625
+    },
+    {
+      "name": "banana",
+      "resolution": [
+        512,
+        512
+      ],
+      "k": 3,
+      "final_norm": 5924.1875
+    },
+    {
+      "name": "tiny",
+      "resolution": [
+        256,
+        256
+      ],
+      "k": 2,
+      "final_norm": 2779.106201171875
+    }
+  ]
+}

@@ -1,0 +1,100 @@
+{
+  "timestamp": "2026-02-22T04:23:43.814654+00:00",
+  "seed": 42,
+  "n_steps": 30,
+  "gain": 6.0,
+  "spec_k6": [
+    {
+      "prompt": "qwen-3-4b, draw me \"pink shrimp with crisp typography in a banana field\".",
+      "resolution": [
+        1024,
+        1024
+      ],
+      "scale": 1.0
+    },
+    {
+      "prompt": "pink shrimp, detailed color, clear shape",
+      "resolution": [
+        1024,
+        1024
+      ],
+      "scale": 3.0
+    },
+    {
+      "prompt": "clean typography, sharp letterforms, no blur",
+      "resolution": [
+        1024,
+        1024
+      ],
+      "scale": 2.0
+    },
+    {
+      "prompt": "qwen-3-4b, draw me \"pink shrimp with crisp typography in a banana field\".",
+      "resolution": [
+        512,
+        512
+      ],
+      "scale": -2.0
+    },
+    {
+      "prompt": "qwen-3-4b, draw me \"pink shrimp with crisp typography in a banana field\".",
+      "resolution": [
+        256,
+        256
+      ],
+      "scale": -1.5
+    },
+    {
+      "prompt": "banana, yellow, tropical poem",
+      "resolution": [
+        1024,
+        1024
+      ],
+      "scale": -4.0
+    }
+  ],
+  "k2_note": "cfg2(base, empty_neg, 1024x1024, scale=7.0) + gather_residual_gain(gain=6.0)",
+  "k1_note": "cfg1(base, 1024x1024) + linear gather (identity)",
+  "fp8_path": "F:\\dox\\ai\\comfyui\\ComfyUI\\models\\diffusion_models\\z_image_fp8_blockwise.safetensors",
+  "vae_path": "F:\\dox\\ai\\comfyui\\ComfyUI\\models\\vae\\zimage.safetensors",
+  "te_path": "F:\\dox\\ai\\comfyui\\ComfyUI\\models\\text_encoders\\qwen_3_4b.safetensors",
+  "executor": "serial",
+  "packing_note": "Serial executor: one packed-forward per spec entry. K=6 = 6 launches/step. Replace with BatchExecutor when available.",
+  "pixel_stats": {
+    "k6": {
+      "size": [
+        1024,
+        1024
+      ],
+      "mean": 127.6103286743164,
+      "std": 83.56956481933594,
+      "min": 0.0,
+      "max": 255.0
+    },
+    "k2": {
+      "size": [
+        1024,
+        1024
+      ],
+      "mean": 87.43317413330078,
+      "std": 92.8353271484375,
+      "min": 0.0,
+      "max": 255.0
+    },
+    "k1": {
+      "size": [
+        1024,
+        1024
+      ],
+      "mean": 94.72188568115234,
+      "std": 58.07444763183594,
+      "min": 0.0,
+      "max": 255.0
+    }
+  },
+  "packing_diagnostics": {
+    "k6_total_launches": 180,
+    "k2_total_launches": 60,
+    "k1_total_launches": 30
+  }
+}

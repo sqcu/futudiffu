@@ -145,9 +145,10 @@ def encode_pinkify_challenge_latents(
 
 
 def score_pinkify_cached(
-    btrm_model,
+    model,
     latent_cache: dict[str, dict],
     head_name: str = "pinkify",
+    head_names: tuple[str, ...] = ("pinkify", "thisnotthat"),
     device: torch.device = torch.device("cuda"),
 ) -> dict:
     """Score cached PINKIFY latents with the current BTRM model state.
@@ -156,12 +157,12 @@ def score_pinkify_cached(
         "passed", "scores", "checks", "rank_order", "head_name", "head_index"
     """
     from src_ii.pinkify_validation import _check_ranking
-    from src_ii.rollout import make_rope_cache
+    from src_ii.btrm_lifecycle import score_serial
 
-    head_names = btrm_model.head.head_names
     head_index = list(head_names).index(head_name)
 
-    btrm_model.eval_mode()
+    model.gradient_checkpointing = False
+    model.eval()
     scores = {}
 
     with torch.no_grad():
@@ -171,13 +172,9 @@ def score_pinkify_cached(
             conditioning = cached["conditioning"]
             num_tokens = cached["num_tokens"]
 
-            _, _, lat_h, lat_w = latent.shape
-            rope_cache = make_rope_cache(
-                btrm_model.backbone, lat_h, lat_w, num_tokens, device,
-            )
-
-            score_tensor = btrm_model.score(
-                latent, timestep, conditioning, num_tokens, rope_cache,
+            score_tensor = score_serial(
+                model, latent, timestep, conditioning, num_tokens,
+                gradient_checkpointing=False,
             )
             scores[label] = float(score_tensor[0, head_index].item())
 
@@ -350,38 +347,30 @@ def main():
     print("  Phase 4: Loading backbone + creating BTRM compound model")
     print("=" * 60)
 
-    from src_ii.model_loading import load_fp8_diffusion_model
-    from src_ii.btrm_model import BTRMCompoundModel
-    from src_ii.rollout import make_rope_cache
+    from src_ii.zimage_model import load_zimage_rlaif
+    from src_ii.btrm_lifecycle import setup_btrm_training, persist_btrm, score_serial
+    from src_ii.multi_lora import get_adapter_params
     from src_ii.sigma_schedule import build_sigma_schedule, resolution_shift
 
     # compile_model=False is CORRECT here: whole-model torch.compile is
-    # incompatible with per-block gradient checkpointing (used by
-    # BTRMCompoundModel.extract_hidden_differentiable). Per-LAYER
-    # compilation happens inside BTRMCompoundModel.__init__ via
-    # compile_layers=True (the default). This gives the same speedup
-    # (~2x) and VRAM savings (~40%) without breaking gradient checkpointing.
-    _, diff_model = load_fp8_diffusion_model(
+    # incompatible with per-block gradient checkpointing.
+    _, raw_model = load_zimage_rlaif(
         FP8_PATH, device=device, dtype=dtype,
         compile_model=False, fuse=True,
     )
     print(f"  VRAM after backbone: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
-    btrm_model = BTRMCompoundModel(
-        diff_model,
+    optimizer = setup_btrm_training(
+        raw_model,
         adapter_name="rtheta",
         adapter_rank=8,
         adapter_alpha=16.0,
         adapter_init_b_std=0.01,
-        head_names=HEAD_NAMES,
-        hidden_dim=3840,
-        logit_cap=10.0,
-        device=device,
-        compile_layers=True,  # per-layer compilation for training (mandatory)
     )
 
-    n_adapter = sum(p.numel() for p in btrm_model.adapter_params())
-    n_head = sum(p.numel() for p in btrm_model.head_params())
+    n_adapter = sum(p.numel() for p in get_adapter_params(raw_model, "rtheta").values())
+    n_head = sum(p.numel() for p in raw_model.score_proj.parameters()) + \
+             sum(p.numel() for p in raw_model.score_norm.parameters())
     print(f"  Adapter params: {n_adapter:,}")
     print(f"  Head params: {n_head:,}")
     print(f"  Total trainable: {n_adapter + n_head:,}")
@@ -399,8 +388,8 @@ def main():
         pinkify_log_path.unlink()
 
     initial_eval = score_pinkify_cached(
-        btrm_model, pinkify_latent_cache,
-        head_name=PINKIFY_HEAD_NAME, device=device,
+        raw_model, pinkify_latent_cache,
+        head_name=PINKIFY_HEAD_NAME, head_names=HEAD_NAMES, device=device,
     )
     initial_eval["step"] = -1  # before training
     initial_eval["timestamp"] = datetime.now(timezone.utc).isoformat()
@@ -460,12 +449,9 @@ def main():
             raise ValueError(f"No cached prompt for traj {traj_id}: '{prompt[:60]}...'")
         cond = cond.to(device=device, dtype=dtype)
 
-        latent_h = h // 8
-        latent_w = w // 8
         num_tokens = cond.shape[1]
-        rope_cache = make_rope_cache(diff_model, latent_h, latent_w, num_tokens, device)
 
-        return latent, timestep, cond, num_tokens, rope_cache
+        return latent, timestep, cond, num_tokens
 
     # ==================================================================
     # Build preference function
@@ -522,8 +508,8 @@ def main():
 
         t_eval_start = time.perf_counter()
         eval_result = score_pinkify_cached(
-            btrm_model, pinkify_latent_cache,
-            head_name=PINKIFY_HEAD_NAME, device=device,
+            raw_model, pinkify_latent_cache,
+            head_name=PINKIFY_HEAD_NAME, head_names=HEAD_NAMES, device=device,
         )
         eval_time = time.perf_counter() - t_eval_start
 
@@ -547,12 +533,13 @@ def main():
               f"{eval_time:.1f}s")
 
         # Re-enable training mode after eval
-        btrm_model.train_mode()
+        raw_model.gradient_checkpointing = True
+        raw_model.train()
 
     t_train_start = time.perf_counter()
 
     training_curve = train_btrm_differentiable(
-        btrm_model=btrm_model,
+        model=raw_model,
         pair_sampler=sampler,
         load_latent_fn=load_latent_fn,
         preference_fn=preference_fn,
@@ -566,7 +553,6 @@ def main():
         warmup_steps=WARMUP_STEPS,
         lr_schedule=LR_SCHEDULE,
         packed=True,
-        force_sdpa=False,
         output_dir=str(OUTPUT_DIR),
         artifacts=artifacts,
         checkpoint_steps=CHECKPOINT_STEPS,
@@ -613,7 +599,7 @@ def main():
     print(f"  Analysis: {report_path}")
 
     # Persist the model
-    persist_info = btrm_model.persist(str(OUTPUT_DIR))
+    persist_info = persist_btrm(raw_model, "rtheta", str(OUTPUT_DIR))
     print(f"  Model persisted: {persist_info}")
 
     # Load and summarize PINKIFY validation log
@@ -738,7 +724,6 @@ def main():
     print(f"  Output: {OUTPUT_DIR}")
 
     # Cleanup
-    btrm_model.cleanup()
     reader.close()
     torch.cuda.empty_cache()
 

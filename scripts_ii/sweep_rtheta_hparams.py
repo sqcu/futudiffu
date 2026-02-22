@@ -170,25 +170,25 @@ def extract_hidden_states(
     layer_indices: set[int] | None,
     device: torch.device,
     dtype: torch.dtype,
-) -> tuple[list[torch.Tensor], "BTRMCompoundModel"]:
+) -> tuple[list[torch.Tensor], object]:
     """Extract hidden states for a given adapter architecture.
 
-    Creates a fresh BTRMCompoundModel with the specified rank/layer_indices,
-    runs all images through it, returns CPU hidden states and the compound model.
+    Creates a fresh BTRM setup with the specified rank/layer_indices,
+    runs all images through it, returns CPU hidden states and the model.
+
+    TODO: extract_hidden() was removed with BTRMCompoundModel. This function
+    needs a new implementation using score_serial() or a dedicated hidden
+    extraction path.
     """
-    from src_ii.btrm_model import BTRMCompoundModel
+    from src_ii.btrm_lifecycle import setup_btrm_training
     from src_ii.stats import sigma_for_step
     from futudiffu.sampling import make_rope_cache
 
-    btrm = BTRMCompoundModel(
+    optimizer = setup_btrm_training(
         diff_model,
-        head_names=HEAD_NAMES,
-        hidden_dim=3840,
-        logit_cap=10.0,
+        adapter_name="rtheta",
         adapter_rank=rank,
         adapter_init_b_std=init_b_std,
-        adapter_layer_indices=layer_indices,
-        device=device,
     )
 
     hidden_states_cpu = []
@@ -213,7 +213,8 @@ def extract_hidden_states(
         B, C, H, W = latent.shape
         rope_cache = make_rope_cache(diff_model, H, W, num_tokens, device)
 
-        hidden = btrm.extract_hidden(
+        # TODO: extract_hidden() removed -- need new hidden extraction path
+        hidden = diff_model.extract_hidden(
             latent, timestep.unsqueeze(0), conditioning, num_tokens, rope_cache,
         )
         hidden_states_cpu.append(hidden.cpu())
@@ -222,7 +223,7 @@ def extract_hidden_states(
             print(f"    Extracted {len(hidden_states_cpu)}/{n_images} hidden states")
 
     print(f"    All {len(hidden_states_cpu)} hidden states extracted")
-    return hidden_states_cpu, btrm
+    return hidden_states_cpu, diff_model
 
 
 def remove_all_adapters(model: nn.Module):
@@ -254,26 +255,23 @@ def train_single_config(
     Creates a fresh BTRMCompoundModel for each config (but reuses hidden states).
     This is necessary because each train needs fresh head + adapter weights.
     """
-    from src_ii.btrm_model import BTRMCompoundModel
+    from src_ii.btrm_lifecycle import setup_btrm_training, persist_btrm
+    from src_ii.multi_lora import get_adapter_params
     from src_ii.btrm_training import train_btrm
 
     layer_indices = set(config.layer_indices) if config.layer_indices else None
 
-    # Create fresh compound model with fresh weights
-    btrm = BTRMCompoundModel(
+    # Set up BTRM training with fresh weights
+    optimizer = setup_btrm_training(
         diff_model,
-        head_names=HEAD_NAMES,
-        hidden_dim=3840,
-        logit_cap=10.0,
+        adapter_name="rtheta",
         adapter_rank=config.rank,
         adapter_init_b_std=config.init_b_std,
-        adapter_layer_indices=layer_indices,
-        device=device,
     )
 
     t0 = time.perf_counter()
     training_curve = train_btrm(
-        btrm_model=btrm,
+        model=diff_model,
         training_pairs=training_pairs,
         hidden_states_cpu=hidden_states_cpu,
         n_epochs=config.n_epochs,
@@ -292,7 +290,7 @@ def train_single_config(
     best_pinkify = max(e["accuracy_pinkify"] for e in training_curve)
     best_thisnotthat = max(e["accuracy_thisnotthat"] for e in training_curve)
 
-    n_adapter_params = sum(p.numel() for p in btrm.adapter_params())
+    n_adapter_params = sum(p.numel() for p in get_adapter_params(diff_model, "rtheta").values())
 
     result = SweepResult(
         config_name=config.name,
@@ -319,11 +317,7 @@ def train_single_config(
         json.dump(asdict(result), f, indent=2)
 
     # Persist adapter + head
-    btrm.persist(str(config_dir))
-
-    # Clean up compound model
-    btrm.cleanup()
-    remove_all_adapters(diff_model)
+    persist_btrm(diff_model, "rtheta", str(config_dir))
 
     return result
 
@@ -351,9 +345,9 @@ def main():
 
     # --- Load diffusion model (once, kept in VRAM throughout) ---
     print("\n=== Loading diffusion model ===")
-    from src_ii.model_loading import load_fp8_diffusion_model
+    from src_ii.zimage_model import load_zimage_rlaif
 
-    diff_model, _ = load_fp8_diffusion_model(
+    _, diff_model = load_zimage_rlaif(
         FP8_PATH, device=device, dtype=dtype,
         compile_model=False, fuse=True,
     )
@@ -619,9 +613,9 @@ def run_attention_diffs_for_top3(
     records: list[dict],
 ):
     """Run attention adapter diff capture for the top 3 configs."""
-    from src_ii.model_loading import load_fp8_diffusion_model
-    from src_ii.btrm_model import BTRMCompoundModel
-    from src_ii.attention_capture import AttentionCapture
+    from src_ii.zimage_model import load_zimage_rlaif
+    from src_ii.btrm_lifecycle import load_btrm
+    from src_ii.multi_lora import install_multi_lora, MultiLoRALinear
     from src_ii.stats import sigma_for_step
     from futudiffu.sampling import make_rope_cache
     from futudiffu.attention import set_attention_backend
@@ -656,9 +650,9 @@ def run_attention_diffs_for_top3(
         with open(config_dir / "btrm_compound_config.json") as f:
             compound_config = json.load(f)
 
-        # Reload diffusion model fresh
+        # Reload model fresh
         set_attention_backend("sdpa")
-        diff_model, _ = load_fp8_diffusion_model(
+        _, diff_model = load_zimage_rlaif(
             FP8_PATH, device=device, dtype=dtype,
             compile_model=False, fuse=True,
         )
@@ -667,8 +661,16 @@ def run_attention_diffs_for_top3(
             p.requires_grad_(False)
         dm_mod.sdpa_attention = attn_mod.sdpa_attention
 
-        # Load compound BTRM model with this config's weights
-        compound = BTRMCompoundModel.load(str(config_dir), diff_model, device=device)
+        # Install LoRA wrappers and load this config's weights
+        install_multi_lora(diff_model, [{"name": "rtheta", "rank": 8, "alpha": 16.0}])
+        load_btrm(diff_model, "rtheta", str(config_dir))
+
+        # Helper to globally set adapter scale
+        def _set_global_adapter_scale(scale: float):
+            scale_t = torch.tensor([scale], device=device)
+            for m in diff_model.modules():
+                if isinstance(m, MultiLoRALinear):
+                    m._adapter_scales = scale_t
 
         # Install attention capture
         capture = AttentionCapture()
@@ -699,13 +701,13 @@ def run_attention_diffs_for_top3(
             rope_cache = make_rope_cache(diff_model, H, W, num_tokens, device)
 
             # Forward A: scale=0 (unadapted)
-            compound.set_adapter_scale(0.0)
+            _set_global_adapter_scale(0.0)
             stats_a = capture.capture_forward(
                 diff_model, latent, timestep, conditioning, num_tokens, rope_cache,
             )
 
             # Forward B: scale=1 (adapter active)
-            compound.set_adapter_scale(1.0)
+            _set_global_adapter_scale(1.0)
             stats_b = capture.capture_forward(
                 diff_model, latent, timestep, conditioning, num_tokens, rope_cache,
             )
@@ -767,11 +769,9 @@ def run_attention_diffs_for_top3(
             json.dump(attn_manifest, f, indent=2)
 
         # Clean up
-        compound.set_adapter_scale(1.0)
+        _set_global_adapter_scale(1.0)
         capture.remove()
-        compound.cleanup()
-        remove_all_adapters(diff_model)
-        del compound, diff_model, capture
+        del diff_model, capture
         gc.collect()
         torch.cuda.empty_cache()
 

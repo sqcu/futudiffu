@@ -113,26 +113,25 @@ def main():
     # Phase 4: Load FP8 backbone
     # -----------------------------------------------------------------------
     print("\n[Phase 4] Loading FP8 backbone (no compile for verification)...")
-    from src_ii.model_loading import load_fp8_diffusion_model
+    from src_ii.zimage_model import load_zimage_rlaif
+    from src_ii.btrm_lifecycle import load_btrm, score_serial
+    from src_ii.multi_lora import install_multi_lora, get_adapter_params
 
-    _, diff_model = load_fp8_diffusion_model(
+    _, raw_model = load_zimage_rlaif(
         FP8_PATH, device=device, dtype=dtype,
         compile_model=False, fuse=True,
     )
     print(f"  VRAM after backbone: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
     # -----------------------------------------------------------------------
-    # Phase 5: Load compound model via BTRMCompoundModel.load()
+    # Phase 5: Load compound model from persisted weights
     # -----------------------------------------------------------------------
-    print("\n[Phase 5] Loading BTRMCompoundModel from persisted weights...")
-    from src_ii.btrm_model import BTRMCompoundModel
+    print("\n[Phase 5] Loading BTRM model from persisted weights...")
 
-    btrm_model = BTRMCompoundModel.load(
-        str(RUN_DIR),
-        diff_model,
-        device=device,
-    )
-    btrm_model.eval_mode()
+    install_multi_lora(raw_model, [{"name": "rtheta", "rank": 8, "alpha": 16.0}])
+    load_btrm(raw_model, "rtheta", str(RUN_DIR))
+    raw_model.gradient_checkpointing = False
+    raw_model.eval()
     print(f"  Compound model loaded. VRAM: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
     # -----------------------------------------------------------------------
@@ -145,9 +144,11 @@ def main():
     saved_adapter_sd = load_file(str(adapter_path))
     saved_head_sd = load_file(str(head_path))
 
-    from futudiffu.lora import lora_state_dict
-    loaded_adapter_sd = lora_state_dict(diff_model, adapter_name=config["adapter_name"])
-    loaded_head_sd = dict(btrm_model.head.state_dict())
+    loaded_adapter_sd = {k: v.data for k, v in get_adapter_params(raw_model, config["adapter_name"]).items()}
+    loaded_head_sd = {}
+    for name, param in raw_model.named_parameters():
+        if "score_proj" in name or "score_norm" in name:
+            loaded_head_sd[name] = param.data
 
     weight_results = {}
     all_weights_exact = True
@@ -208,7 +209,6 @@ def main():
     # Phase 7: Re-run forward passes for each test entry
     # -----------------------------------------------------------------------
     print("\n[Phase 7] Re-running forward passes for test entries...")
-    from src_ii.rollout import make_rope_cache
     from src_ii.sigma_schedule import build_sigma_schedule, resolution_shift
 
     score_results = []
@@ -265,15 +265,12 @@ def main():
             continue
         cond = cond_cpu.to(device=device, dtype=dtype)
 
-        # Build RoPE cache
-        latent_h = meta.get("latent_height") or (meta.get("height", 832) // 8)
-        latent_w = meta.get("latent_width") or (meta.get("width", 1280) // 8)
         num_tokens = cond.shape[1]
-        rope_cache = make_rope_cache(diff_model, latent_h, latent_w, num_tokens, device)
 
-        # Score via loaded compound model (inference path, same as training script)
+        # Score via loaded model (inference path, same as training script)
         with torch.no_grad():
-            scores = btrm_model.score(latent, timestep, cond, num_tokens, rope_cache)
+            scores = score_serial(raw_model, latent, timestep, cond, num_tokens,
+                                  gradient_checkpointing=False)
 
         post_pinkify = float(scores[0, 0].item())
         post_thisnotthat = float(scores[0, 1].item())
@@ -358,7 +355,6 @@ def main():
     print(f"  Output:  {OUTPUT_PATH}")
     print("=" * 60)
 
-    btrm_model.cleanup()
     reader.close()
 
     return 0 if verdict == "PASS" else 1

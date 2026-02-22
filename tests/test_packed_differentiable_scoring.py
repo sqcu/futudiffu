@@ -77,7 +77,11 @@ def main():
     print("=" * 60)
 
     from stubbed_skinny_shared import load_sss_model, make_random_conditioning, SSS_DIM
-    from src_ii.btrm_model import BTRMCompoundModel
+    from src_ii.btrm_lifecycle import (
+        setup_btrm_training, score_packed, score_serial,
+        get_all_trainable_params, persist_btrm,
+    )
+    from src_ii.multi_lora import get_adapter_params
 
     t0 = time.perf_counter()
     backbone = load_sss_model(device=device)
@@ -85,24 +89,23 @@ def main():
     print(f"  Model loaded in {load_time:.2f}s")
     print(f"  VRAM: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
-    # Create BTRMCompoundModel with S-S-S hidden dim
-    btrm = BTRMCompoundModel(
+    # Set up BTRM training on the model (installs LoRA, freezes base, creates optimizer)
+    ADAPTER_NAME = "rtheta"
+    optimizer = setup_btrm_training(
         backbone,
-        adapter_name="rtheta",
+        adapter_name=ADAPTER_NAME,
         adapter_rank=8,
         adapter_alpha=16.0,
         adapter_init_b_std=0.01,
-        head_names=HEAD_NAMES,
-        hidden_dim=SSS_DIM,
-        logit_cap=10.0,
-        device=device,
+        lr=3e-4,
+        gradient_checkpointing=True,
     )
-    btrm.train_mode()
 
-    adapter_params = btrm.adapter_params()
+    adapter_params = list(get_adapter_params(backbone, ADAPTER_NAME).values())
+    all_trainable = get_all_trainable_params(backbone, ADAPTER_NAME)
     n_adapter = sum(p.numel() for p in adapter_params)
     print(f"  Adapter params: {n_adapter:,}")
-    print(f"  Head params: {sum(p.numel() for p in btrm.head_params()):,}")
+    print(f"  Total trainable params: {sum(p.numel() for p in all_trainable):,}")
 
     # ===================================================================
     # Phase 2: Prepare test images
@@ -144,8 +147,8 @@ def main():
     serial_times = []
     for i, (lat, ts, cond, nt, rc) in enumerate(test_images):
         t0 = time.perf_counter()
-        score = btrm.score_differentiable(
-            lat, ts, cond, nt, rc,
+        score = score_serial(
+            backbone, lat, ts, cond, nt,
             gradient_checkpointing=True,
         )
         elapsed = time.perf_counter() - t0
@@ -173,10 +176,10 @@ def main():
     ]
 
     t0 = time.perf_counter()
-    packed_all = btrm.score_differentiable_packed(
+    packed_all = score_packed(
+        backbone,
         packed_images,
         gradient_checkpointing=True,
-        force_sdpa=False,  # Use SageAttention masked
     )
     packed_time = time.perf_counter() - t0
     print(f"  Packed scores shape: {packed_all.shape}")
@@ -236,15 +239,15 @@ def main():
     print("=" * 60)
 
     # Zero all gradients
-    for p in btrm.all_trainable_params():
+    for p in all_trainable:
         if p.grad is not None:
             p.grad.zero_()
 
     # Score via packed path
-    packed_scores = btrm.score_differentiable_packed(
+    packed_scores = score_packed(
+        backbone,
         packed_images,
         gradient_checkpointing=True,
-        force_sdpa=False,
     )
 
     # Construct a dummy BT loss from two images
@@ -269,11 +272,12 @@ def main():
                 n_nonzero_grad += 1
             max_grad = max(max_grad, g_max)
 
-    # Check head gradients
+    # Check head gradients (score_proj + score_norm on the model)
+    head_params = list(backbone.score_proj.parameters()) + list(backbone.score_norm.parameters())
     head_n_with_grad = 0
     head_n_nonzero = 0
     head_max_grad = 0.0
-    for p in btrm.head_params():
+    for p in head_params:
         if p.grad is not None:
             head_n_with_grad += 1
             g_max = p.grad.abs().max().item()
@@ -314,10 +318,10 @@ def main():
 
     two_images = packed_images[:2]
     t0 = time.perf_counter()
-    two_scores = btrm.score_differentiable_packed(
+    two_scores = score_packed(
+        backbone,
         two_images,
         gradient_checkpointing=True,
-        force_sdpa=False,
     )
     two_time = time.perf_counter() - t0
 
@@ -363,7 +367,8 @@ def main():
     print(f"\n  Report saved to: {report_path}")
 
     # Cleanup
-    btrm.cleanup()
+    del backbone
+    torch.cuda.empty_cache()
 
     if overall == "FAIL":
         sys.exit(2)

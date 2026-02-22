@@ -13,7 +13,7 @@ Usage:
     artifacts.log_step(step, loss, accuracy_dict, grad_norm, lr, extra_metrics)
 
     # At checkpoints:
-    artifacts.save_checkpoint(step, btrm_model)
+    artifacts.save_checkpoint(step, model, adapter_name="rtheta")
 
     # After training:
     artifacts.generate_analysis()  # produces charts/ + training_analysis.md
@@ -429,19 +429,27 @@ class TrainingArtifacts:
     # Checkpoint saving
     # -----------------------------------------------------------------------
 
-    def save_checkpoint(self, step: int, btrm_model) -> Path:
+    def save_checkpoint(
+        self,
+        step: int,
+        model,
+        adapter_name: str = "rtheta",
+    ) -> Path:
         """Save adapter + head state at a checkpoint step.
 
         Args:
             step: Current training step.
-            btrm_model: BTRMCompoundModel instance with .persist() method.
+            model: ZImageRLAIF model instance.
+            adapter_name: LoRA adapter name to persist.
 
         Returns:
             Path to the checkpoint directory.
         """
+        from src_ii.btrm_lifecycle import persist_btrm
+
         ckpt_dir = self.output_dir / f"checkpoint_step{step:03d}"
         ckpt_dir.mkdir(parents=True, exist_ok=True)
-        btrm_model.persist(str(ckpt_dir))
+        persist_btrm(model, adapter_name, str(ckpt_dir))
         return ckpt_dir
 
     # -----------------------------------------------------------------------

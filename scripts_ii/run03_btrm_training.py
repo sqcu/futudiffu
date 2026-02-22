@@ -40,7 +40,9 @@ from src_ii.bin_packer import (
     build_generation_plan,
     compute_seq_len,
 )
-from src_ii.btrm_model import BTRMCompoundModel
+from src_ii.zimage_model import load_zimage_rlaif
+from src_ii.btrm_lifecycle import setup_btrm_training, persist_btrm, get_all_trainable_params
+from src_ii.multi_lora import get_adapter_params
 from src_ii.btrm_training import train_btrm_differentiable
 from src_ii.dataset_generator import DatasetGenerationConfig, DatasetGenerator
 from src_ii.pair_sampler import BTRMPairSampler, build_positions_from_v2
@@ -422,11 +424,9 @@ def phase2_train(client: InferenceClient, gen_dataset_dir: Path):
     # ---------------------------------------------------------------
     print("\n--- Loading backbone model ---")
 
-    from src_ii.model_loading import load_fp8_diffusion_model
-
     # Load WITHOUT compilation (training uses forward_checkpointed, not diff_compiled)
     # This avoids Defect R2-03 (inductor SymPy recursion with LoRA)
-    _, diff_model = load_fp8_diffusion_model(
+    _, raw_model = load_zimage_rlaif(
         FP8_WEIGHTS,
         device=torch.device("cuda"),
         dtype=torch.bfloat16,
@@ -439,24 +439,14 @@ def phase2_train(client: InferenceClient, gen_dataset_dir: Path):
     # ---------------------------------------------------------------
     print("\n--- Creating BTRM compound model ---")
 
-    btrm_model = BTRMCompoundModel(
-        diff_model,
-        adapter_name="rtheta",
-        adapter_rank=8,
-        adapter_alpha=16.0,
-        adapter_init_b_std=0.01,
-        head_names=HEAD_NAMES,
-        hidden_dim=3840,
-        logit_cap=10.0,
-    )
+    optimizer = setup_btrm_training(raw_model)
 
     # Verify adapter params are in the model
-    adapter_params = btrm_model.adapter_params()
-    head_params = btrm_model.head_params()
-    all_params = btrm_model.all_trainable_params()
+    adapter_params_dict = get_adapter_params(raw_model, "rtheta")
+    head_params_list = list(raw_model.score_proj.parameters()) + list(raw_model.score_norm.parameters())
 
-    n_adapter = sum(p.numel() for p in adapter_params)
-    n_head = sum(p.numel() for p in head_params)
+    n_adapter = sum(p.numel() for p in adapter_params_dict.values())
+    n_head = sum(p.numel() for p in head_params_list)
     print(f"  Adapter params: {n_adapter:,}")
     print(f"  Head params: {n_head:,}")
     print(f"  Total trainable: {n_adapter + n_head:,}")
@@ -492,7 +482,7 @@ def phase2_train(client: InferenceClient, gen_dataset_dir: Path):
         """Load a latent + conditioning for BTRM training.
 
         key is a (traj_id, step_key) tuple (from pair sampler).
-        Returns: (latent, timestep, conditioning, num_tokens, rope_cache)
+        Returns: (latent, timestep, conditioning, num_tokens)
         """
         traj_id, step_key = key
         info = all_traj_meta[traj_id]
@@ -538,19 +528,9 @@ def phase2_train(client: InferenceClient, gen_dataset_dir: Path):
             # Fallback: use negative conditioning
             cond = neg_cond.to(device="cuda")
 
-        # Build RoPE cache
-        from src_ii.rollout import make_rope_cache
-
-        latent_h = meta.get("latent_height") or (meta.get("height", 832) // 8)
-        latent_w = meta.get("latent_width") or (meta.get("width", 1280) // 8)
         num_tokens = cond.shape[1]
 
-        rope_cache = make_rope_cache(
-            diff_model, latent_h, latent_w, num_tokens,
-            device=torch.device("cuda"),
-        )
-
-        return latent, timestep, cond, num_tokens, rope_cache
+        return latent, timestep, cond, num_tokens
 
     # ---------------------------------------------------------------
     # 2g: Run training
@@ -580,11 +560,11 @@ def phase2_train(client: InferenceClient, gen_dataset_dir: Path):
         # Checkpoint at intervals
         if (step + 1) % BTRM_CHECKPOINT_INTERVAL == 0:
             ckpt_dir = OUTPUT_DIR / f"btrm_ckpt_{step + 1:04d}"
-            btrm_model.persist(str(ckpt_dir))
+            persist_btrm(raw_model, "rtheta", str(ckpt_dir))
             print(f"    [checkpoint] saved to {ckpt_dir}")
 
     training_curve = train_btrm_differentiable(
-        btrm_model=btrm_model,
+        model=raw_model,
         pair_sampler=sampler,
         load_latent_fn=load_latent_fn,
         preference_fn=preference_fn,
@@ -611,7 +591,7 @@ def phase2_train(client: InferenceClient, gen_dataset_dir: Path):
     # ---------------------------------------------------------------
     print("\n--- Saving final weights ---")
     final_dir = OUTPUT_DIR / "final"
-    manifest = btrm_model.persist(str(final_dir))
+    manifest = persist_btrm(raw_model, "rtheta", str(final_dir))
 
     # Print sampler stats
     stats = sampler.stats()

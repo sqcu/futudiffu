@@ -24,7 +24,7 @@ Lifecycle axes (from user_dataflow_and_lifecycle_rollup.md):
   5. Optimizer state residency: BTRM optimizer + policy optimizers live on
      GPU, co-resident with weights. Exposed via train_btrm_step /
      policy_optimizer_step / accumulate_policy_gradients.
-  6. Activation checkpointing: delegated to src_ii/btrm_model.py. Server
+  6. Activation checkpointing: model.gradient_checkpointing attribute. Server
      passes gradient_checkpointing params through.
   7. Rollout-training coupling: the SAME server process handles both rollout
      generation (sample_trajectory) and training (train_btrm_step,
@@ -93,7 +93,7 @@ class ModelBackend(Protocol):
     """Protocol that any model backend must implement.
 
     The real backend (GPUModelBackend) wraps src_ii model_loading, rollout,
-    btrm_model, etc. A mock backend can be injected for testing.
+    btrm_lifecycle, etc. A mock backend can be injected for testing.
 
     Methods correspond 1:1 to the server's RPC handlers.
     """
@@ -133,6 +133,9 @@ class ModelBackend(Protocol):
     # Policy
     def accumulate_policy_gradients(self, params: dict, tensor_bytes: bytes) -> dict: ...
     def policy_optimizer_step(self, params: dict) -> dict: ...
+
+    # Batch forward (fork-and-mutate)
+    def batch_forward(self, params: dict, tensor_bytes: bytes) -> tuple[dict, dict]: ...
 
 
 # ---------------------------------------------------------------------------
@@ -572,6 +575,44 @@ def create_app(
         result = backend.policy_optimizer_step(req.model_dump())
         return ServerResponse(metadata=result)
 
+    # --- Batch forward (fork-and-mutate, SCATTER->PACKSOLVE->EXECUTE->DENOISE) ---
+
+    @app.post("/batch_forward")
+    @_timed("batch_forward")
+    async def batch_forward(request: Request):
+        """Execute N fork specs through the model, return tagged (field, score) results.
+
+        Accepts multipart or JSON+b64 encoding.
+        params: {queries: [...]}  -- see BatchExecutor.execute() for query schema
+        tensors: safetensors blob with all literal tensors keyed by name
+
+        Response: safetensors bytes with flattened result tensors + X-Metadata header
+        with entry tags [{query_id, entry_id, denoised_key, score_key}, ...].
+        """
+        content_type = request.headers.get("content-type", "")
+
+        if "multipart" in content_type:
+            form = await request.form()
+            params = await _parse_json_field(form.get("params", "{}"))
+            tensor_bytes = await _read_upload(form.get("tensors"))
+            tensors = _safetensors_bytes_to_tensors(tensor_bytes) if tensor_bytes else {}
+        else:
+            body = await request.json()
+            params = body.get("params", {})
+            tensors = _b64_to_tensors(body.get("tensors", {}))
+
+        result_tensors, metadata = backend.batch_forward(params, tensors)
+        st_bytes = _tensors_to_safetensors_bytes(result_tensors)
+
+        return StreamingResponse(
+            io.BytesIO(st_bytes),
+            media_type="application/octet-stream",
+            headers={
+                "X-Tensor-Format": "safetensors",
+                "X-Metadata": _json_encode(metadata),
+            },
+        )
+
     # --- Health check ---
 
     @app.get("/health")
@@ -673,6 +714,9 @@ class GPUModelBackend:
 
         # Policy state
         self._policy_optimizers: dict = {}
+
+        # Batch executor (lazy-initialized after diffusion model loads)
+        self._batch_executor = None
 
     # --- Status ---
 
@@ -1195,3 +1239,73 @@ class GPUModelBackend:
             self._diff_model, self._policy_optimizers,
             self._device, self._dtype, params,
         )
+
+    # --- Batch forward ---
+
+    def _ensure_batch_executor(self):
+        if self._batch_executor is not None:
+            return
+        from src_ii.batch_executor import BatchExecutor
+        self._batch_executor = BatchExecutor(
+            self._diff_model, device=self._device,
+        )
+
+    def batch_forward(self, params: dict, tensors: dict) -> tuple[dict, dict]:
+        """Execute fork specs: SCATTER -> PACKSOLVE -> EXECUTE -> DENOISE.
+
+        params["queries"]: list of query dicts. Literal tensors are embedded
+        directly — client pre-resolves tensor names to actual tensors before
+        calling this method. (Over HTTP the endpoint does the lookup from
+        the safetensors blob using tensor_key fields in the query.)
+
+        Returns (result_tensors, metadata) where result_tensors is a flat dict
+        keyed "denoised_{query_id}_{entry_id}" and metadata["tags"] lists
+        [{query_id, entry_id, denoised_key, score_key}, ...].
+        """
+        import torch
+        self._ensure_diffusion()
+        self._ensure_batch_executor()
+
+        queries_raw = params.get("queries", [])
+        # Resolve tensor references: query fields ending in "_key" are
+        # looked up in the tensors dict; plain tensor values pass through.
+        queries = []
+        for q in queries_raw:
+            resolved = dict(q)
+            # base_latent and base_cond may arrive as tensor_key strings
+            for field in ("base_latent", "base_cond"):
+                key_field = field + "_key"
+                if key_field in q and q[key_field] in tensors:
+                    resolved[field] = tensors[q[key_field]].to(self._device)
+            # forks: resolve cond tensors
+            resolved_forks = []
+            for fork in q.get("forks", []):
+                rf = dict(fork)
+                cond_key = fork.get("cond_key")
+                if cond_key and cond_key in tensors:
+                    rf["cond"] = tensors[cond_key].to(self._device)
+                resolved_forks.append(rf)
+            resolved["forks"] = resolved_forks
+            # adapter_scales
+            as_key = q.get("adapter_scales_key")
+            if as_key and as_key in tensors:
+                resolved["adapter_scales"] = tensors[as_key].to(self._device)
+            queries.append(resolved)
+
+        results = self._batch_executor.execute(queries)
+
+        # Flatten to safetensors-serializable dict + tag metadata
+        result_tensors = {}
+        tags = []
+        for r in results:
+            qid, eid = r["query_id"], r["entry_id"]
+            d_key = f"denoised_{qid}_{eid}"
+            result_tensors[d_key] = r["denoised"]
+            tag = {"query_id": qid, "entry_id": eid, "denoised_key": d_key}
+            if r["scores"] is not None:
+                s_key = f"scores_{qid}_{eid}"
+                result_tensors[s_key] = r["scores"]
+                tag["score_key"] = s_key
+            tags.append(tag)
+
+        return result_tensors, {"tags": tags, "n_entries": len(results)}

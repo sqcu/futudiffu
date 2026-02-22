@@ -182,12 +182,12 @@ def main():
     # =================================================================
     print("\n--- Phase 3: Loading backbone + creating BTRM model ---")
 
-    from src_ii.model_loading import load_fp8_diffusion_model
-    from src_ii.btrm_model import BTRMCompoundModel
-    from src_ii.rollout import make_rope_cache
+    from src_ii.zimage_model import load_zimage_rlaif
+    from src_ii.btrm_lifecycle import setup_btrm_training, get_all_trainable_params, score_serial, score_packed
+    from src_ii.multi_lora import get_adapter_params
     from src_ii.sigma_schedule import build_sigma_schedule, resolution_shift
 
-    _, diff_model = load_fp8_diffusion_model(
+    _, raw_model = load_zimage_rlaif(
         FP8_PATH, device=device, dtype=dtype,
         compile_model=False, fuse=True,
     )
@@ -195,27 +195,18 @@ def main():
     vram_post_backbone = torch.cuda.memory_allocated() / 1e9
     print(f"  Backbone loaded. VRAM: {vram_post_backbone:.2f} GB")
 
-    btrm_model = BTRMCompoundModel(
-        diff_model,
-        adapter_name="rtheta",
-        adapter_rank=8,
-        adapter_alpha=16.0,
-        adapter_init_b_std=0.01,
-        head_names=("pinkify", "thisnotthat"),
-        hidden_dim=3840,
-        logit_cap=10.0,
-        device=device,
-    )
+    optimizer = setup_btrm_training(raw_model)
 
-    adapter_params = btrm_model.adapter_params()
-    head_params = btrm_model.head_params()
+    adapter_params = list(get_adapter_params(raw_model, "rtheta").values())
+    head_params = list(raw_model.score_proj.parameters()) + list(raw_model.score_norm.parameters())
     n_adapter = sum(p.numel() for p in adapter_params)
     n_head = sum(p.numel() for p in head_params)
     print(f"  Adapter params: {n_adapter:,}")
     print(f"  Head params: {n_head:,}")
     print(f"  VRAM after BTRM: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
-    btrm_model.train_mode()
+    raw_model.gradient_checkpointing = True
+    raw_model.train()
 
     results["phases"]["model_setup"] = {
         "n_adapter_params": n_adapter,
@@ -264,21 +255,16 @@ def main():
         cond = prompt_cache[prompt].to(device=device, dtype=dtype)
         num_tokens = cond.shape[1]
 
-        latent_h = meta.get("latent_height") or (meta.get("height", 832) // 8)
-        latent_w = meta.get("latent_width") or (meta.get("width", 1280) // 8)
-        rope_cache = make_rope_cache(diff_model, latent_h, latent_w, num_tokens, device)
-
-        return latent, timestep, cond, num_tokens, rope_cache
+        return latent, timestep, cond, num_tokens
 
     per_image_inputs = []
     for spec in image_specs:
-        lat, ts, cond, nt, rc = load_image_for_scoring(spec)
+        lat, ts, cond, nt = load_image_for_scoring(spec)
         per_image_inputs.append({
             "latent": lat,
             "timestep": ts,
             "conditioning": cond,
             "num_tokens": nt,
-            "rope_cache": rc,
             "spec": spec,
         })
         print(f"  {spec['label']}: latent={lat.shape}, sigma={ts.item():.4f}, "
@@ -289,11 +275,6 @@ def main():
     # =================================================================
     print("\n--- Phase 5: Serial scoring (reference) ---")
 
-    # Set attention backend to sage for serial path too, so the only
-    # difference between serial and packed is the masking, not the backend.
-    from futudiffu.attention import set_attention_backend
-    set_attention_backend("sage")
-
     serial_scores = []
     serial_times = []
 
@@ -302,15 +283,14 @@ def main():
         print(f"  [{i+1}/{len(per_image_inputs)}] {spec['label']} ... ", end="", flush=True)
 
         # Zero grads before each serial scoring
-        for p in btrm_model.all_trainable_params():
+        for p in get_all_trainable_params(raw_model, "rtheta"):
             if p.grad is not None:
                 p.grad.zero_()
 
         t0 = time.perf_counter()
-        scores = btrm_model.score_differentiable(
-            inp["latent"], inp["timestep"], inp["conditioning"],
-            inp["num_tokens"], inp["rope_cache"],
-            gradient_checkpointing=True,
+        scores = score_serial(
+            raw_model, inp["latent"], inp["timestep"], inp["conditioning"],
+            inp["num_tokens"], gradient_checkpointing=True,
         )
         t1 = time.perf_counter()
 
@@ -349,7 +329,7 @@ def main():
     print("\n--- Phase 6: Packed scoring ---")
 
     # Zero all grads
-    for p in btrm_model.all_trainable_params():
+    for p in get_all_trainable_params(raw_model, "rtheta"):
         if p.grad is not None:
             p.grad.zero_()
 
@@ -361,10 +341,10 @@ def main():
 
     print(f"  Packing {len(packed_images)} images into one forward pass...")
     t0 = time.perf_counter()
-    packed_scores = btrm_model.score_differentiable_packed(
+    packed_scores = score_packed(
+        raw_model,
         packed_images,
         gradient_checkpointing=True,
-        force_sdpa=False,  # Use SageAttention masked for packed
     )
     t1 = time.perf_counter()
     packed_time = t1 - t0
@@ -567,8 +547,7 @@ def main():
     print(f"Summary saved to: {summary_path}")
 
     # Cleanup
-    btrm_model.cleanup()
-    del btrm_model, diff_model
+    del raw_model
     torch.cuda.empty_cache()
 
     return 0 if overall_pass else 1

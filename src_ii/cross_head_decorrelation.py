@@ -82,7 +82,7 @@ def _spearman_rho(x: list[float], y: list[float]) -> float:
 
 
 def measure_cross_head_decorrelation(
-    btrm_model,
+    model,
     latent_cache: dict[str, dict],
     head_names: Sequence[str] = ("pinkify", "thisnotthat"),
     device: torch.device | None = None,
@@ -93,11 +93,11 @@ def measure_cross_head_decorrelation(
     pairwise Spearman rho between head score vectors.
 
     Args:
-        btrm_model: BTRMCompoundModel instance.
+        model: ZImageRLAIF model instance.
         latent_cache: Dict mapping image label to cached latent data
             (same format as score_pinkify_cached uses: each value is a
             dict with "latent", "timestep", "conditioning", "num_tokens").
-        head_names: Names of heads to measure. Must exist in the model.
+        head_names: Names of heads to measure. Length must match model.n_score_heads.
         device: CUDA device.
 
     Returns:
@@ -109,18 +109,12 @@ def measure_cross_head_decorrelation(
     if device is None:
         device = torch.device("cuda")
 
-    from src_ii.rollout import make_rope_cache
+    from src_ii.btrm_lifecycle import score_serial
 
-    # Resolve head indices
-    model_head_names = list(btrm_model.head.head_names) if hasattr(btrm_model.head, "head_names") else list(head_names)
-    head_indices = {}
-    for name in head_names:
-        if name in model_head_names:
-            head_indices[name] = model_head_names.index(name)
-        else:
-            raise ValueError(f"Head '{name}' not found. Available: {model_head_names}")
+    # Resolve head indices (positional — head_names[i] = score column i)
+    head_indices = {name: i for i, name in enumerate(head_names)}
 
-    btrm_model.eval_mode()
+    model.eval()
 
     # Score all images with each head
     head_scores = {name: {} for name in head_names}
@@ -134,13 +128,9 @@ def measure_cross_head_decorrelation(
             conditioning = cached["conditioning"]
             num_tokens = cached["num_tokens"]
 
-            _, _, lat_h, lat_w = latent.shape
-            rope_cache = make_rope_cache(
-                btrm_model.backbone, lat_h, lat_w, num_tokens, device,
-            )
-
-            score_tensor = btrm_model.score(
-                latent, timestep, conditioning, num_tokens, rope_cache,
+            score_tensor = score_serial(
+                model, latent, timestep, conditioning, num_tokens,
+                gradient_checkpointing=False,
             )  # (1, N_heads)
 
             for name in head_names:

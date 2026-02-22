@@ -257,9 +257,9 @@ def main():
     print("  Phase 3: Loading backbone, creating compound model")
     print("=" * 60)
 
-    from src_ii.model_loading import load_fp8_diffusion_model
-    from src_ii.btrm_model import BTRMCompoundModel
-    from src_ii.rollout import make_rope_cache
+    from src_ii.zimage_model import load_zimage_rlaif
+    from src_ii.btrm_lifecycle import setup_btrm_training, persist_btrm, load_btrm, get_all_trainable_params
+    from src_ii.multi_lora import install_multi_lora, get_adapter_params
     from src_ii.sigma_schedule import build_sigma_schedule, resolution_shift
 
     # NOTE: compile_model=False because training uses per-block gradient
@@ -268,7 +268,7 @@ def main():
     # individually checkpointed, so the activation memory is bounded by
     # a single layer's activations (not all 30). This is the correct
     # pattern for 24 GB VRAM training -- see model_manager.compile_layers_for_training().
-    _, diff_model = load_fp8_diffusion_model(
+    _, raw_model = load_zimage_rlaif(
         FP8_PATH, device=device, dtype=dtype,
         compile_model=False, fuse=True,
     )
@@ -324,12 +324,9 @@ def main():
                 raise ValueError(f"No cached prompt for traj {traj_id}: '{prompt[:60]}...'")
             cond = cond.to(device=device, dtype=dtype)
 
-            latent_h = h // 8
-            latent_w = w // 8
             num_tokens = cond.shape[1]
-            rope_cache = make_rope_cache(diff_model, latent_h, latent_w, num_tokens, device)
 
-            return latent, timestep, cond, num_tokens, rope_cache
+            return latent, timestep, cond, num_tokens
 
         else:
             # V1 path: read .pt files directly
@@ -364,19 +361,15 @@ def main():
                 raise ValueError(f"No cached prompt for traj {traj_id}: '{prompt[:60]}...'")
             cond = cond.to(device=device, dtype=dtype)
 
-            latent_h = rec.get("latent_height") or (rec.get("height", 832) // 8)
-            latent_w = rec.get("latent_width") or (rec.get("width", 1280) // 8)
             num_tokens = cond.shape[1]
 
-            rope_cache = make_rope_cache(diff_model, latent_h, latent_w, num_tokens, device)
-
-            return latent, timestep, cond, num_tokens, rope_cache
+            return latent, timestep, cond, num_tokens
 
     # Validate load_latent_fn
     test_key = (traj_indices[0], positions[0].step_key)
-    lat, ts, cond, nt, rc = load_latent_fn(test_key)
+    lat, ts, cond, nt = load_latent_fn(test_key)
     print(f"  Test load: latent={lat.shape}, timestep={ts.shape}, cond={cond.shape}, nt={nt}")
-    del lat, ts, cond, rc
+    del lat, ts, cond
     torch.cuda.empty_cache()
 
     # Simple preference function: deterministic from pair metadata
@@ -403,17 +396,7 @@ def main():
     print("=" * 60)
 
     # Create fresh compound model for packed run
-    btrm_packed = BTRMCompoundModel(
-        diff_model,
-        adapter_name="rtheta",
-        adapter_rank=8,
-        adapter_alpha=16.0,
-        adapter_init_b_std=0.01,
-        head_names=HEAD_NAMES,
-        hidden_dim=3840,
-        logit_cap=10.0,
-        device=device,
-    )
+    optimizer = setup_btrm_training(raw_model)
 
     from src_ii.btrm_training import train_btrm_differentiable
     from src_ii.training_artifacts import TrainingArtifacts
@@ -431,7 +414,7 @@ def main():
     )
 
     packed_curve = train_btrm_differentiable(
-        btrm_model=btrm_packed,
+        model=raw_model,
         pair_sampler=packed_sampler,
         load_latent_fn=load_latent_fn,
         preference_fn=preference_fn,
@@ -447,7 +430,6 @@ def main():
         lr_schedule="warmup_only",
         packed=True,
         pairs_per_pack=PAIRS_PER_PACK,
-        force_sdpa=False,   # Use SageAttention INT8 QK for production memory profile
         output_dir=str(PACKED_DIR),
         artifacts=packed_artifacts,
     )
@@ -463,7 +445,7 @@ def main():
     print(f"  Packed analysis generated: {PACKED_DIR / 'charts'}")
 
     # Collect packed gradient stats
-    packed_grad_stats = _collect_grad_stats(btrm_packed)
+    packed_grad_stats = _collect_grad_stats(raw_model)
     results["packed"] = {
         "time_s": packed_time,
         "time_per_step_s": packed_time / N_STEPS,
@@ -472,14 +454,10 @@ def main():
     }
 
     # Save packed adapter
-    packed_persist = btrm_packed.persist(str(PACKED_DIR))
+    packed_persist = persist_btrm(raw_model, "rtheta", str(PACKED_DIR))
     results["packed"]["persist"] = packed_persist
 
-    # Clean up packed model's adapter before serial run
-    btrm_packed.cleanup()
-
-    # Need to reload the backbone for a fresh adapter
-    # Actually we can just reallocate the adapter since we haven't compiled
+    # Re-initialize adapter for serial run
     torch.cuda.empty_cache()
 
     # ==================================================================
@@ -489,18 +467,8 @@ def main():
     print(f"  Phase 5: Serial training ({N_STEPS} steps)")
     print("=" * 60)
 
-    # Create fresh compound model for serial run
-    btrm_serial = BTRMCompoundModel(
-        diff_model,
-        adapter_name="rtheta",
-        adapter_rank=8,
-        adapter_alpha=16.0,
-        adapter_init_b_std=0.01,
-        head_names=HEAD_NAMES,
-        hidden_dim=3840,
-        logit_cap=10.0,
-        device=device,
-    )
+    # Re-setup BTRM training for serial run (re-initializes adapter + optimizer)
+    optimizer = setup_btrm_training(raw_model)
 
     serial_sampler = _ReplaySampler(fixed_pairs)
 
@@ -514,7 +482,7 @@ def main():
     )
 
     serial_curve = train_btrm_differentiable(
-        btrm_model=btrm_serial,
+        model=raw_model,
         pair_sampler=serial_sampler,
         load_latent_fn=load_latent_fn,
         preference_fn=preference_fn,
@@ -542,7 +510,7 @@ def main():
     })
     print(f"  Serial analysis generated: {SERIAL_DIR / 'charts'}")
 
-    serial_grad_stats = _collect_grad_stats(btrm_serial)
+    serial_grad_stats = _collect_grad_stats(raw_model)
     results["serial"] = {
         "time_s": serial_time,
         "time_per_step_s": serial_time / N_STEPS,
@@ -550,10 +518,8 @@ def main():
         "grad_stats": serial_grad_stats,
     }
 
-    serial_persist = btrm_serial.persist(str(SERIAL_DIR))
+    serial_persist = persist_btrm(raw_model, "rtheta", str(SERIAL_DIR))
     results["serial"]["persist"] = serial_persist
-
-    btrm_serial.cleanup()
 
     # ==================================================================
     # Phase 6: Verify and compare
@@ -697,27 +663,14 @@ def main():
         from src_ii.exemplar_renderer import render_exemplars_from_model
 
         # Reload serial model adapter for exemplar scoring.
-        # BTRMCompoundModel.load() is a classmethod: creates a new compound model
-        # from persisted adapter + head + config files.
         serial_config_path = SERIAL_DIR / "btrm_compound_config.json"
         if serial_config_path.exists():
-            btrm_exemplar = BTRMCompoundModel.load(
-                str(SERIAL_DIR), backbone=diff_model, device=device,
-            )
+            install_multi_lora(raw_model, ["rtheta"])
+            load_btrm(raw_model, "rtheta", str(SERIAL_DIR))
             print(f"  Loaded serial adapter for exemplar scoring")
         else:
-            # Fallback: create fresh (untrained) model
-            btrm_exemplar = BTRMCompoundModel(
-                diff_model,
-                adapter_name="rtheta",
-                adapter_rank=8,
-                adapter_alpha=16.0,
-                adapter_init_b_std=0.01,
-                head_names=HEAD_NAMES,
-                hidden_dim=3840,
-                logit_cap=10.0,
-                device=device,
-            )
+            # Fallback: set up fresh (untrained) model
+            setup_btrm_training(raw_model)
             print(f"  No saved serial model found, using untrained model for exemplar scoring")
 
         # Build sample keys from the first few trajectories and steps
@@ -731,7 +684,7 @@ def main():
 
         exemplar_manifest = render_exemplars_from_model(
             output_dir=str(OUTPUT_DIR / "exemplars"),
-            btrm_model=btrm_exemplar,
+            btrm_model=raw_model,
             load_latent_fn=load_latent_fn,
             sample_keys=sample_keys,
             vae_path=VAE_PATH,
@@ -743,7 +696,6 @@ def main():
         exemplars_rendered = True
         print(f"  Exemplars rendered: {exemplar_manifest}")
 
-        btrm_exemplar.cleanup()
         torch.cuda.empty_cache()
 
     except Exception as e:
@@ -821,7 +773,7 @@ class _ReplaySampler:
         return {"type": "replay", "total_pairs": len(self._pairs), "consumed": self._idx}
 
 
-def _collect_grad_stats(btrm_model) -> dict:
+def _collect_grad_stats(model) -> dict:
     """Collect gradient statistics from the model's trainable parameters."""
     n_total = 0
     n_with_grad = 0
@@ -829,7 +781,7 @@ def _collect_grad_stats(btrm_model) -> dict:
     max_grad = 0.0
     mean_grad = 0.0
 
-    for p in btrm_model.all_trainable_params():
+    for p in get_all_trainable_params(model, "rtheta"):
         n_total += 1
         if p.grad is not None:
             n_with_grad += 1

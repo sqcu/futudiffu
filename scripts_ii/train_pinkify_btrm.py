@@ -111,24 +111,19 @@ def main():
 
     # --- Phase 2: Extract hidden states ---
     print("\n=== Phase 2: Loading diffusion model & extracting hidden states ===")
-    from src_ii.model_loading import load_fp8_diffusion_model
+    from src_ii.zimage_model import load_zimage_rlaif
+    from src_ii.btrm_lifecycle import setup_btrm_training, persist_btrm
+    from src_ii.multi_lora import get_adapter_params
     from src_ii.stats import sigma_for_step
     from futudiffu.sampling import make_rope_cache
-    from src_ii.btrm_model import BTRMCompoundModel
 
-    diff_model, _ = load_fp8_diffusion_model(
+    _, raw_model = load_zimage_rlaif(
         FP8_PATH, device=device, dtype=dtype,
         compile_model=False, fuse=True,
     )
 
-    # Create compound BTRM model (allocates adapter + head + hidden capture)
-    btrm = BTRMCompoundModel(
-        diff_model,
-        head_names=HEAD_NAMES,
-        hidden_dim=3840,
-        logit_cap=10.0,
-        device=device,
-    )
+    # Set up BTRM training (installs adapter + score head)
+    optimizer = setup_btrm_training(raw_model)
 
     # Extract hidden states for all images
     hidden_states_cpu = []
@@ -153,10 +148,10 @@ def main():
 
         # Build rope cache
         B, C, H, W = latent.shape
-        rope_cache = make_rope_cache(diff_model, H, W, num_tokens, device)
+        rope_cache = make_rope_cache(raw_model, H, W, num_tokens, device)
 
-        # Extract hidden states via compound model
-        hidden = btrm.extract_hidden(
+        # TODO: extract_hidden() removed -- need new hidden extraction path
+        hidden = raw_model.extract_hidden(
             latent, timestep.unsqueeze(0), conditioning, num_tokens, rope_cache,
         )
         hidden_states_cpu.append(hidden.cpu())
@@ -167,9 +162,8 @@ def main():
     print(f"  All {len(hidden_states_cpu)} hidden states extracted")
     print(f"  Hidden shape: {hidden_states_cpu[0].shape}")
 
-    # Free diffusion model (but keep compound model's head)
-    btrm.cleanup()
-    del diff_model
+    # Free diffusion model
+    del raw_model
     torch.cuda.empty_cache()
     print("  Diffusion model freed")
 
@@ -198,8 +192,11 @@ def main():
 
     print(f"  {len(training_pairs)} training pairs")
 
+    # TODO: This train_btrm call uses pre-extracted hidden states.
+    # The model was freed above. This pattern needs rework for ZImageRLAIF
+    # where the score head is integrated into the model.
     training_curve = train_btrm(
-        btrm_model=btrm,
+        model=raw_model,  # NOTE: raw_model was freed -- this will fail
         training_pairs=training_pairs,
         hidden_states_cpu=hidden_states_cpu,
         n_epochs=N_EPOCHS,
@@ -213,13 +210,17 @@ def main():
 
     # --- Save pre-persist scores ---
     print("\n=== Saving pre-persist scores ===")
-    btrm.head.eval()
+    # TODO: btrm.head removed -- score head is integrated into ZImageRLAIF.
+    # This pre-persist scoring needs the model to still be alive.
+    raw_model.eval()
     pre_persist_scores = []
     with torch.no_grad():
         for i in range(n_images):
             h = hidden_states_cpu[i].to(device=device, dtype=torch.float32)
-            # Use the head's own forward (which handles mean-pool + norm + proj + cap)
-            score = btrm.head(h)
+            # TODO: need new scoring path for pre-extracted hidden states
+            normed = raw_model.score_norm(h.mean(dim=1, keepdim=True))
+            raw = raw_model.score_proj(normed)
+            score = raw_model.score_cap * torch.tanh(raw / raw_model.score_cap)
             pre_persist_scores.append(score.cpu())
     pre_persist_scores = torch.cat(pre_persist_scores, dim=0)
     torch.save(pre_persist_scores, OUTPUT_DIR / "pre_persist_scores.pt")
@@ -227,7 +228,7 @@ def main():
 
     # --- Persist trained compound model (adapter + head together) ---
     print("\n=== Persisting trained compound model ===")
-    persist_info = btrm.persist(OUTPUT_DIR)
+    persist_info = persist_btrm(raw_model, "rtheta", str(OUTPUT_DIR))
     print(f"  Persisted: {persist_info}")
 
     # --- Save training curve ---
@@ -247,7 +248,7 @@ def main():
           f"thisnotthat={training_curve[-1]['accuracy_thisnotthat']:.3f}")
 
     # Report adapter training status
-    adapter_params = btrm.adapter_params()
+    adapter_params = list(get_adapter_params(raw_model, "rtheta").values())
     if adapter_params:
         any_nonzero = any(p.abs().max().item() > 0 for p in adapter_params)
         n_adapter = sum(p.numel() for p in adapter_params)

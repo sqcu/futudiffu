@@ -356,32 +356,26 @@ def run_probe(
     """Run a single probe: re-init adapter weights, create head, train, persist.
 
     IMPORTANT: Adapter structure is pre-allocated on diff_model before compile.
-    BTRMCompoundModel.__init__ calls allocate_adapter which is IDEMPOTENT
-    (same name = no-op, no graph mutation). Between probes we do NOT call
-    remove_all_adapters -- that would strip LoRALinear wrappers and invalidate
-    the compiled graph.
+    install_multi_lora is IDEMPOTENT (same name = no-op, no graph mutation).
+    Between probes we do NOT remove adapters -- that would strip MultiLoRALinear
+    wrappers and invalidate the compiled graph.
     """
-    from src_ii.btrm_model import BTRMCompoundModel
+    from src_ii.btrm_lifecycle import setup_btrm_training, persist_btrm
+    from src_ii.multi_lora import get_adapter_params
     from src_ii.btrm_training import train_btrm_differentiable
 
     probe_dir = output_dir / name
     probe_dir.mkdir(parents=True, exist_ok=True)
 
-    # Create compound model. allocate_adapter is idempotent (adapter "rtheta"
-    # already exists from pre-compile allocation). init_adapter_weights is
-    # graph-invariant -- safe after compile. New ScoreUnembedder head is tiny.
-    btrm = BTRMCompoundModel(
+    # Set up BTRM training on the model (adapter install is idempotent)
+    optimizer = setup_btrm_training(
         diff_model,
-        head_names=HEAD_NAMES,
-        hidden_dim=3840,
-        logit_cap=10.0,
+        adapter_name="rtheta",
         adapter_rank=rank,
         adapter_init_b_std=init_b_std,
-        adapter_layer_indices=layer_indices,
-        device=device,
     )
 
-    n_adapter_params = sum(p.numel() for p in btrm.adapter_params())
+    n_adapter_params = sum(p.numel() for p in get_adapter_params(diff_model, "rtheta").values())
 
     # Streaming JSONL callback: crash-safe per-step logging + VRAM peak tracking
     streaming_cb = _make_streaming_callback(probe_dir / "training_curve.jsonl")
@@ -389,7 +383,7 @@ def run_probe(
 
     t0 = time.perf_counter()
     training_curve = train_btrm_differentiable(
-        btrm_model=btrm,
+        model=diff_model,
         training_pairs=training_pairs,
         load_latent_fn=load_latent_fn,
         n_steps=n_steps,
@@ -426,7 +420,7 @@ def run_probe(
         json.dump(training_curve, f, indent=2)
 
     # Persist adapter + head
-    btrm.persist(str(probe_dir))
+    persist_btrm(diff_model, "rtheta", str(probe_dir))
 
     # Compute summary metrics
     final = training_curve[-1]
@@ -483,8 +477,7 @@ def run_probe(
     # Clean up: remove hook, free head, clear cache.
     # DO NOT call remove_all_adapters -- that strips LoRALinear wrappers
     # and invalidates the compiled graph. Adapter structure persists.
-    btrm.cleanup()
-    del btrm  # free ScoreUnembedder + HiddenCapture
+    # No cleanup needed - adapter structure persists on diff_model
     torch.cuda.empty_cache()
 
     return result
@@ -694,9 +687,9 @@ def main():
 
     # --- Load diffusion model (NO compile yet -- adapter must be allocated first) ---
     print("\n=== Loading diffusion model ===")
-    from src_ii.model_loading import load_fp8_diffusion_model
+    from src_ii.zimage_model import load_zimage_rlaif
 
-    diff_model, _ = load_fp8_diffusion_model(
+    _, diff_model = load_zimage_rlaif(
         FP8_PATH, device=device, dtype=dtype,
         compile_model=False, fuse=True,
     )
@@ -861,8 +854,8 @@ def run_attention_diff(
     model_dir: Path,
 ):
     """Run attention diff capture: scale=0 vs scale=1 for the trained adapter."""
-    from src_ii.btrm_model import BTRMCompoundModel
-    from src_ii.attention_capture import AttentionCapture
+    from src_ii.btrm_lifecycle import load_btrm
+    from src_ii.multi_lora import install_multi_lora, MultiLoRALinear
     from src_ii.stats import sigma_for_step
     from futudiffu.sampling import make_rope_cache
     from futudiffu.attention import set_attention_backend
@@ -879,13 +872,21 @@ def run_attention_diff(
         {"name": "low_thisnotthat", "traj_idx": 7, "step_key": "final"},
     ]
 
-    # Load compound model from persisted weights
+    # Load trained weights from persisted model
     config_path = model_dir / "btrm_compound_config.json"
     if not config_path.exists():
         print(f"  No compound config at {config_path}, skipping attention diff")
         return
 
-    compound = BTRMCompoundModel.load(str(model_dir), diff_model, device=device)
+    install_multi_lora(diff_model, [{"name": "rtheta", "rank": 8, "alpha": 16.0}])
+    load_btrm(diff_model, "rtheta", str(model_dir))
+
+    # Helper to globally set adapter scale on all MultiLoRALinear modules
+    def _set_global_adapter_scale(scale: float):
+        scale_t = torch.tensor([scale], device=device)
+        for m in diff_model.modules():
+            if isinstance(m, MultiLoRALinear):
+                m._adapter_scales = scale_t
 
     # Install attention capture
     set_attention_backend("sdpa")
@@ -916,13 +917,13 @@ def run_attention_diff(
         rope_cache = make_rope_cache(diff_model, H, W, num_tokens, device)
 
         # Forward A: scale=0 (unadapted)
-        compound.set_adapter_scale(0.0)
+        _set_global_adapter_scale(0.0)
         stats_a = capture.capture_forward(
             diff_model, latent, timestep, conditioning, num_tokens, rope_cache,
         )
 
         # Forward B: scale=1 (adapter active)
-        compound.set_adapter_scale(1.0)
+        _set_global_adapter_scale(1.0)
         stats_b = capture.capture_forward(
             diff_model, latent, timestep, conditioning, num_tokens, rope_cache,
         )
@@ -965,10 +966,8 @@ def run_attention_diff(
         json.dump(attn_manifest, f, indent=2)
 
     # Clean up
-    compound.set_adapter_scale(1.0)
+    _set_global_adapter_scale(1.0)
     capture.remove()
-    compound.cleanup()
-    remove_all_adapters(diff_model)
 
 
 if __name__ == "__main__":

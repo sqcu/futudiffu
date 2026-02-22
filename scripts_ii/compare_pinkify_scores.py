@@ -237,25 +237,23 @@ def main() -> int:
     # Phase 4: Load backbone + BTRMCompoundModel
     # -----------------------------------------------------------------------
     print("\n[Phase 4] Loading backbone and compound BTRM model...")
-    from src_ii.model_loading import load_fp8_diffusion_model
-    from src_ii.btrm_model import BTRMCompoundModel
-    from src_ii.rollout import make_rope_cache
+    from src_ii.zimage_model import load_zimage_rlaif
+    from src_ii.btrm_lifecycle import load_btrm, score_serial
+    from src_ii.multi_lora import install_multi_lora
     from src_ii.sigma_schedule import build_sigma_schedule, resolution_shift
 
     # Load WITHOUT compilation (inference_mode forward is used for scoring)
-    _, diff_model = load_fp8_diffusion_model(
+    _, raw_model = load_zimage_rlaif(
         FP8_PATH, device=device, dtype=dtype,
         compile_model=False, fuse=True,
     )
     print(f"  VRAM after backbone: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
-    # Load the trained compound model from differentiable_run/
-    btrm_model = BTRMCompoundModel.load(
-        str(COMPOUND_MODEL_DIR),
-        backbone=diff_model,
-        device=device,
-    )
-    btrm_model.eval_mode()
+    # Install LoRA wrappers and load trained weights from differentiable_run/
+    install_multi_lora(raw_model, [{"name": "rtheta", "rank": 8, "alpha": 16.0}])
+    load_btrm(raw_model, "rtheta", str(COMPOUND_MODEL_DIR))
+    raw_model.gradient_checkpointing = False
+    raw_model.eval()
     print(f"  Loaded compound BTRM model from {COMPOUND_MODEL_DIR}")
     print(f"  VRAM after compound model: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
@@ -308,12 +306,9 @@ def main() -> int:
             raise ValueError(f"No encoded prompt for traj {traj_id}")
         cond = cond.to(device=device, dtype=dtype)
 
-        latent_h = meta.get("latent_height") or (meta.get("height", 832) // 8)
-        latent_w = meta.get("latent_width") or (meta.get("width", 1280) // 8)
         num_tokens = cond.shape[1]
-        rope_cache = make_rope_cache(diff_model, latent_h, latent_w, num_tokens, device)
 
-        return latent, timestep, cond, num_tokens, rope_cache
+        return latent, timestep, cond, num_tokens
 
     scored_entries = []
     n_total = len(valid_entries)
@@ -323,10 +318,10 @@ def main() -> int:
         step_key = entry["step_key"]
 
         try:
-            lat, ts, cond, nt, rc = load_latent_fn(traj_id, step_key)
+            lat, ts, cond, nt = load_latent_fn(traj_id, step_key)
 
             with torch.no_grad():
-                scores = btrm_model.score(lat, ts, cond, nt, rc)
+                scores = score_serial(raw_model, lat, ts, cond, nt, gradient_checkpointing=False)
 
             scored_entries.append({
                 "traj_id": traj_id,
@@ -337,7 +332,7 @@ def main() -> int:
                 "btrm_thisnotthat": float(scores[0, 1].item()),
             })
 
-            del lat, ts, cond, rc, scores
+            del lat, ts, cond, scores
             torch.cuda.empty_cache()
 
             if (i + 1) % 50 == 0 or (i + 1) == n_total:
@@ -471,7 +466,6 @@ def main() -> int:
     print(f"\n  Wall time: {wall_total:.1f}s ({wall_total / 60:.1f} min)")
 
     # Cleanup
-    btrm_model.cleanup()
     reader.close()
 
     return 0

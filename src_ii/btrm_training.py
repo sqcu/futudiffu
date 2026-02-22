@@ -8,6 +8,8 @@ Two training modes:
 
 Import constraints:
   - IMPORTS from futudiffu.btrm: bradley_terry_loss
+  - IMPORTS from src_ii.btrm_lifecycle: make_training_optimizer,
+    get_all_trainable_params, score_packed, score_serial
   - DOES NOT import: model_manager, server, client
 """
 
@@ -24,6 +26,12 @@ from torch import Tensor
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 
 from futudiffu.btrm import bradley_terry_loss
+from src_ii.btrm_lifecycle import (
+    make_training_optimizer,
+    get_all_trainable_params,
+    score_packed,
+    score_serial,
+)
 from src_ii.validation_metrics import ValidationMetrics, PairResult
 from src_ii.incremental_save import (
     TrainingCurveWriter,
@@ -173,7 +181,7 @@ def compute_pairwise_bt_loss(
 
 
 def train_btrm(
-    btrm_model,
+    model,
     training_pairs: list[dict],
     hidden_states_cpu: list[Tensor],
     n_epochs: int = 40,
@@ -185,6 +193,7 @@ def train_btrm(
     device: torch.device | None = None,
     grad_clip: float = 0.01,
     warmup_steps: int = 40,
+    adapter_name: str = "rtheta",
 ) -> list[dict]:
     """Train BTRM head on PRE-EXTRACTED hidden states (HEAD-ONLY, no adapter gradients).
 
@@ -207,8 +216,7 @@ def train_btrm(
     docs/directive_remove_logsquare_regularizer.md for the rationale.
 
     Args:
-        btrm_model: BTRMCompoundModel instance (or any object with
-            .optimizer(), .head, .train_mode(), .eval_mode() methods).
+        model: ZImageRLAIF model with adapter + score head.
         training_pairs: List of dicts with keys:
             "idx_a", "idx_b": indices into hidden_states_cpu
             + one key per head in pref_keys with values +1/-1/0
@@ -222,6 +230,7 @@ def train_btrm(
         head_names: Names of the heads (for logging).
         pref_keys: Keys in training_pairs dicts for each head's preference.
         device: CUDA device. Defaults to cuda.
+        adapter_name: LoRA adapter name for optimizer construction.
 
     Returns:
         List of dicts (one per epoch) with keys: epoch, loss, bt_loss,
@@ -233,8 +242,9 @@ def train_btrm(
     # --- Detached-head guard ---
     # Check if the model has adapter params. If so, warn that this function
     # will not train them meaningfully.
-    if hasattr(btrm_model, 'adapter_params'):
-        n_adapter = sum(p.numel() for p in btrm_model.adapter_params())
+    try:
+        adapter_ps = get_all_trainable_params(model, adapter_name)
+        n_adapter = sum(p.numel() for p in adapter_ps)
         if n_adapter > 0:
             import warnings
             warnings.warn(
@@ -246,14 +256,16 @@ def train_btrm(
                 UserWarning,
                 stacklevel=2,
             )
+    except Exception:
+        pass  # Model may not have adapters installed yet
 
-    # Create optimizer via compound model (includes adapter + head params)
-    optimizer = btrm_model.optimizer(lr=lr)
+    # Create optimizer (includes adapter + head params)
+    optimizer = make_training_optimizer(model, adapter_name, lr=lr)
     scheduler = LinearLR(
         optimizer, start_factor=1e-8, end_factor=1.0, total_iters=warmup_steps,
     )
-    btrm_model.train_mode()
-    head = btrm_model.head
+    model.gradient_checkpointing = False
+    model.train()
 
     training_curve = []
     global_step = 0
@@ -290,11 +302,15 @@ def train_btrm(
                 [h.mean(dim=1).squeeze(0) for h in all_hidden_b], dim=0
             ).to(device=device, dtype=torch.float32)
 
-            # Score using the head's forward (not manual norm+proj+cap)
-            # We pass pre-pooled vectors as (B, 1, hidden_dim) so the head's
-            # mean(dim=1) is a no-op
-            scores_a = head(pooled_a.unsqueeze(1))
-            scores_b = head(pooled_b.unsqueeze(1))
+            # Score using the model's score head components directly.
+            # pooled_a is (B, hidden_dim), apply RMSNorm + Linear + soft tanh cap.
+            normed_a = model.score_norm(pooled_a)
+            raw_a = model.score_proj(normed_a)
+            scores_a = model.score_cap * torch.tanh(raw_a / model.score_cap)
+
+            normed_b = model.score_norm(pooled_b)
+            raw_b = model.score_proj(normed_b)
+            scores_b = model.score_cap * torch.tanh(raw_b / model.score_cap)
 
             # Compute per-head BT loss (loss = BT loss only, no regularizer)
             total_bt = scores_a.new_zeros(())
@@ -368,7 +384,8 @@ def train_btrm(
                   f"gnorm={avg_grad_norm:.3e} "
                   f"lr={current_lr:.3e} {accs}")
 
-    btrm_model.eval_mode()
+    model.gradient_checkpointing = False
+    model.eval()
     return training_curve
 
 
@@ -377,7 +394,7 @@ def train_btrm(
 # -------------------------------------------------------------------------
 
 def train_btrm_differentiable(
-    btrm_model,
+    model,
     training_pairs: list[dict] | None = None,
     load_latent_fn: Callable[[int], tuple[Tensor, Tensor, Tensor, int, dict]] | None = None,
     n_steps: int = 100,
@@ -406,7 +423,6 @@ def train_btrm_differentiable(
     checkpoint_steps: list[int] | None = None,
     packed: bool = False,
     pairs_per_pack: int = 2,
-    force_sdpa: bool = False,
     output_dir: str | None = None,
     artifacts: object | None = None,
     target_flops_ratio: float | None = None,
@@ -420,15 +436,16 @@ def train_btrm_differentiable(
     summary_path: str | None = None,
     reward_manifest: dict[str, Callable] | None = None,
     vae: object | None = None,
+    adapter_name: str = "rtheta",
 ) -> list[dict]:
-    """Train BTRM compound model with full forward passes through the backbone.
+    """Train ZImageRLAIF model with full forward passes through the backbone.
 
     Each optimizer step:
       1. Zero gradients
       2. For each microbatch (grad_accum_steps times):
          a. Pick a random pair from training_pairs OR pair_sampler
          b. Load both latents, sigmas, conditioning via load_latent_fn
-         c. Full differentiable forward through backbone -> hidden -> head -> score
+         c. Full differentiable forward through backbone -> score
          d. Bradley-Terry loss between winner/loser scores
          e. (loss / grad_accum_steps).backward()
       3. Clip gradients, optimizer.step(), scheduler.step()
@@ -454,7 +471,7 @@ def train_btrm_differentiable(
       - Self-training: Use BTRM's own predictions -> same interface
 
     Args:
-        btrm_model: BTRMCompoundModel with adapter + head.
+        model: ZImageRLAIF model with adapter + score head.
         training_pairs: List of dicts with keys:
             "idx_a", "idx_b": integer indices for load_latent_fn
             + one key per head in pref_keys with values +1/-1/0
@@ -516,21 +533,19 @@ def train_btrm_differentiable(
         lr_schedule: LR schedule type. Options:
             "warmup_only" (default): Linear warmup then constant LR.
             "warmup_cosine": Linear warmup then cosine decay to 0 at n_steps.
-        checkpoint_fn: Optional callable(step, btrm_model) called at each
+        checkpoint_fn: Optional callable(step, model) called at each
             checkpoint step. Use this to save intermediate adapter state.
         checkpoint_steps: List of step numbers at which to call checkpoint_fn.
             If None, no intermediate checkpoints are saved.
         packed: If True, use FlexAttention batch packing for multi-image
             forward passes. Samples pairs_per_pack pairs per microbatch,
             collects all 2*pairs_per_pack images, and scores them in a
-            single packed forward via score_differentiable_packed().
+            single packed forward via score_packed().
             Default False preserves existing serial behavior.
         pairs_per_pack: Number of pairs to sample per packed microbatch.
             Only used when packed=True. Each pair contributes 2 images,
             so a packed forward processes 2*pairs_per_pack images.
             Default 2 (4 images per packed forward).
-        force_sdpa: When packed=True, force SDPA attention instead of
-            SageAttention. Useful for correctness validation.
         output_dir: Optional output directory path. When provided,
             the ValidationMetrics tracker is saved to
             ``{output_dir}/validation_metrics.json`` at each checkpoint
@@ -739,7 +754,8 @@ def train_btrm_differentiable(
         else:
             pair_weights = None  # uniform sampling
 
-    optimizer = btrm_model.optimizer(
+    optimizer = make_training_optimizer(
+        model, adapter_name,
         lr=lr,
         optimizer_type=optimizer_type,
         muon_lr=muon_lr,
@@ -769,7 +785,8 @@ def train_btrm_differentiable(
             optimizer, start_factor=1e-8, end_factor=1.0,
             total_iters=warmup_steps,
         )
-    btrm_model.train_mode()
+    model.gradient_checkpointing = gradient_checkpointing
+    model.train()
 
     # Validation metrics tracker (Layer 4: multi-indexed covariance)
     val_tracker = ValidationMetrics()
@@ -962,7 +979,7 @@ def train_btrm_differentiable(
             pair_processed: list[bool] = [False] * len(macro_pairs)
             total_bt_val = 0.0
             active_heads = 0
-            device = next(btrm_model.backbone.parameters()).device
+            device = next(model.parameters()).device
 
             # Normalization denominator: use pre-counted heads if nonzero,
             # else fall back to 1 to avoid division by zero.
@@ -980,10 +997,9 @@ def train_btrm_differentiable(
                 bin_images = [
                     all_images[item["img_idx"]] for item in bin_items
                 ]
-                bin_scores = btrm_model.score_differentiable_packed(
-                    bin_images,
+                bin_scores = score_packed(
+                    model, bin_images,
                     gradient_checkpointing=gradient_checkpointing,
-                    force_sdpa=force_sdpa,
                 )  # (len(bin_items), N_heads) with grad_fn
 
                 for local_idx, item in enumerate(bin_items):
@@ -1215,10 +1231,9 @@ def train_btrm_differentiable(
                         bin_images = [
                             all_images[item["img_idx"]] for item in bin_items
                         ]
-                        bin_scores = btrm_model.score_differentiable_packed(
-                            bin_images,
+                        bin_scores = score_packed(
+                            model, bin_images,
                             gradient_checkpointing=gradient_checkpointing,
-                            force_sdpa=force_sdpa,
                         )  # (len(bin_items), N_heads) with grad_fn
 
                         for local_idx, item in enumerate(bin_items):
@@ -1336,12 +1351,12 @@ def train_btrm_differentiable(
                     lat_b, ts_b, cond_b, nt_b, rc_b = load_latent_fn(key_b)
 
                     # Full differentiable forward for both images
-                    scores_a = btrm_model.score_differentiable(
-                        lat_a, ts_a, cond_a, nt_a, rc_a,
+                    scores_a = score_serial(
+                        model, lat_a, ts_a, cond_a, nt_a,
                         gradient_checkpointing=gradient_checkpointing,
                     )  # (1, N_heads) with grad_fn
-                    scores_b = btrm_model.score_differentiable(
-                        lat_b, ts_b, cond_b, nt_b, rc_b,
+                    scores_b = score_serial(
+                        model, lat_b, ts_b, cond_b, nt_b,
                         gradient_checkpointing=gradient_checkpointing,
                     )  # (1, N_heads) with grad_fn
 
@@ -1436,7 +1451,7 @@ def train_btrm_differentiable(
                 accum_pw += pw
 
         # Clip gradients -- pre_clip_norm is the total norm BEFORE clipping
-        all_params = btrm_model.all_trainable_params()
+        all_params = get_all_trainable_params(model, adapter_name)
         pre_clip_norm = torch.nn.utils.clip_grad_norm_(all_params, max_grad_norm)
         pre_clip_val = pre_clip_norm.item() if isinstance(pre_clip_norm, Tensor) else pre_clip_norm
         # Compute post-clip norm for logging
@@ -1540,13 +1555,13 @@ def train_btrm_differentiable(
             )
             if checkpoint_steps is not None and step in checkpoint_steps:
                 print(f"  [ARTIFACTS CHECKPOINT] Saving checkpoint at step {step}")
-                artifacts.save_checkpoint(step, btrm_model)
+                artifacts.save_checkpoint(step, model)
 
         # Intermediate checkpoints (legacy path, still honored when artifacts is None)
         if checkpoint_fn is not None and checkpoint_steps is not None:
             if step in checkpoint_steps:
                 print(f"  [CHECKPOINT] Saving checkpoint at step {step}")
-                checkpoint_fn(step, btrm_model)
+                checkpoint_fn(step, model)
                 # Persist validation metrics alongside checkpoint
                 if output_dir is not None:
                     import os
@@ -1593,7 +1608,8 @@ def train_btrm_differentiable(
         _final_summary["status"] = "completed"
         atomic_json_save(_final_summary, summary_path)
 
-    btrm_model.eval_mode()
+    model.gradient_checkpointing = False
+    model.eval()
     return training_curve
 
 

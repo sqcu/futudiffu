@@ -259,7 +259,7 @@ def render_exemplars(
 
 def render_exemplars_from_model(
     output_dir: str | Path,
-    btrm_model,
+    model,
     load_latent_fn,
     sample_keys: list[tuple[int, str]],
     vae=None,
@@ -273,18 +273,19 @@ def render_exemplars_from_model(
     """Score images with the BTRM model and render top/bottom exemplars.
 
     Convenience function that scores a set of images, then renders exemplars.
-    Useful when you have a trained BTRM model and want to see what it considers
+    Useful when you have a trained model and want to see what it considers
     high vs low quality.
 
     Args:
         output_dir: Directory for output.
-        btrm_model: Trained BTRMCompoundModel (in eval mode).
-        load_latent_fn: Callable((traj_id, step_key)) -> (latent, ts, cond, nt, rc).
+        model: Trained ZImageRLAIF model.
+        load_latent_fn: Callable((traj_id, step_key)) -> (latent, ts, cond, nt).
+            Returns 4-tuple (no rope_cache — score_serial handles it).
         sample_keys: List of (traj_id, step_key) tuples to score and render.
         vae: Loaded VAE model (or None to load from vae_path).
         vae_path: Path to VAE safetensors.
         top_k: Number of top/bottom to render per head.
-        head_names: Scoring head names.
+        head_names: Scoring head names (positional — index i = score column i).
         device: CUDA device.
         dtype: Working dtype.
         deduplicate_across_heads: If True, exclude images already selected
@@ -295,6 +296,7 @@ def render_exemplars_from_model(
         Path to exemplars_manifest.json.
     """
     import torch
+    from src_ii.btrm_lifecycle import score_serial
 
     if device is None:
         device = torch.device("cuda")
@@ -302,18 +304,22 @@ def render_exemplars_from_model(
         dtype = torch.bfloat16
 
     if head_names is None:
-        head_names = list(btrm_model.head_names) if hasattr(btrm_model, "head_names") else ["head_0"]
+        n_heads = getattr(model, "n_score_heads", 1)
+        head_names = [f"head_{i}" for i in range(n_heads)]
 
     trajectories: list[dict] = []
     scores: dict[str, dict[str, float]] = {}
 
-    btrm_model.eval_mode()
+    model.eval()
 
     for traj_id, step_key in sample_keys:
-        lat, ts, cond, nt, rc = load_latent_fn((traj_id, step_key))
+        lat, ts, cond, nt = load_latent_fn((traj_id, step_key))
 
         with torch.no_grad():
-            score_tensor = btrm_model.score(lat, ts, cond, nt, rc)
+            score_tensor = score_serial(
+                model, lat, ts, cond, nt,
+                gradient_checkpointing=False,
+            )
             # score_tensor: (1, N_heads)
 
         img_key = f"{traj_id}_{step_key}"
@@ -331,7 +337,7 @@ def render_exemplars_from_model(
             "latent": lat.detach().cpu(),
         })
 
-        del lat, ts, cond, rc
+        del lat, ts, cond
 
     torch.cuda.empty_cache()
 

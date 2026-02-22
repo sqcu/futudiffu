@@ -1,12 +1,12 @@
 """Model loading without ModelManager.
 
-Extracts the FP8 diffusion model loading sequence from ModelManager.ensure_diffusion()
-into a standalone function. Uses futudiffu.diffusion_model for architecture and
-futudiffu.fp8 for FP8 weight injection, but not model_manager.py itself.
+Extracts the FP8 diffusion model loading sequence into a standalone function.
+Uses src_ii.transformer for architecture components and futudiffu.fp8 for
+FP8 weight injection.
 
 Import constraints:
-  - IMPORTS from futudiffu: diffusion_model (architecture), fp8 (FP8Linear),
-    lora (adapter allocation/init), sage_attention (optional)
+  - IMPORTS from src_ii.transformer: architecture detection, fuse_model
+  - IMPORTS from futudiffu: fp8 (FP8Linear), sage_attention (optional)
   - DOES NOT import: model_manager, server, client, training_utils
 """
 
@@ -49,14 +49,14 @@ def load_fp8_diffusion_model(
         Else:
             (diff_model, diff_model) -- same object twice for uniform API.
     """
-    from futudiffu.diffusion_model import (
+    from src_ii.transformer import (
         _detect_cap_feat_dim,
         _detect_n_layers,
         _detect_qk_norm,
         _strip_diffusion_prefix,
-        create_diffusion_model,
         fuse_model,
     )
+    from src_ii.zimage_model import create_zimage_rlaif
     from futudiffu.fp8 import replace_linear_with_fp8
 
     t0 = time.perf_counter()
@@ -71,7 +71,7 @@ def load_fp8_diffusion_model(
     qk_norm = _detect_qk_norm(remapped.keys())
     print(f"[model_loading] Detected: n_layers={n_layers}, cap_feat_dim={cap_feat_dim}, qk_norm={qk_norm}")
 
-    model = create_diffusion_model(
+    model = create_zimage_rlaif(
         dtype=dtype, n_layers=n_layers,
         cap_feat_dim=cap_feat_dim, qk_norm=qk_norm,
     )

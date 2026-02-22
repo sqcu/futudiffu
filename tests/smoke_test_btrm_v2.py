@@ -17,7 +17,7 @@ Phase 3: Policy optimization with stacked adapters
   - BTRM head reads hidden states from policy-adapted model
   - Gradient checkpointing on all layers always
 
-Uses canonical training_utils for HiddenCapture, forward_checkpointed,
+Uses canonical training_utils for forward_checkpointed,
 prepare_conditioning, prepare_latent_state, and logging helpers.
 """
 
@@ -35,7 +35,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from futudiffu.training_utils import (
-    HiddenCapture,
     build_cfg_model_fn,
     forward_checkpointed,
     log_section,

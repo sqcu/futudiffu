@@ -207,10 +207,11 @@ def validate_pinkify_ranking(
 
 
 def validate_btrm_pinkify_ranking(
-    btrm_model,
+    model,
     challenge_dir: str | Path = "i2i_off_policies/PINKIFY_cases",
     vae=None,
     vae_path: str | None = None,
+    head_index: int = 0,
     head_name: str = "pinkify",
     device: torch.device | None = None,
     dtype: torch.dtype | None = None,
@@ -232,11 +233,12 @@ def validate_btrm_pinkify_ranking(
     5. Checks ranking
 
     Args:
-        btrm_model: Trained BTRMCompoundModel instance.
+        model: Trained ZImageRLAIF model instance.
         challenge_dir: Path to directory containing PINKER_A-F.png.
         vae: Loaded VAE model. If None, loaded from vae_path.
         vae_path: Path to VAE safetensors (used only if vae is None).
-        head_name: Name of the pinkify head in the BTRM model.
+        head_index: Index of the pinkify head in model scores (default 0).
+        head_name: Label for reporting (default "pinkify").
         device: torch device (default: cuda).
         dtype: torch dtype for VAE and model (default: bfloat16 for VAE/model,
                images are loaded as float32 then cast).
@@ -255,6 +257,8 @@ def validate_btrm_pinkify_ranking(
     if dtype is None:
         dtype = torch.bfloat16
 
+    from src_ii.btrm_lifecycle import score_serial
+
     # Load VAE if not provided
     _vae_loaded_here = False
     if vae is None:
@@ -264,24 +268,14 @@ def validate_btrm_pinkify_ranking(
         vae = load_vae(vae_path, device=device, dtype=dtype)
         _vae_loaded_here = True
 
-    # Resolve head index
-    head_names = btrm_model.head_names if hasattr(btrm_model, "head_names") else []
-    if head_name not in head_names:
-        raise ValueError(
-            f"Head '{head_name}' not found in model. Available: {list(head_names)}"
-        )
-    head_index = list(head_names).index(head_name)
-
     # Load challenge images as pixel tensors (float32 for precision)
     images = _load_challenge_images(challenge_dir, device=device, dtype=torch.float32)
 
     # VAE encode: pixel -> latent
-    # The VAE encode pipeline is: (pixel * 2 - 1) -> model.encode() -> flux_process_in
-    # flux_process_in: (latent - 0.1159) * 0.3611
-    from futudiffu.vae import vae_encode
+    from src_ii.vae_utils import vae_encode
 
     scores = {}
-    btrm_model.eval_mode()
+    model.eval()
 
     with torch.no_grad():
         for label, img_t in images.items():
@@ -294,30 +288,17 @@ def validate_btrm_pinkify_ranking(
             # Score at sigma=0 (fully denoised)
             timestep = torch.zeros(1, device=device, dtype=dtype)
 
-            # Build a dummy conditioning. The BTRM scores latents with
-            # conditioning context; for the challenge set we use an empty
-            # prompt equivalent. We need to know the expected dimensions.
-            # BTRMCompoundModel.score() needs: latent, timestep, conditioning,
-            # num_tokens, rope_cache.
-            #
-            # For validation, we use a single zero-padded conditioning token.
-            # The scoring head aggregates via mean-pool over image tokens from
-            # the hidden capture hook, so the text conditioning content matters
-            # less than the latent content.
+            # Dummy conditioning (single zero token). The scoring head
+            # aggregates via mean-pool over image tokens, so text content
+            # matters less than latent content for validation.
             cap_feat_dim = 2560  # from architecture: NextDiT cap_feat_dim
             conditioning = torch.zeros(1, 1, cap_feat_dim, device=device, dtype=dtype)
             num_tokens = 1
 
-            # Build RoPE cache
-            _, _, lat_h, lat_w = latent.shape
-            from src_ii.rollout import make_rope_cache
-            rope_cache = make_rope_cache(
-                btrm_model.backbone, lat_h, lat_w, num_tokens, device,
-            )
-
-            # Score
-            score_tensor = btrm_model.score(
-                latent, timestep, conditioning, num_tokens, rope_cache,
+            # Score via unified forward
+            score_tensor = score_serial(
+                model, latent, timestep, conditioning, num_tokens,
+                gradient_checkpointing=False,
             )
             # score_tensor: (1, N_heads) -> extract the pinkify head
             scores[label] = float(score_tensor[0, head_index].item())
