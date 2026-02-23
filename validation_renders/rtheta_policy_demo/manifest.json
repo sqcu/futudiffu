@@ -1,0 +1,31 @@
+{
+  "timestamp": "2026-02-23T01:02:02.102935+00:00",
+  "prompts": {
+    "shrimp_field": "qwen-3-4b, draw me \"pink shrimp with crisp typography in a banana field\".",
+    "laser_shark": "enormous laser sharks, photorealistic, dramatic lighting, ocean scene",
+    "portrait": "portrait of an old fisherman, weathered face, golden hour, shallow depth of field"
+  },
+  "resolution": "1280x832",
+  "n_steps": 30,
+  "seed": 42,
+  "adapter_name": "rtheta",
+  "btrm_dir": "F:\\dox\\repos\\ai\\futudiffu\\training_output\\reward_function_run_tnt_v2",
+  "head_names": [
+    "pinkify",
+    "thisnotthat"
+  ],
+  "n_prompts": 3,
+  "output_files": [
+    "shrimp_field_ref.png",
+    "laser_shark_ref.png",
+    "portrait_ref.png",
+    "shrimp_field_rtheta.png",
+    "laser_shark_rtheta.png",
+    "portrait_rtheta.png",
+    "shrimp_field_composite.png",
+    "laser_shark_composite.png",
+    "portrait_composite.png",
+    "scores_per_step.jsonl"
+  ],
+  "total_elapsed_s": 127.30580569989979
+}

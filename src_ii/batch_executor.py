@@ -175,11 +175,25 @@ def _execute_plan(entries, plan, model, device):
         sigmas = [entries[i]["sigma"] for i in indices]
         timesteps = [torch.tensor([s], device=device, dtype=torch.float32) for s in sigmas]
 
-        adapter_scales = None
-        for i in indices:
-            if entries[i].get("adapter_scales") is not None:
-                adapter_scales = entries[i]["adapter_scales"].to(device)
-                break
+        # Build per-entry adapter_scales for this bin
+        any_has_scales = any(entries[i].get("adapter_scales") is not None for i in indices)
+        if any_has_scales:
+            scale_rows = []
+            for i in indices:
+                s = entries[i].get("adapter_scales")
+                if s is not None:
+                    scale_rows.append(s.to(device))
+                else:
+                    # Entry has no adapter_scales — use zeros (no adapter contribution)
+                    # Infer n_adapters from a neighbor
+                    n_adapters = next(
+                        entries[j]["adapter_scales"].shape[-1]
+                        for j in indices if entries[j].get("adapter_scales") is not None
+                    )
+                    scale_rows.append(torch.zeros(n_adapters, device=device))
+            adapter_scales = torch.stack(scale_rows)  # (n_entries_in_bin, n_adapters)
+        else:
+            adapter_scales = None
 
         fields, scores = packed_forward(
             model, x_list, timesteps,

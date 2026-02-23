@@ -459,13 +459,18 @@ class JointAttention(nn.Module):
             self.q_norm = self.k_norm = nn.Identity()
 
     def forward(self, x: torch.Tensor, x_mask: torch.Tensor | None,
-                freqs_cis: torch.Tensor, block_mask=None) -> torch.Tensor:
+                freqs_cis: torch.Tensor, block_mask=None,
+                adapter_scales: torch.Tensor | None = None,
+                token_to_image: torch.Tensor | None = None) -> torch.Tensor:
         if block_mask is None:
             _crash()
 
         b, seqlen, _ = x.shape
 
-        qkv_out = self.qkv(x)
+        if adapter_scales is not None:
+            qkv_out = self.qkv(x, adapter_scales=adapter_scales, token_to_image=token_to_image)
+        else:
+            qkv_out = self.qkv(x)
 
         xq, xk, xv = fused_qkv_postprocess(
             qkv_out, self.q_norm.weight, self.k_norm.weight,
@@ -479,7 +484,11 @@ class JointAttention(nn.Module):
         else:
             out = flex_attention(xq, xk, xv, block_mask=block_mask)
 
-        return self.out(out.transpose(1, 2).reshape(b, -1, self.n_local_heads * self.head_dim))
+        reshaped = out.transpose(1, 2).reshape(b, -1, self.n_local_heads * self.head_dim)
+        if adapter_scales is not None:
+            return self.out(reshaped, adapter_scales=adapter_scales, token_to_image=token_to_image)
+        else:
+            return self.out(reshaped)
 
 
 class FeedForward(nn.Module):
@@ -537,31 +546,58 @@ class FeedForward(nn.Module):
         if isinstance(self.w2, FP8Linear):
             self._fused_chain = True
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor,
+                adapter_scales: torch.Tensor | None = None,
+                token_to_image: torch.Tensor | None = None) -> torch.Tensor:
         if self._fused:
             if getattr(self, '_fused_chain', False):
                 # Full FP8 chain: w1w3 -> SiLU+gate+requant -> w2 (custom ops only)
-                w1w3_out = self.w1w3(x)
+                if adapter_scales is not None:
+                    w1w3_out = self.w1w3(x, adapter_scales=adapter_scales, token_to_image=token_to_image)
+                else:
+                    w1w3_out = self.w1w3(x)
                 gated_fp8, gated_scale = fp8_silu_gate_quant_op(
                     w1w3_out.contiguous(), self.w2.block_size,
                 )
                 dtype_code = _DTYPE_TO_CODE_K[self.w2.output_dtype]
                 if getattr(self.w2, '_transposed', False):
-                    return fp8_gemm_v1t_op(
+                    base_out = fp8_gemm_v1t_op(
                         gated_fp8, gated_scale,
                         self.w2.weight, self.w2.weight_scale,
                         self.w2.block_size, dtype_code,
                     )
-                return fp8_gemm_blockwise_op(
-                    gated_fp8, gated_scale,
-                    self.w2.weight, self.w2.weight_scale,
-                    self.w2.block_size, dtype_code,
-                )
+                else:
+                    base_out = fp8_gemm_blockwise_op(
+                        gated_fp8, gated_scale,
+                        self.w2.weight, self.w2.weight_scale,
+                        self.w2.block_size, dtype_code,
+                    )
+                # The FP8 GEMM computes base w2 only. If w2 is MultiLoRALinear,
+                # recompute SiLU+gate in BF16 and add the adapter delta.
+                if adapter_scales is not None and hasattr(self.w2, 'adapter_delta'):
+                    w1_bf16, w3_bf16 = w1w3_out.split(self.hidden_dim, dim=-1)
+                    gated_bf16 = F.silu(w1_bf16) * w3_bf16
+                    base_out = base_out + self.w2.adapter_delta(
+                        gated_bf16, adapter_scales, token_to_image,
+                    )
+                return base_out
             # Fused w1w3 but no chain (e.g. BF16 weights)
-            w1w3_out = self.w1w3(x)
+            if adapter_scales is not None:
+                w1w3_out = self.w1w3(x, adapter_scales=adapter_scales, token_to_image=token_to_image)
+            else:
+                w1w3_out = self.w1w3(x)
             w1_out, w3_out = w1w3_out.split(self.hidden_dim, dim=-1)
-            return self.w2(F.silu(w1_out) * w3_out)
+            if adapter_scales is not None:
+                return self.w2(F.silu(w1_out) * w3_out, adapter_scales=adapter_scales, token_to_image=token_to_image)
+            else:
+                return self.w2(F.silu(w1_out) * w3_out)
         # Pre-fusion
+        if adapter_scales is not None:
+            return self.w2(
+                F.silu(self.w1(x, adapter_scales=adapter_scales, token_to_image=token_to_image))
+                * self.w3(x, adapter_scales=adapter_scales, token_to_image=token_to_image),
+                adapter_scales=adapter_scales, token_to_image=token_to_image,
+            )
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
 
@@ -608,7 +644,8 @@ class JointTransformerBlock(nn.Module):
         self, x: torch.Tensor, x_mask: torch.Tensor | None,
         freqs_cis: torch.Tensor, adaln_input: torch.Tensor | None = None,
         precomputed_adaln: tuple[torch.Tensor, ...] | None = None,
-        block_mask=None,
+        block_mask=None, adapter_scales: torch.Tensor | None = None,
+        token_to_image: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.modulation:
             if precomputed_adaln is not None:
@@ -640,12 +677,16 @@ class JointTransformerBlock(nn.Module):
                 w1 = self.attention_norm1.weight.to(dtype=x.dtype)
                 attn_in = F.rms_norm(x, d, w1, self.attention_norm1.eps) * (1 + scale_msa)
                 attn_out = self.attention(attn_in, x_mask, freqs_cis,
-                                          block_mask=block_mask)
+                                          block_mask=block_mask,
+                                          adapter_scales=adapter_scales,
+                                          token_to_image=token_to_image)
                 w2 = self.attention_norm2.weight.to(dtype=x.dtype)
                 x = F.rms_norm(attn_out, d, w2, self.attention_norm2.eps) * gate_msa.tanh() + x
                 w3 = self.ffn_norm1.weight.to(dtype=x.dtype)
                 ffn_in = F.rms_norm(x, d, w3, self.ffn_norm1.eps) * (1 + scale_mlp)
-                ffn_out = self.feed_forward(ffn_in)
+                ffn_out = self.feed_forward(ffn_in,
+                                            adapter_scales=adapter_scales,
+                                            token_to_image=token_to_image)
                 w4 = self.ffn_norm2.weight.to(dtype=x.dtype)
                 x = F.rms_norm(ffn_out, d, w4, self.ffn_norm2.eps) * gate_mlp.tanh() + x
             else:
@@ -655,7 +696,9 @@ class JointTransformerBlock(nn.Module):
                     self.attention_norm1.eps,
                 )
                 attn_out = self.attention(attn_in, x_mask, freqs_cis,
-                                          block_mask=block_mask)
+                                          block_mask=block_mask,
+                                          adapter_scales=adapter_scales,
+                                          token_to_image=token_to_image)
                 x = fused_rms_norm_gate_residual(
                     attn_out, self.attention_norm2.weight, gate_msa, x,
                     self.attention_norm2.eps,
@@ -664,7 +707,9 @@ class JointTransformerBlock(nn.Module):
                     x, self.ffn_norm1.weight, scale_mlp,
                     self.ffn_norm1.eps,
                 )
-                ffn_out = self.feed_forward(ffn_in)
+                ffn_out = self.feed_forward(ffn_in,
+                                            adapter_scales=adapter_scales,
+                                            token_to_image=token_to_image)
                 x = fused_rms_norm_gate_residual(
                     ffn_out, self.ffn_norm2.weight, gate_mlp, x,
                     self.ffn_norm2.eps,
@@ -674,10 +719,14 @@ class JointTransformerBlock(nn.Module):
             assert adaln_input is None
             x = x + self.attention_norm2(
                 self.attention(self.attention_norm1(x), x_mask, freqs_cis,
-                               block_mask=block_mask)
+                               block_mask=block_mask,
+                               adapter_scales=adapter_scales,
+                               token_to_image=token_to_image)
             )
             x = x + self.ffn_norm2(
-                self.feed_forward(self.ffn_norm1(x))
+                self.feed_forward(self.ffn_norm1(x),
+                                  adapter_scales=adapter_scales,
+                                  token_to_image=token_to_image)
             )
         return x
 

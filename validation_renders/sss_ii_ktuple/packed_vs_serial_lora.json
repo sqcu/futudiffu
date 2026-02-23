@@ -1,0 +1,112 @@
+{
+  "adapter": "rtheta",
+  "rank": 8,
+  "alpha": 16.0,
+  "per_query_scales": {
+    "shrimp": 1.0,
+    "banana": 0.5,
+    "tiny": 0.0
+  },
+  "comparisons": [
+    {
+      "entry_idx": 0,
+      "query_id": "q0",
+      "entry_id": "e0",
+      "max_abs": 0.25,
+      "mean_abs": 0.0060466439463198185,
+      "l2": 3.5995264053344727,
+      "cosine_similarity": 0.9999994039535522,
+      "verdict": "PASS",
+      "score_max_abs": 0.0
+    },
+    {
+      "entry_idx": 1,
+      "query_id": "q0",
+      "entry_id": "e1",
+      "max_abs": 0.375,
+      "mean_abs": 0.027770256623625755,
+      "l2": 10.183566093444824,
+      "cosine_similarity": 0.9999666213989258,
+      "verdict": "PASS",
+      "score_max_abs": 0.00390625
+    },
+    {
+      "entry_idx": 2,
+      "query_id": "q0",
+      "entry_id": "e2",
+      "max_abs": 0.125,
+      "mean_abs": 0.0034224800765514374,
+      "l2": 2.472090482711792,
+      "cosine_similarity": 1.000003457069397,
+      "verdict": "PASS",
+      "score_max_abs": 0.0
+    },
+    {
+      "entry_idx": 3,
+      "query_id": "q0",
+      "entry_id": "e3",
+      "max_abs": 0.25,
+      "mean_abs": 0.005363853648304939,
+      "l2": 3.348182201385498,
+      "cosine_similarity": 1.0000001192092896,
+      "verdict": "PASS",
+      "score_max_abs": 0.0
+    },
+    {
+      "entry_idx": 4,
+      "query_id": "q1",
+      "entry_id": "e0",
+      "max_abs": 0.5,
+      "mean_abs": 0.04317339509725571,
+      "l2": 15.44229793548584,
+      "cosine_similarity": 0.9999426007270813,
+      "verdict": "PASS",
+      "score_max_abs": 0.001953125
+    },
+    {
+      "entry_idx": 5,
+      "query_id": "q1",
+      "entry_id": "e1",
+      "max_abs": 0.375,
+      "mean_abs": 0.03566722571849823,
+      "l2": 12.93569278717041,
+      "cosine_similarity": 0.9999556541442871,
+      "verdict": "PASS",
+      "score_max_abs": 0.001953125
+    },
+    {
+      "entry_idx": 6,
+      "query_id": "q1",
+      "entry_id": "e2",
+      "max_abs": 0.25,
+      "mean_abs": 0.006866106763482094,
+      "l2": 4.061594486236572,
+      "cosine_similarity": 0.9999991655349731,
+      "verdict": "PASS",
+      "score_max_abs": 0.0
+    },
+    {
+      "entry_idx": 7,
+      "query_id": "q2",
+      "entry_id": "e0",
+      "max_abs": 0.3125,
+      "mean_abs": 0.019937336444854736,
+      "l2": 4.329039573669434,
+      "cosine_similarity": 0.9999681115150452,
+      "verdict": "PASS",
+      "score_max_abs": 0.0
+    },
+    {
+      "entry_idx": 8,
+      "query_id": "q2",
+      "entry_id": "e1",
+      "max_abs": 0.28125,
+      "mean_abs": 0.005219660699367523,
+      "l2": 1.7327440977096558,
+      "cosine_similarity": 0.9999971389770508,
+      "verdict": "PASS",
+      "score_max_abs": 0.0
+    }
+  ],
+  "overall_verdict": "PASS"
+}

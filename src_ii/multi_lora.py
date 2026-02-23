@@ -146,63 +146,35 @@ class MultiLoRALinear(nn.Module):
             raise KeyError(f"No adapter named {adapter_name!r}")
         nn.init.normal_(self.lora_B[adapter_name], std=std)
 
-    def forward(
+    def _compute_adapter_delta(
         self,
-        x: torch.Tensor,
-        adapter_scales: torch.Tensor | None = None,
-        token_to_image: torch.Tensor | None = None,
+        x_2d: torch.Tensor,
+        adapter_scales: torch.Tensor,
+        token_to_image: torch.Tensor | None,
     ) -> torch.Tensor:
-        """Forward pass: base linear + adapter contributions.
+        """Compute adapter contribution in flattened 2D space.
 
-        Adapter routing can be provided either as explicit arguments OR
-        via module attributes (_adapter_scales, _token_to_image) set by
-        the layer context manager in zimage_model.py. This dual path
-        exists because JointTransformerBlock calls self.attention.qkv(x)
-        with no extra args -- the MultiLoRALinear wrapper must find its
-        routing context somewhere.
+        Shared implementation for forward() and adapter_delta().
 
         Args:
-            x: (..., in_features) input tensor.
-            adapter_scales: (n_images, n_adapters) or (n_adapters,) scale tensor.
-                If None, falls back to self._adapter_scales (set by context).
-                If still None, adapters are skipped.
-            token_to_image: (total_len,) int32 tensor mapping each token position
-                to an image index. If None, falls back to self._token_to_image.
+            x_2d: (n_tokens, in_features) flattened input.
+            adapter_scales: (n_images, n_adapters) or (n_adapters,) scales.
+            token_to_image: (seq_len,) routing or None.
 
         Returns:
-            (..., out_features) output tensor.
+            (n_tokens, out_features) adapter contribution.
         """
-        out = self.base(x)
-
-        # Resolve adapter routing: explicit args > module attributes > None
-        if adapter_scales is None:
-            adapter_scales = getattr(self, '_adapter_scales', None)
-        if token_to_image is None:
-            token_to_image = getattr(self, '_token_to_image', None)
-
-        if adapter_scales is None or self.n_adapters == 0:
-            return out
-
-        # Determine input shape for reshape handling
-        orig_shape = x.shape
-        # Flatten to 2D for matmul: (N_tokens, in_features)
-        x_2d = x.reshape(-1, self.in_features)
-        out_2d = out.reshape(-1, self.out_features)
         n_tokens = x_2d.shape[0]
 
         # Normalize scales shape
         if adapter_scales.dim() == 1:
-            # (n_adapters,) -> uniform scales for all tokens
-            scales = adapter_scales.unsqueeze(0).expand(1, -1)  # (1, n_adapters)
-            # All tokens get the same scale
+            scales = adapter_scales.unsqueeze(0).expand(1, -1)
             per_token = False
         else:
-            # (n_images, n_adapters) -> per-image scales
             scales = adapter_scales
             per_token = token_to_image is not None
 
-        # Accumulate adapter contributions
-        adapter_out = torch.zeros_like(out_2d)
+        adapter_out = x_2d.new_zeros(n_tokens, self.out_features)
 
         for j in range(self.n_adapters):
             name = self.adapter_names[j]
@@ -211,59 +183,107 @@ class MultiLoRALinear(nn.Module):
             scaling = self._lora_scalings[j]
 
             if per_token:
-                # Per-image routing: different tokens may have different scales
-                # scales: (n_images, n_adapters)
-                # token_to_image: (seq_len,) -> image index per token (-1 = padding)
-                per_image_scale = scales[:, j]  # (n_images,)
+                per_image_scale = scales[:, j]
 
-                # Check if any image has nonzero scale for this adapter
                 if (per_image_scale.abs() < 1e-8).all():
                     continue
 
-                # Handle B>1 (CFG batches): token_to_image is (seq_len,) but
-                # x_2d is (B*seq_len, in_features). Tile routing to all batch elems.
                 routing = token_to_image
                 if n_tokens > routing.shape[0]:
                     B_expand = n_tokens // routing.shape[0]
                     routing = routing.repeat(B_expand)
 
-                # Gather per-token scale, clamping -1 padding indices to 0
                 safe_routing = routing.clamp(min=0)
+                token_scale = per_image_scale[safe_routing]
 
-                token_scale = per_image_scale[safe_routing]  # (n_tokens,)
-
-                # Mask out padding tokens (-1 in document_id) and zero-scale tokens
                 active_mask = (token_scale.abs() > 1e-8) & (routing >= 0)
                 if not active_mask.any():
                     continue
 
-                # Sparse path: only compute for active tokens
                 active_idx = active_mask.nonzero(as_tuple=True)[0]
-                x_active = x_2d[active_idx]  # (n_active, in_features)
-                scale_active = token_scale[active_idx]  # (n_active,)
+                x_active = x_2d[active_idx]
+                scale_active = token_scale[active_idx]
 
-                # LoRA: x @ A^T @ B^T * (alpha/rank) * scale
-                h = x_active @ A.t()  # (n_active, rank)
-                contribution = h @ B.t()  # (n_active, out_features)
+                h = x_active @ A.t()
+                contribution = h @ B.t()
                 contribution = contribution * (scaling * scale_active.unsqueeze(1))
 
-                # Scatter back
                 adapter_out[active_idx] += contribution.to(adapter_out.dtype)
             else:
-                # Uniform scale for all tokens (single-image or broadcast)
                 scale_val = scales[0, j]
                 if scale_val.abs() < 1e-8:
                     continue
 
-                # LoRA: x @ A^T @ B^T * (alpha/rank) * scale
-                h = x_2d @ A.t()  # (n_tokens, rank)
-                contribution = h @ B.t()  # (n_tokens, out_features)
+                h = x_2d @ A.t()
+                contribution = h @ B.t()
                 contribution = contribution * (scaling * scale_val)
                 adapter_out += contribution.to(adapter_out.dtype)
 
-        # Reshape back to original shape
+        return adapter_out
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        adapter_scales: torch.Tensor | None = None,
+        token_to_image: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Forward pass: base linear + adapter contributions.
+
+        Args:
+            x: (..., in_features) input tensor.
+            adapter_scales: (n_images, n_adapters) or (n_adapters,) scale tensor.
+                If None, adapters are skipped (base output only).
+            token_to_image: (total_len,) int32 tensor mapping each token position
+                to an image index for per-image routing.
+
+        Returns:
+            (..., out_features) output tensor.
+        """
+        out = self.base(x)
+
+        if adapter_scales is None or self.n_adapters == 0:
+            return out
+
+        orig_shape = x.shape
+        x_2d = x.reshape(-1, self.in_features)
+        out_2d = out.reshape(-1, self.out_features)
+
+        adapter_out = self._compute_adapter_delta(x_2d, adapter_scales, token_to_image)
+
         result = out_2d + adapter_out
         return result.reshape(orig_shape[:-1] + (self.out_features,))
+
+    def adapter_delta(
+        self,
+        x: torch.Tensor,
+        adapter_scales: torch.Tensor | None = None,
+        token_to_image: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Compute ONLY the adapter contribution, without the base linear.
+
+        Used when the base linear is computed by a fused kernel chain
+        (e.g., FP8 SiLU+gate+requant -> FP8 GEMM) that bypasses forward().
+        The caller runs the fused chain for the base output, then adds
+        this delta for the LoRA contribution.
+
+        Args:
+            x: (..., in_features) input tensor (BF16, pre-activation).
+            adapter_scales: (n_images, n_adapters) or (n_adapters,) scales.
+                If None, returns zeros.
+            token_to_image: (total_len,) routing or None.
+
+        Returns:
+            (..., out_features) adapter-only contribution.
+        """
+        if adapter_scales is None or self.n_adapters == 0:
+            return x.new_zeros(*x.shape[:-1], self.out_features)
+
+        orig_shape = x.shape
+        x_2d = x.reshape(-1, self.in_features)
+
+        adapter_out = self._compute_adapter_delta(x_2d, adapter_scales, token_to_image)
+
+        return adapter_out.reshape(orig_shape[:-1] + (self.out_features,))
 
 
 def _is_target_module(name: str, target_patterns: list[str] | None) -> bool:

@@ -725,67 +725,18 @@ class ZImageRLAIF(nn.Module):
         torch.utils.checkpoint without capturing `self` (which would
         prevent memory savings).
 
-        LoRA adapter routing: if the layer's attention and feedforward
-        sublayers are MultiLoRALinear modules, adapter_scales and
-        token_to_image are passed through to them. Standard
-        JointTransformerBlock layers ignore these args.
+        adapter_scales and token_to_image are passed as explicit kwargs
+        through the JointTransformerBlock -> JointAttention / FeedForward
+        -> MultiLoRALinear call chain. No module attribute mutation.
         """
-        # Standard layer forward -- JointTransformerBlock handles
-        # adaLN modulation, attention, and feedforward internally.
-        # MultiLoRALinear modules within the layer intercept adapter_scales
-        # via the module-level forward hooks (they don't need explicit args
-        # because they are called as part of the layer's nn.Linear calls).
-        #
-        # The adapter routing is handled at the MultiLoRALinear level:
-        # each MultiLoRALinear's forward() checks for adapter_scales in
-        # thread-local or module-level state. For now, we use the
-        # JointTransformerBlock's standard forward which calls its
-        # attention.qkv, attention.out, feed_forward.w1, etc. as normal
-        # nn.Module.__call__ invocations. When those are MultiLoRALinear
-        # wrappers, the base linear is called and adapter contributions
-        # are added.
-        #
-        # TODO: Thread adapter_scales and token_to_image through to
-        # MultiLoRALinear modules. Current approach: set them as module
-        # attributes before the layer call and clear after. This is
-        # compatible with torch.compile as long as the values don't
-        # change shape between calls.
-        if adapter_scales is not None:
-            _set_adapter_context(layer, adapter_scales, token_to_image)
-
-        out = layer(
+        return layer(
             packed, None, rope,
             adaln_input=adaln_input,
             precomputed_adaln=precomputed_adaln,
             block_mask=block_mask,
+            adapter_scales=adapter_scales,
+            token_to_image=token_to_image,
         )
-
-        if adapter_scales is not None:
-            _clear_adapter_context(layer)
-
-        return out
-
-
-def _set_adapter_context(
-    layer: nn.Module,
-    adapter_scales: torch.Tensor,
-    token_to_image: torch.Tensor | None,
-) -> None:
-    """Set adapter routing context on all MultiLoRALinear modules in a layer."""
-    from src_ii.multi_lora import MultiLoRALinear
-    for module in layer.modules():
-        if isinstance(module, MultiLoRALinear):
-            module._adapter_scales = adapter_scales
-            module._token_to_image = token_to_image
-
-
-def _clear_adapter_context(layer: nn.Module) -> None:
-    """Clear adapter routing context from all MultiLoRALinear modules."""
-    from src_ii.multi_lora import MultiLoRALinear
-    for module in layer.modules():
-        if isinstance(module, MultiLoRALinear):
-            module._adapter_scales = None
-            module._token_to_image = None
 
 
 # ------------------------------------------------------------------
