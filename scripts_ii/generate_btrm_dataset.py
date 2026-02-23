@@ -8,22 +8,18 @@ generation logic lives in the library module; this script owns:
   - Dry-run mode (plan + pack, no server)
 
 Usage:
-  # Generate from prompt file with default settings:
   .venv/Scripts/python.exe F:\dox\repos\ai\futudiffu\scripts_ii\generate_btrm_dataset.py \
       --prompts-file F:\dox\repos\ai\futudiffu\prompts.txt
 
-  # Mixed-resolution, multiple backends:
   .venv/Scripts/python.exe F:\dox\repos\ai\futudiffu\scripts_ii\generate_btrm_dataset.py \
       --prompts-file F:\dox\repos\ai\futudiffu\prompts.txt \
       --resolution-tiers full medium small \
       --attention-backends sdpa sage \
       --output-dir F:\dox\repos\ai\futudiffu\btrm_dataset_v2_mixed
 
-  # Dry run (show plan + packing stats, no server needed):
   .venv/Scripts/python.exe F:\dox\repos\ai\futudiffu\scripts_ii\generate_btrm_dataset.py \
       --prompts-file prompts.txt --dry-run
 
-  # Use built-in 24 prompt templates:
   .venv/Scripts/python.exe F:\dox\repos\ai\futudiffu\scripts_ii\generate_btrm_dataset.py \
       --use-builtin-prompts --resolution-tiers full medium
 """
@@ -70,7 +66,6 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Generate BTRM training dataset with mixed-resolution bin packing (V2 format)")
 
-    # --- Prompt sources (mutually exclusive) ---
     prompt_group = parser.add_mutually_exclusive_group(required=True)
     prompt_group.add_argument(
         "--prompts-file", type=str,
@@ -82,7 +77,6 @@ def main() -> int:
         "--use-builtin-prompts", action="store_true",
         help="Use the 24 built-in prompt templates from futudiffu.btrm_dataset.")
 
-    # --- Generation parameters ---
     parser.add_argument(
         "--resolution-tiers", type=str, nargs="+",
         default=["full"],
@@ -110,7 +104,6 @@ def main() -> int:
              "(SD3 Eq.23). Explicit value overrides auto for all items.")
     parser.add_argument("--multiplier", type=float, default=1.0)
 
-    # --- Output ---
     parser.add_argument(
         "--output-dir", type=str,
         default=str(REPO_ROOT / "btrm_dataset_v2"),
@@ -122,28 +115,22 @@ def main() -> int:
     parser.add_argument("--flush-interval", type=int, default=50,
                         help="Seal blob every N trajectories.")
 
-    # --- Server ---
     parser.add_argument(
         "--server", type=str, default="tcp://localhost:5555",
         help="Inference server ZeroMQ endpoint.")
     parser.add_argument("--timeout-ms", type=int, default=0,
                         help="ZeroMQ receive timeout in ms. 0 = infinite.")
 
-    # --- Identity ---
     parser.add_argument("--base-model-hash", type=str, default="z_image_v1",
                         help="Base model identifier for provenance tracking.")
     parser.add_argument("--source-device", type=str, default="unknown",
                         help="Device identifier for provenance (e.g. rtx4090_0).")
 
-    # --- Modes ---
     parser.add_argument("--dry-run", action="store_true",
                         help="Show generation plan and packing stats, then exit.")
 
     args = parser.parse_args()
 
-    # ---------------------------------------------------------------
-    # Load prompts
-    # ---------------------------------------------------------------
     if args.prompts_file:
         prompts = _load_prompts_from_file(args.prompts_file)
     elif args.use_builtin_prompts:
@@ -157,9 +144,6 @@ def main() -> int:
 
     print(f"Loaded {len(prompts)} prompts")
 
-    # ---------------------------------------------------------------
-    # Dry run: build plan, pack, report, exit
-    # ---------------------------------------------------------------
     if args.dry_run:
         import random as _rng
 
@@ -193,7 +177,6 @@ def main() -> int:
         print(f"  Attention backends: {args.attention_backends}")
         print(f"  Steps: {args.n_steps}, CFG: {args.cfg}")
 
-        # Per-tier breakdown
         from collections import Counter
         tier_counts = Counter(item.get("resolution_tier", "?") for item in plan)
         res_counts = Counter(f"{item['width']}x{item['height']}" for item in plan)
@@ -210,13 +193,11 @@ def main() -> int:
         print(f"  Total seq_len used: {efficiency['total_used']}")
         print(f"  Total seq_len wasted: {efficiency['total_wasted']}")
 
-        # Histogram of bin sizes
         size_counts = Counter(len(b) for b in bins)
         print(f"\n  Bin size distribution:")
         for size in sorted(size_counts):
             print(f"    {size} items/bin: {size_counts[size]} bins")
 
-        # Show first few bins in detail
         n_show = min(5, len(bins))
         print(f"\n  First {n_show} bins:")
         for i, b in enumerate(bins[:n_show]):
@@ -230,9 +211,6 @@ def main() -> int:
 
         return 0
 
-    # ---------------------------------------------------------------
-    # Live generation
-    # ---------------------------------------------------------------
     from futudiffu.client import InferenceClient
     from src_ii.dataset_generator import DatasetGenerationConfig, DatasetGenerator
 
@@ -268,9 +246,7 @@ def main() -> int:
         generator = DatasetGenerator(config, client)
         summary = generator.generate_all()
 
-        # Save summary to output dir
         summary_path = Path(config.output_dir) / "generation_summary.json"
-        # Convert non-serializable values
         summary_serializable = json.loads(json.dumps(summary, default=str))
         summary_path.write_text(json.dumps(summary_serializable, indent=2))
         print(f"\nSummary saved to: {summary_path}")

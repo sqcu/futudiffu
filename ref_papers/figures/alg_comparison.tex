@@ -1,0 +1,25 @@
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{algorithms_new.pdf}
+    {\color{white}\rule{2.25em}{1em}}
+    \raisebox{0.14em}{\color{ppo}\rule{1.5em}{0.15em}}
+        ~\methodppo{}
+        \hspace{1.5em}
+    \raisebox{0.14em}{\color{pg}\rule{1.5em}{0.15em}}
+        ~\methodreinforce{}
+        \hspace{1.5em}
+    \raisebox{0.14em}{\color{rwr}\rule{1.5em}{0.15em}}
+        ~\methodrwr{}
+        \hspace{1,5em}
+    \raisebox{0.14em}{\color{ff}\rule{1.5em}{0.15em}}
+        ~\methodff{}
+    {
+    }
+    \caption{
+        \textbf{(Finetuning effectiveness)}
+        The relative effectiveness of different RL algorithms on three reward functions.
+        We find that the policy gradient variants, denoted \methodours{}, are more effective optimizers than both RWR variants.
+    }
+    \label{fig:alg_comparison}
+    \vspace{-10pt}
+\end{figure}

@@ -270,12 +270,15 @@ def get_tier_rollouts_per_prompt(tier_name: str) -> int:
 # Kept for backward compatibility with code that uses the image-only value.
 REFERENCE_SEQ_LEN = compute_seq_len(1280, 832)  # = 4160
 
-# Default caption token estimate: p90 of the actual BTRM V2 dataset prompt
+# Default caption token estimate: p99 of the actual BTRM V2 dataset prompt
 # distribution (33 unique prompts, Qwen3-4B tokenizer with Z-Image chat
 # template). Measured by scripts_ii/measure_prompt_tokens.py:
 #   min=22, max=113, mean=34.7, median=31, p90=45, p95=45, p99=113
-# Padded to 32: p90=64 tokens after padding.
-DEFAULT_CAP_TOKENS = 45
+# Padded to 32: p99=128 tokens after padding.
+# Calibrated at p99 so a single reference-resolution entry ALWAYS fits in
+# one bin, even with long prompts. BTRM training pairs (which are mostly
+# smaller images) still pack efficiently — shorter prompts leave more room.
+DEFAULT_CAP_TOKENS = 113
 
 # Total reference length INCLUDING text token overhead.
 # This is the correct bin capacity for packing: it represents the actual

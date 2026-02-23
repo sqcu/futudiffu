@@ -12,13 +12,10 @@ Five-phase validation:
   5. Report generation: PASS/FAIL per check, detailed failures, summary stats.
 
 Execution:
-  # Non-GPU validation:
   .venv/Scripts/python.exe F:\dox\repos\ai\futudiffu\scripts_ii\validate_v2_dataset.py --skip-vae
 
-  # Full validation with VAE decode (requires running inference server):
   .venv/Scripts/python.exe F:\dox\repos\ai\futudiffu\scripts_ii\validate_v2_dataset.py
 
-  # Custom dataset path and sample percentage:
   .venv/Scripts/python.exe F:\dox\repos\ai\futudiffu\scripts_ii\validate_v2_dataset.py \
       --dataset-dir F:\dox\repos\ai\futudiffu\btrm_dataset_v2_gpu0 \
       --v1-dir F:\dox\repos\ai\futudiffu\btrm_dataset \
@@ -51,15 +48,11 @@ from safetensors import safe_open
 
 from futudiffu.dataset_v2 import INDEX_SCHEMA, DatasetReader
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
 
 OUTPUT_DIR = REPO_ROOT / "dataset_audit_output" / "v2_validation"
 EXPECTED_LATENT_CHANNELS = 16
 EXPECTED_DTYPE = "bfloat16"
 
-# Required metadata columns that must be non-null for every trajectory.
 _REQUIRED_NON_NULL_COLS = [
     "traj_id", "prompt", "seed", "cfg", "width", "height",
     "n_steps", "attention_backend", "batch_type", "blob_file",
@@ -68,9 +61,6 @@ _REQUIRED_NON_NULL_COLS = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# Utility
-# ---------------------------------------------------------------------------
 
 def format_size(n_bytes: int) -> str:
     """Human-readable size string."""
@@ -128,9 +118,6 @@ class ValidationResult:
         return lines
 
 
-# ---------------------------------------------------------------------------
-# Phase 1: Index validation
-# ---------------------------------------------------------------------------
 
 def validate_index(dataset_dir: Path) -> tuple[ValidationResult, pa.Table | None]:
     """Validate the parquet index file.
@@ -147,7 +134,6 @@ def validate_index(dataset_dir: Path) -> tuple[ValidationResult, pa.Table | None
 
     result.ok(f"index.parquet exists ({format_size(index_path.stat().st_size)})")
 
-    # Load the table
     try:
         table = pq.read_table(str(index_path))
     except Exception as e:
@@ -156,7 +142,6 @@ def validate_index(dataset_dir: Path) -> tuple[ValidationResult, pa.Table | None
 
     result.ok(f"Parquet readable: {len(table)} rows, {len(table.column_names)} columns")
 
-    # --- Schema check ---
     expected_cols = set(INDEX_SCHEMA.names)
     actual_cols = set(table.column_names)
     missing_cols = expected_cols - actual_cols
@@ -172,12 +157,10 @@ def validate_index(dataset_dir: Path) -> tuple[ValidationResult, pa.Table | None
         result.warn("Index has 0 rows (empty dataset)")
         return result, table
 
-    # --- Trajectory ID uniqueness ---
     traj_ids = table.column("traj_id").to_pylist()
     unique_ids = set(traj_ids)
     if len(unique_ids) < len(traj_ids):
         n_dups = len(traj_ids) - len(unique_ids)
-        # Find which IDs are duplicated
         seen = set()
         dup_ids = set()
         for tid in traj_ids:
@@ -188,14 +171,12 @@ def validate_index(dataset_dir: Path) -> tuple[ValidationResult, pa.Table | None
     else:
         result.ok(f"All {len(traj_ids)} traj_ids are unique")
 
-    # --- traj_id monotonicity ---
     is_monotonic = all(traj_ids[i] < traj_ids[i + 1] for i in range(len(traj_ids) - 1))
     if is_monotonic:
         result.ok(f"traj_ids are strictly monotonically increasing ({traj_ids[0]}..{traj_ids[-1]})")
     else:
         result.warn("traj_ids are NOT strictly monotonically increasing")
 
-    # --- Required non-null columns ---
     for col_name in _REQUIRED_NON_NULL_COLS:
         if col_name not in table.column_names:
             continue  # Already flagged as missing above
@@ -206,7 +187,6 @@ def validate_index(dataset_dir: Path) -> tuple[ValidationResult, pa.Table | None
         else:
             result.ok(f"Column '{col_name}': 0 nulls")
 
-    # --- Blob file references point to existing files ---
     blobs_dir = dataset_dir / "blobs"
     blob_files_referenced = set(table.column("blob_file").to_pylist())
     missing_blobs = []
@@ -219,11 +199,9 @@ def validate_index(dataset_dir: Path) -> tuple[ValidationResult, pa.Table | None
     else:
         result.ok(f"All {len(blob_files_referenced)} referenced blob files exist on disk")
 
-    # Check for WIP blob references (should not exist in a sealed dataset)
     if "blob_wip.safetensors" in blob_files_referenced:
         result.warn("Index references 'blob_wip.safetensors' -- dataset may not be fully sealed")
 
-    # --- step_indices + has_final consistency with n_tensors ---
     rows = table.to_pylist()
     n_tensor_mismatches = []
     for row in rows:
@@ -241,43 +219,32 @@ def validate_index(dataset_dir: Path) -> tuple[ValidationResult, pa.Table | None
     else:
         result.ok("n_tensors consistent with step_indices + has_final for all rows")
 
-    # --- Distribution reports ---
-    # Per-source-device (attention_backend)
     backend_counts = Counter(table.column("attention_backend").to_pylist())
     result.note(f"Attention backend distribution: {dict(backend_counts.most_common())}")
 
-    # Per-resolution
     widths = table.column("width").to_pylist()
     heights = table.column("height").to_pylist()
     res_counts = Counter(f"{w}x{h}" for w, h in zip(widths, heights))
     result.note(f"Resolution distribution: {dict(res_counts.most_common())}")
 
-    # Per-step-count
     step_counts = Counter(table.column("n_steps").to_pylist())
     result.note(f"Step count distribution: {dict(step_counts.most_common())}")
 
-    # Per batch_type
     type_counts = Counter(table.column("batch_type").to_pylist())
     result.note(f"Batch type distribution: {dict(type_counts.most_common())}")
 
-    # Per blob_file (trajectory density)
     blob_counts = Counter(table.column("blob_file").to_pylist())
     result.note(f"Trajectories per blob: {dict(blob_counts.most_common())}")
 
-    # Latent dimension distribution
     lc = Counter(table.column("latent_channels").to_pylist())
     result.note(f"Latent channels distribution: {dict(lc.most_common())}")
 
-    # Latent dtype distribution
     ld = Counter(table.column("latent_dtype").to_pylist())
     result.note(f"Latent dtype distribution: {dict(ld.most_common())}")
 
     return result, table
 
 
-# ---------------------------------------------------------------------------
-# Phase 2: Blob integrity
-# ---------------------------------------------------------------------------
 
 def validate_blobs(dataset_dir: Path, table: pa.Table) -> ValidationResult:
     """Validate all safetensors blob files referenced by the index."""
@@ -290,7 +257,6 @@ def validate_blobs(dataset_dir: Path, table: pa.Table) -> ValidationResult:
 
     rows = table.to_pylist()
 
-    # Group rows by blob_file for efficient per-blob validation
     blob_to_rows: dict[str, list[dict]] = {}
     for row in rows:
         bf = row["blob_file"]
@@ -303,24 +269,20 @@ def validate_blobs(dataset_dir: Path, table: pa.Table) -> ValidationResult:
     for blob_file, blob_rows in sorted(blob_to_rows.items()):
         blob_path = blobs_dir / blob_file
         if not blob_path.exists():
-            # Already flagged in Phase 1; skip here.
             result.fail(f"Blob {blob_file} not found on disk")
             continue
 
         blob_disk_size = blob_path.stat().st_size
         total_blob_bytes_on_disk += blob_disk_size
 
-        # Try to open the safetensors file
         try:
             handle = safe_open(str(blob_path), framework="pt", device="cpu")
         except Exception as e:
             result.fail(f"Blob {blob_file} failed to open as safetensors: {e}")
             continue
 
-        # Get all keys in this blob
         blob_keys = set(handle.keys())
 
-        # Validate each trajectory's tensor references
         for row in blob_rows:
             traj_id = row["traj_id"]
             key_prefix = row["key_prefix"]
@@ -331,14 +293,12 @@ def validate_blobs(dataset_dir: Path, table: pa.Table) -> ValidationResult:
             expected_w = row["latent_width"]
             expected_dtype = row["latent_dtype"]
 
-            # Build expected keys
             expected_keys = []
             for step_idx in step_indices:
                 expected_keys.append(f"{key_prefix}/step_{step_idx:02d}")
             if has_final:
                 expected_keys.append(f"{key_prefix}/final")
 
-            # Check all expected keys exist in blob
             for key in expected_keys:
                 if key not in blob_keys:
                     result.fail(
@@ -346,7 +306,6 @@ def validate_blobs(dataset_dir: Path, table: pa.Table) -> ValidationResult:
                     )
                     continue
 
-                # Verify tensor shape
                 try:
                     tensor = handle.get_tensor(key)
                 except Exception as e:
@@ -359,7 +318,6 @@ def validate_blobs(dataset_dir: Path, table: pa.Table) -> ValidationResult:
                 total_tensor_count += 1
                 total_tensor_bytes += tensor.nelement() * tensor.element_size()
 
-                # Shape check: stored as (C, H, W) with batch dim squeezed
                 if tensor.dim() != 3:
                     result.fail(
                         f"traj_id={traj_id}, key='{key}': expected 3D tensor (C,H,W), "
@@ -384,7 +342,6 @@ def validate_blobs(dataset_dir: Path, table: pa.Table) -> ValidationResult:
                         f"tensor has W={w}, index says {expected_w}"
                     )
 
-                # Dtype check
                 tensor_dtype_str = str(tensor.dtype).replace("torch.", "")
                 if tensor_dtype_str != expected_dtype:
                     result.fail(
@@ -392,7 +349,6 @@ def validate_blobs(dataset_dir: Path, table: pa.Table) -> ValidationResult:
                         f"tensor is {tensor_dtype_str}, index says {expected_dtype}"
                     )
 
-        # Check for orphan keys in the blob (keys not referenced by any index row)
         referenced_keys = set()
         for row in blob_rows:
             kp = row["key_prefix"]
@@ -410,7 +366,6 @@ def validate_blobs(dataset_dir: Path, table: pa.Table) -> ValidationResult:
 
         del handle  # Release file handle
 
-    # Also check for orphan blob files on disk not referenced by the index
     all_blobs_on_disk = set()
     for f in blobs_dir.iterdir():
         if f.name.startswith("blob_") and f.suffix == ".safetensors":
@@ -436,9 +391,6 @@ def validate_blobs(dataset_dir: Path, table: pa.Table) -> ValidationResult:
     return result
 
 
-# ---------------------------------------------------------------------------
-# Phase 3: VAE decode validation (GPU required)
-# ---------------------------------------------------------------------------
 
 def validate_vae_decode(
     dataset_dir: Path,
@@ -463,7 +415,6 @@ def validate_vae_decode(
 
     result.note(f"Sampling {n_sample} of {n_total} trajectories ({sample_pct}% requested)")
 
-    # Sample trajectory IDs
     import random
     rng = random.Random(42)  # deterministic for reproducibility
     traj_ids = table.column("traj_id").to_pylist()
@@ -472,17 +423,14 @@ def validate_vae_decode(
 
     result.note(f"Sampled traj_ids: {sampled_ids}")
 
-    # Open V2 reader
     reader = DatasetReader(str(dataset_dir))
 
-    # Connect to inference server
     try:
         client = InferenceClient(server_endpoint, timeout_ms=120_000)
     except Exception as e:
         result.fail(f"Failed to connect to inference server at {server_endpoint}: {e}")
         return result
 
-    # Optionally prepare V1 reader
     v1_available = v1_dir is not None and v1_dir.exists()
     v1_manifest = None
     if v1_available:
@@ -504,18 +452,15 @@ def validate_vae_decode(
             result.fail(f"{traj_tag}: failed to load from V2: {e}")
             continue
 
-        # Load all step latents
         try:
             all_latents = accessor.load_all()
         except Exception as e:
             result.fail(f"{traj_tag}: failed to load tensors: {e}")
             continue
 
-        # Pick one latent to decode (prefer "final", fall back to last step)
         if "final" in all_latents:
             decode_label = "final"
         else:
-            # Pick the highest numbered step
             step_labels = [k for k in all_latents if k.startswith("step_")]
             if not step_labels:
                 result.fail(f"{traj_tag}: no step or final latent found")
@@ -524,18 +469,15 @@ def validate_vae_decode(
 
         latent = all_latents[decode_label]
 
-        # Ensure latent is on CPU and has batch dim (1, C, H, W)
         if latent.dim() == 3:
             latent = latent.unsqueeze(0)
 
-        # VAE decode via inference server
         try:
             image = client.vae_decode(latent)
         except Exception as e:
             result.fail(f"{traj_tag}: VAE decode failed: {e}")
             continue
 
-        # Check pixel validity
         if torch.isnan(image).any():
             result.fail(f"{traj_tag}: decoded image contains NaN values")
         elif torch.isinf(image).any():
@@ -555,7 +497,6 @@ def validate_vae_decode(
                 f"shape {tuple(image.shape)}"
             )
 
-        # Save decoded image as PNG
         try:
             _save_image_tensor(
                 image,
@@ -564,10 +505,7 @@ def validate_vae_decode(
         except Exception as e:
             result.warn(f"{traj_tag}: failed to save PNG: {e}")
 
-        # --- V1 cross-comparison (pixel-space MSE) ---
         if v1_available and v1_manifest is not None:
-            # Try to find matching V1 trajectory. The V2 traj_id may not
-            # correspond directly to V1 traj index. Match by prompt + seed.
             v1_match = _find_v1_match(
                 v2_meta=meta,
                 v1_manifest=v1_manifest,
@@ -581,9 +519,7 @@ def validate_vae_decode(
                         v1_latent = torch.load(str(v1_pt_path), weights_only=True)
                         if v1_latent.dim() == 3:
                             v1_latent = v1_latent.unsqueeze(0)
-                        # Decode V1 latent
                         v1_image = client.vae_decode(v1_latent)
-                        # Compute pixel-space MSE
                         mse = (image.float() - v1_image.float()).pow(2).mean().item()
                         if mse == 0.0:
                             result.ok(
@@ -634,9 +570,6 @@ def _find_v1_match(
     return None
 
 
-# ---------------------------------------------------------------------------
-# Phase 4: Cross-reference with V1 (tensor-space, no GPU)
-# ---------------------------------------------------------------------------
 
 def validate_v1_crossref(
     dataset_dir: Path,
@@ -667,13 +600,11 @@ def validate_v1_crossref(
         result.warn("V1 manifest has no records")
         return result
 
-    # Build V1 lookup: (prompt, seed) -> (v1_traj_index, record)
     v1_lookup: dict[tuple[str, int], tuple[int, dict]] = {}
     for i, rec in enumerate(v1_records):
         key = (rec.get("prompt", ""), rec.get("seed", -1))
         v1_lookup[key] = (i, rec)
 
-    # Open V2 reader
     reader = DatasetReader(str(dataset_dir))
     rows = table.to_pylist()
 
@@ -700,7 +631,6 @@ def validate_v1_crossref(
             )
             continue
 
-        # Load V2 tensors
         try:
             _, accessor = reader[traj_id]
             v2_tensors = accessor.load_all()
@@ -708,7 +638,6 @@ def validate_v1_crossref(
             result.warn(f"traj_id={traj_id}: failed to load V2 tensors: {e}")
             continue
 
-        # Compare each step that exists in both
         for step_label, v2_tensor in v2_tensors.items():
             v1_pt_path = v1_traj_dir / f"{step_label}.pt"
             if not v1_pt_path.exists():
@@ -722,8 +651,6 @@ def validate_v1_crossref(
                 )
                 continue
 
-            # Ensure both have the same shape for comparison
-            # V2 returns (1, C, H, W), V1 may be (1, C, H, W) or (C, H, W)
             if v1_tensor.dim() == 3:
                 v1_tensor = v1_tensor.unsqueeze(0)
             if v2_tensor.dim() == 3:
@@ -740,8 +667,6 @@ def validate_v1_crossref(
                 n_mismatch += 1
                 continue
 
-            # Compute max absolute difference (tensor space, no dtype conversion)
-            # Use float32 for stable comparison
             diff = (v2_tensor.float() - v1_tensor.float()).abs()
             max_abs_diff = diff.max().item()
 
@@ -781,9 +706,6 @@ def validate_v1_crossref(
     return result
 
 
-# ---------------------------------------------------------------------------
-# Phase 5: Report generation
-# ---------------------------------------------------------------------------
 
 def generate_report(
     results: list[ValidationResult],
@@ -800,7 +722,6 @@ def generate_report(
     lines.append(f"  Elapsed: {elapsed_seconds:.1f}s")
     lines.append("=" * 78)
 
-    # Summary
     lines.append("")
     lines.append("SUMMARY")
     lines.append("-" * 78)
@@ -814,7 +735,6 @@ def generate_report(
     lines.append(f"  OVERALL: {'PASS' if overall_pass else 'FAIL'}")
     lines.append("")
 
-    # Detailed results
     lines.append("DETAILED RESULTS")
     lines.append("-" * 78)
     for r in results:
@@ -829,9 +749,6 @@ def generate_report(
     return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 def main() -> int:
     parser = argparse.ArgumentParser(
@@ -890,7 +807,6 @@ def main() -> int:
     print(f"  Skip VAE: {args.skip_vae}")
     print(f"{'=' * 60}\n")
 
-    # --- Phase 1: Index validation ---
     print("Phase 1: Index validation ...")
     idx_result, table = validate_index(dataset_dir)
     results.append(idx_result)
@@ -900,7 +816,6 @@ def main() -> int:
     if table is None or len(table) == 0:
         print("\n  Cannot proceed without a valid, non-empty index.")
         if table is not None and len(table) == 0:
-            # Still generate report for empty dataset
             elapsed = time.perf_counter() - t0
             report = generate_report(results, dataset_dir, elapsed)
             _write_report(report, output_dir)
@@ -910,14 +825,12 @@ def main() -> int:
         _write_report(report, output_dir)
         return 1
 
-    # --- Phase 2: Blob integrity ---
     print("\nPhase 2: Blob integrity ...")
     blob_result = validate_blobs(dataset_dir, table)
     results.append(blob_result)
     print(f"  -> {blob_result.status} ({len(blob_result.passed)} passed, "
           f"{len(blob_result.failed)} failed, {len(blob_result.warnings)} warnings)")
 
-    # --- Phase 3: VAE decode (if not skipped) ---
     if not args.skip_vae:
         print(f"\nPhase 3: VAE decode validation ({args.sample_pct}% sample) ...")
         vae_result = validate_vae_decode(
@@ -937,21 +850,18 @@ def main() -> int:
         results.append(skipped)
         print("\nPhase 3: Skipped (--skip-vae)")
 
-    # --- Phase 4: V1 cross-reference ---
     print("\nPhase 4: V1 cross-reference ...")
     crossref_result = validate_v1_crossref(dataset_dir, table, v1_dir)
     results.append(crossref_result)
     print(f"  -> {crossref_result.status} ({len(crossref_result.passed)} passed, "
           f"{len(crossref_result.failed)} failed, {len(crossref_result.warnings)} warnings)")
 
-    # --- Phase 5: Report ---
     elapsed = time.perf_counter() - t0
     report = generate_report(results, dataset_dir, elapsed)
     _write_report(report, output_dir)
 
     print(f"\nTotal elapsed: {elapsed:.1f}s")
 
-    # Return exit code: 0 if all pass, 1 if any fail
     any_fail = any(r.status == "FAIL" for r in results)
     return 1 if any_fail else 0
 
@@ -962,13 +872,11 @@ def _write_report(report: str, output_dir: Path) -> None:
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Timestamped copy
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     timestamped_path = output_dir / f"v2_validation_report_{timestamp}.txt"
     with open(timestamped_path, "w", encoding="utf-8") as f:
         f.write(report)
 
-    # Latest copy
     latest_path = output_dir / "v2_validation_report.txt"
     with open(latest_path, "w", encoding="utf-8") as f:
         f.write(report)

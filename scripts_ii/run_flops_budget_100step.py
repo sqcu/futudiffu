@@ -48,9 +48,6 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 import torch
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
 
 FP8_PATH = r"F:\dox\ai\comfyui\ComfyUI\models\diffusion_models\z_image_fp8_blockwise.safetensors"
 TE_PATH = r"F:\dox\ai\comfyui\ComfyUI\models\text_encoders\qwen_3_4b.safetensors"
@@ -90,9 +87,6 @@ def main():
     print(f"  Output: {OUTPUT_DIR}")
     print("=" * 70)
 
-    # ==================================================================
-    # Phase 1: Load dataset + build pair sampler with FLOPS weights
-    # ==================================================================
     print("\n" + "=" * 60)
     print("  Phase 1: Loading multi-res V2 dataset")
     print("=" * 60)
@@ -112,21 +106,18 @@ def main():
         print(f"  ERROR: Need at least 10 trajectories, have {n_available}")
         return 1
 
-    # Use all available trajectories
     traj_ids = list(range(n_available))
     print(f"  Using all {len(traj_ids)} trajectories")
 
     positions = build_positions_from_v2(reader, traj_ids=traj_ids)
     print(f"  Positions: {len(positions)} across {len(traj_ids)} trajectories")
 
-    # Resolution distribution
     res_dist = {}
     for pos in positions:
         key = f"{pos.width}x{pos.height}"
         res_dist[key] = res_dist.get(key, 0) + 1
     print(f"  Resolution distribution: {res_dist}")
 
-    # Compute FLOPS weights
     flops_weights = compute_flops_sampling_weights_from_positions(positions)
 
     traj_resolutions = {}
@@ -137,7 +128,6 @@ def main():
     print(f"  FLOPS weights summary:")
     print(f"    {json.dumps(flops_summary, indent=4)}")
 
-    # Check non-degeneracy
     unique_weights = set(round(w, 8) for w in flops_weights.values())
     print(f"  Unique FLOPS weight values: {len(unique_weights)} "
           f"(degenerate={len(unique_weights) <= 1})")
@@ -153,7 +143,6 @@ def main():
     print(f"  Populated tiers: {sampler.populated_tiers}")
     print(f"  Tier trajectory counts: {sampler.tier_trajectory_counts}")
 
-    # Quick validation of macrobatch sampling
     test_macro = sampler.sample_macrobatch(
         budget_units=MACROBATCH_BUDGET,
         tier_flops_targets={1048576: 0.33},
@@ -165,9 +154,6 @@ def main():
           f"{test_consumed:.3f} FLOPS consumed, "
           f"{test_cross} cross-resolution")
 
-    # ==================================================================
-    # Phase 2: Encode prompts with text encoder (then free)
-    # ==================================================================
     print("\n" + "=" * 60)
     print("  Phase 2: Encoding prompts")
     print("=" * 60)
@@ -193,9 +179,6 @@ def main():
     vram_after_te_free = torch.cuda.memory_allocated() / 1e9
     print(f"  TE freed. VRAM: {vram_after_te_free:.2f} GB")
 
-    # ==================================================================
-    # Phase 3: Load FP8 backbone + create BTRMCompoundModel
-    # ==================================================================
     print("\n" + "=" * 60)
     print("  Phase 3: Loading backbone + creating BTRM compound model")
     print("=" * 60)
@@ -205,9 +188,7 @@ def main():
     from src_ii.multi_lora import get_adapter_params
     from src_ii.sigma_schedule import build_sigma_schedule, resolution_shift
 
-    # No torch.compile for training -- per-block gradient checkpointing
-    # is incompatible with whole-model compile.
-    _, raw_model = load_zimage_rlaif(
+    raw_model = load_zimage_rlaif(
         FP8_PATH, device=device, dtype=dtype,
         compile_model=False, fuse=True,
     )
@@ -231,9 +212,6 @@ def main():
     vram_after_btrm = torch.cuda.memory_allocated() / 1e9
     print(f"  VRAM after BTRM: {vram_after_btrm:.2f} GB")
 
-    # ==================================================================
-    # Build load_latent_fn
-    # ==================================================================
     _v2_meta_cache = {}
 
     def _get_v2_meta(traj_id):
@@ -280,16 +258,12 @@ def main():
 
         return latent, timestep, cond, num_tokens
 
-    # Validate load_latent_fn
     test_key = (traj_ids[0], positions[0].step_key)
     lat, ts, cond, nt = load_latent_fn(test_key)
     print(f"  Test load: latent={lat.shape}, timestep={ts.shape}, cond={cond.shape}")
     del lat, ts, cond
     torch.cuda.empty_cache()
 
-    # ==================================================================
-    # Build preference function (deterministic sigma-based)
-    # ==================================================================
     def preference_fn(pair: dict) -> dict:
         """Deterministic preference: cleaner image (lower sigma) wins."""
         prefs = {}
@@ -304,9 +278,6 @@ def main():
                 prefs[pref_key] = 0   # tie
         return prefs
 
-    # ==================================================================
-    # Phase 4: Run 100-step FLOPS-budget training
-    # ==================================================================
     print("\n" + "=" * 60)
     print(f"  Phase 4: FLOPS-budget training ({N_STEPS} steps)")
     print(f"  macrobatch_budget={MACROBATCH_BUDGET}, "
@@ -342,7 +313,6 @@ def main():
         output_dir=str(OUTPUT_DIR),
         artifacts=artifacts,
         checkpoint_steps=CHECKPOINT_STEPS,
-        # FLOPS-budget specific parameters:
         macrobatch_budget=MACROBATCH_BUDGET,
         macrobatch_cross_resolution=MACROBATCH_CROSS_RES,
     )
@@ -351,14 +321,10 @@ def main():
     print(f"\n  Training complete: {train_time:.1f}s "
           f"({train_time / N_STEPS:.1f}s/step)")
 
-    # ==================================================================
-    # Phase 5: Generate analysis (charts A-F + standard)
-    # ==================================================================
     print("\n" + "=" * 60)
     print("  Phase 5: Generating analysis + charts")
     print("=" * 60)
 
-    # Compute FLOPS-budget statistics from training curve
     fb_stats = _compute_flops_budget_stats(training_curve)
 
     run_config = {
@@ -381,13 +347,9 @@ def main():
     report_path = artifacts.generate_analysis(run_config=run_config)
     print(f"  Analysis generated: {report_path}")
 
-    # Persist the model
     persist_info = persist_btrm(raw_model, "rtheta", str(OUTPUT_DIR))
     print(f"  Model persisted: {persist_info}")
 
-    # ==================================================================
-    # Phase 6: Exemplar image rendering (VAE decode)
-    # ==================================================================
     print("\n" + "=" * 60)
     print("  Phase 6: Rendering exemplar images")
     print("=" * 60)
@@ -396,9 +358,7 @@ def main():
     try:
         from src_ii.exemplar_renderer import render_exemplars_from_model
 
-        # Score a sample of images across all resolutions
         sample_keys = []
-        # Pick 1 image per trajectory (up to 18)
         for idx in traj_ids:
             for pos in positions:
                 if pos.traj_id == idx:
@@ -427,21 +387,16 @@ def main():
         import traceback
         traceback.print_exc()
 
-    # ==================================================================
-    # Phase 7: Final summary
-    # ==================================================================
     print("\n" + "=" * 60)
     print("  Phase 7: Summary")
     print("=" * 60)
 
     wall_total = time.perf_counter() - wall_start
 
-    # Compute training statistics
     losses = [e.get("loss", e.get("bt_loss", 0.0)) for e in training_curve]
     grad_norms = [e.get("pre_clip_grad_norm", 0.0) for e in training_curve]
     step_times = [e.get("time_s", 0.0) for e in training_curve]
 
-    # FLOPS-budget specific: per-step pair counts, bin counts, consumed FLOPS
     n_pairs_per_step = []
     n_bins_per_step = []
     consumed_per_step = []
@@ -453,7 +408,6 @@ def main():
         consumed_per_step.append(fm.get("macrobatch_consumed", 0.0))
         n_cross_res_per_step.append(fm.get("n_cross_resolution_pairs", 0))
 
-    # Resolution tier distribution from training curve
     from collections import Counter
     from src_ii.flops_sampling import _attention_flops_ratio, _MEGAPIXEL_THRESHOLD
     from src_ii.resolution_sampling import assign_budget_tier, ANCHOR_LABELS
@@ -470,7 +424,6 @@ def main():
             all_pixel_counts[px] += 1
             if px not in pixel_to_wh:
                 pixel_to_wh[px] = (res["width"], res["height"])
-        # Per-pair tier info
         for ppr in fm.get("per_pair_resolutions", []):
             wa, ha = ppr.get("width_a", 0), ppr.get("height_a", 0)
             wb, hb = ppr.get("width_b", 0), ppr.get("height_b", 0)
@@ -483,7 +436,6 @@ def main():
 
     total_images = sum(all_pixel_counts.values())
 
-    # FLOPS-normalized resolution breakdown
     total_flops_weighted = 0.0
     mega_flops_weighted = 0.0
     for px, ct in all_pixel_counts.items():
@@ -516,17 +468,14 @@ def main():
         "resolution_dist": res_dist,
         "flops_weights_summary": flops_summary,
         "sampler_stats": sampler.stats(),
-        # Loss statistics
         "initial_loss": losses[0] if losses else None,
         "final_loss": losses[-1] if losses else None,
         "min_loss": min(losses) if losses else None,
         "max_loss": max(losses) if losses else None,
         "mean_loss": sum(losses) / len(losses) if losses else None,
         "std_loss": _std(losses),
-        # Gradient norms
         "mean_grad_norm": sum(grad_norms) / max(len(grad_norms), 1),
         "max_grad_norm": max(grad_norms) if grad_norms else None,
-        # FLOPS-budget statistics
         "flops_budget_stats": fb_stats,
         "mean_pairs_per_step": sum(n_pairs_per_step) / max(len(n_pairs_per_step), 1),
         "min_pairs_per_step": min(n_pairs_per_step) if n_pairs_per_step else 0,
@@ -539,22 +488,18 @@ def main():
         "max_consumed_per_step": max(consumed_per_step) if consumed_per_step else 0,
         "total_cross_res_pairs": sum(n_cross_res_per_step),
         "mean_cross_res_per_step": sum(n_cross_res_per_step) / max(len(n_cross_res_per_step), 1),
-        # Resolution statistics
         "total_images_sampled": total_images,
         "mega_flops_pct": mega_flops_pct,
         "small_flops_pct": small_flops_pct,
         "tier_pair_counts": {str(k): v for k, v in sorted(tier_pair_counts.items())},
-        # Step timing
         "step0_time_s": step_times[0] if step_times else None,
         "mean_steady_state_time_s": sum(step_times[1:]) / max(len(step_times) - 1, 1) if len(step_times) > 1 else None,
-        # Model info
         "exemplars_rendered": exemplars_rendered,
         "n_adapter_params": n_adapter,
         "n_head_params": n_head,
         "end_time": datetime.now(timezone.utc).isoformat(),
     }
 
-    # Per-head accuracy summary
     for name in HEAD_NAMES:
         accs = [e.get(f"accuracy_{name}", 0.0) for e in training_curve]
         if accs:
@@ -586,7 +531,6 @@ def main():
     print(f"  Exemplars: {'rendered' if exemplars_rendered else 'FAILED'}")
     print(f"  Output: {OUTPUT_DIR}")
 
-    # Cleanup
     reader.close()
     torch.cuda.empty_cache()
 

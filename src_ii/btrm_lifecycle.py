@@ -181,11 +181,12 @@ def score_packed(
     images: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]],
     gradient_checkpointing: bool = True,
 ) -> torch.Tensor:
-    """Score N images in one packed forward pass.
+    """Score N images via scatter-gather through BatchExecutor.
 
-    Replaces BTRMCompoundModel.score_differentiable_packed().
-    Takes the legacy (latent, timestep, conditioning, num_tokens) format
-    and calls ZImageRLAIF's forward through the packed orchestration layer.
+    Images are submitted as queries with identity fork specs. The executor
+    bins them into REFERENCE_TOTAL_LEN-sized launches via FFD, executes
+    each bin as a packed forward, and returns tagged scores. This function
+    collects scores in submission order.
 
     Args:
         model: ZImageRLAIF model (compiled or raw).
@@ -199,37 +200,38 @@ def score_packed(
     Returns:
         (N, n_score_heads) score tensor with grad_fn.
     """
-    from src_ii.transformer import pad_to_patch_size
-    from src_ii.forward_packed import prepare_packed_forward
+    from src_ii.batch_executor import BatchExecutor
 
-    n_images = len(images)
-    x_list = [img[0] for img in images]
-    timesteps_list = [img[1] for img in images]
-    context_list = [img[2] for img in images]
-    cap_lens = [img[3] for img in images]
-    device = x_list[0].device
+    device = images[0][0].device
 
-    img_sizes = []
-    for x in x_list:
-        x_padded = pad_to_patch_size(x, (2, 2))
-        img_sizes.append((x_padded.shape[2], x_padded.shape[3]))
+    # Build queries: each image is a single-fork identity query
+    queries = []
+    for i, (latent, timestep, conditioning, num_tokens) in enumerate(images):
+        queries.append({
+            "query_id": f"score_{i}",
+            "base_latent": latent,
+            "base_cond": conditioning,
+            "base_cap_len": num_tokens,
+            "base_resolution": (latent.shape[3] * 8, latent.shape[2] * 8),
+            "sigma": float(timestep),
+            "forks": [{"entry_id": "e0"}],
+        })
 
-    state = prepare_packed_forward(
-        model, context_list, img_sizes, cap_lens, device,
-    )
-
-    # Set gradient checkpointing
     old_gc = getattr(model, 'gradient_checkpointing', False)
     model.gradient_checkpointing = gradient_checkpointing
 
-    # Forward: model returns (diffusion_fields, scores)
-    _fields, scores = model(
-        x_list, timesteps_list, state['refined_caps'],
-        state['packing_info'], state['block_mask'], state['packed_rope'],
-    )
+    executor = BatchExecutor(model, device=device)
+    results = executor.execute(queries)
 
     model.gradient_checkpointing = old_gc
-    return scores
+
+    # Collect scores in submission order
+    score_map = {}
+    for r in results:
+        idx = int(r["query_id"].split("_")[1])
+        score_map[idx] = r["scores"].to(device)
+
+    return torch.stack([score_map[i] for i in range(len(images))])
 
 
 def score_serial(
@@ -347,18 +349,43 @@ def load_btrm(
     if not head_path.exists():
         raise FileNotFoundError(f"Missing head: {head_path}")
 
-    # Load adapter
+    # Load adapter (raises RuntimeError if 0 tensors loaded)
     n_loaded = load_adapter(model, adapter_name, str(adapter_path))
     print(f"[btrm_lifecycle] Loaded {n_loaded} adapter tensors from {adapter_path}")
 
-    # Load score head
-    head_sd = load_file(str(head_path))
+    # Load score head with dual-format key support
+    raw_head_sd = load_file(str(head_path))
+
+    # Remap old key format: norm.weight -> score_norm.weight,
+    # proj.weight -> score_proj.weight
+    _HEAD_KEY_REMAP = {
+        "norm.weight": "score_norm.weight",
+        "proj.weight": "score_proj.weight",
+    }
+    head_sd = {}
+    for name, tensor in raw_head_sd.items():
+        new_name = _HEAD_KEY_REMAP.get(name, name)
+        head_sd[new_name] = tensor
+
+    head_loaded = 0
     for name, tensor in head_sd.items():
         # Navigate to the parameter
         parts = name.split(".")
         obj = model
-        for part in parts[:-1]:
-            obj = getattr(obj, part)
-        param = getattr(obj, parts[-1])
-        param.data.copy_(tensor.to(param.device))
-    print(f"[btrm_lifecycle] Loaded {len(head_sd)} head tensors from {head_path}")
+        try:
+            for part in parts[:-1]:
+                obj = getattr(obj, part)
+            param = getattr(obj, parts[-1])
+            param.data.copy_(tensor.to(param.device))
+            head_loaded += 1
+        except AttributeError:
+            print(f"[btrm_lifecycle] WARNING: head key {name!r} not found on model")
+
+    if head_loaded == 0:
+        raise RuntimeError(
+            f"load_btrm loaded 0 head tensors from {head_path!r}. "
+            f"Checkpoint keys: {sorted(raw_head_sd.keys())}. "
+            f"Expected keys like 'score_norm.weight', 'score_proj.weight'."
+        )
+
+    print(f"[btrm_lifecycle] Loaded {head_loaded} head tensors from {head_path}")

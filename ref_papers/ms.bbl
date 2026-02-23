@@ -1,0 +1,352 @@
+\begin{thebibliography}{68}
+\providecommand{\natexlab}[1]{#1}
+\providecommand{\url}[1]{\texttt{#1}}
+\expandafter\ifx\csname urlstyle\endcsname\relax
+  \providecommand{\doi}[1]{doi: #1}\else
+  \providecommand{\doi}{doi: \begingroup \urlstyle{rm}\Url}\fi
+
+\bibitem[Ajay et~al.(2022)Ajay, Du, Gupta, Tenenbaum, Jaakkola, and Agrawal]{ajay2022conditional}
+Anurag Ajay, Yilun Du, Abhi Gupta, Joshua Tenenbaum, Tommi Jaakkola, and Pulkit Agrawal.
+\newblock Is conditional generative modeling all you need for decision-making?
+\newblock \emph{arXiv preprint arXiv:2211.15657}, 2022.
+
+\bibitem[Babuschkin et~al.(2020)Babuschkin, Baumli, Bell, Bhupatiraju, Bruce, Buchlovsky, Budden, Cai, Clark, Danihelka, Dedieu, Fantacci, Godwin, Jones, Hemsley, Hennigan, Hessel, Hou, Kapturowski, Keck, Kemaev, King, Kunesch, Martens, Merzic, Mikulik, Norman, Papamakarios, Quan, Ring, Ruiz, Sanchez, Schneider, Sezener, Spencer, Srinivasan, Stokowiec, Wang, Zhou, and Viola]{deepmind2020jax}
+Igor Babuschkin, Kate Baumli, Alison Bell, Surya Bhupatiraju, Jake Bruce, Peter Buchlovsky, David Budden, Trevor Cai, Aidan Clark, Ivo Danihelka, Antoine Dedieu, Claudio Fantacci, Jonathan Godwin, Chris Jones, Ross Hemsley, Tom Hennigan, Matteo Hessel, Shaobo Hou, Steven Kapturowski, Thomas Keck, Iurii Kemaev, Michael King, Markus Kunesch, Lena Martens, Hamza Merzic, Vladimir Mikulik, Tamara Norman, George Papamakarios, John Quan, Roman Ring, Francisco Ruiz, Alvaro Sanchez, Rosalia Schneider, Eren Sezener, Stephen Spencer, Srivatsan Srinivasan, Wojciech Stokowiec, Luyu Wang, Guangyao Zhou, and Fabio Viola.
+\newblock The {D}eep{M}ind {JAX} {E}cosystem, 2020.
+\newblock URL \url{http://github.com/deepmind}.
+
+\bibitem[Bachman \& Precup(2015)Bachman and Precup]{bachman2015data}
+Philip Bachman and Doina Precup.
+\newblock Data generation as sequential decision making.
+\newblock \emph{Advances in Neural Information Processing Systems}, 28, 2015.
+
+\bibitem[Bai et~al.(2022{\natexlab{a}})Bai, Jones, Ndousse, Askell, Chen, DasSarma, Drain, Fort, Ganguli, Henighan, Joseph, Kadavath, Kernion, Conerly, El-Showk, Elhage, Hatfield-Dodds, Hernandez, Hume, Johnston, Kravec, Lovitt, Nanda, Olsson, Amodei, Brown, Clark, McCandlish, Olah, Mann, and Kaplan]{bai2022hhh}
+Yuntao Bai, Andy Jones, Kamal Ndousse, Amanda Askell, Anna Chen, Nova DasSarma, Dawn Drain, Stanislav Fort, Deep Ganguli, Tom Henighan, Nicholas Joseph, Saurav Kadavath, Jackson Kernion, Tom Conerly, Sheer El-Showk, Nelson Elhage, Zac Hatfield-Dodds, Danny Hernandez, Tristan Hume, Scott Johnston, Shauna Kravec, Liane Lovitt, Neel Nanda, Catherine Olsson, Dario Amodei, Tom Brown, Jack Clark, Sam McCandlish, Chris Olah, Ben Mann, and Jared Kaplan.
+\newblock Training a helpful and harmless assistant with reinforcement learning from human feedback.
+\newblock \emph{arXiv preprint arXiv:2204.05862}, 2022{\natexlab{a}}.
+
+\bibitem[Bai et~al.(2022{\natexlab{b}})Bai, Kadavath, Kundu, Askell, Kernion, Jones, Chen, Goldie, Mirhoseini, McKinnon, Chen, Olsson, Olah, Hernandez, Drain, Ganguli, Li, Tran-Johnson, Perez, Kerr, Mueller, Ladish, Landau, Ndousse, Lukosuite, Lovitt, Sellitto, Elhage, Schiefer, Mercado, DasSarma, Lasenby, Larson, Ringer, Johnston, Kravec, Showk, Fort, Lanham, Telleen-Lawton, Conerly, Henighan, Hume, Bowman, Hatfield-Dodds, Mann, Amodei, Joseph, McCandlish, Brown, and Kaplan]{bai2022constitutional}
+Yuntao Bai, Saurav Kadavath, Sandipan Kundu, Amanda Askell, Jackson Kernion, Andy Jones, Anna Chen, Anna Goldie, Azalia Mirhoseini, Cameron McKinnon, Carol Chen, Catherine Olsson, Christopher Olah, Danny Hernandez, Dawn Drain, Deep Ganguli, Dustin Li, Eli Tran-Johnson, Ethan Perez, Jamie Kerr, Jared Mueller, Jeffrey Ladish, Joshua Landau, Kamal Ndousse, Kamile Lukosuite, Liane Lovitt, Michael Sellitto, Nelson Elhage, Nicholas Schiefer, Noemi Mercado, Nova DasSarma, Robert Lasenby, Robin Larson, Sam Ringer, Scott Johnston, Shauna Kravec, Sheer~El Showk, Stanislav Fort, Tamera Lanham, Timothy Telleen-Lawton, Tom Conerly, Tom Henighan, Tristan Hume, Samuel~R. Bowman, Zac Hatfield-Dodds, Ben Mann, Dario Amodei, Nicholas Joseph, Sam McCandlish, Tom Brown, and Jared Kaplan.
+\newblock Constitutional {AI}: Harmlessness from {AI} feedback.
+\newblock \emph{arXiv preprint arXiv:2212.08073}, 2022{\natexlab{b}}.
+
+\bibitem[Bansal et~al.(2023)Bansal, Chu, Schwarzschild, Sengupta, Goldblum, Geiping, and Goldstein]{bansal2023universal}
+Arpit Bansal, Hong-Min Chu, Avi Schwarzschild, Soumyadip Sengupta, Micah Goldblum, Jonas Geiping, and Tom Goldstein.
+\newblock Universal guidance for diffusion models.
+\newblock In \emph{Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition}, pp.\  843--852, 2023.
+
+\bibitem[Bradbury et~al.(2018)Bradbury, Frostig, Hawkins, Johnson, Leary, Maclaurin, Necula, Paszke, Vander{P}las, Wanderman-{M}ilne, and Zhang]{jax2018github}
+James Bradbury, Roy Frostig, Peter Hawkins, Matthew~James Johnson, Chris Leary, Dougal Maclaurin, George Necula, Adam Paszke, Jake Vander{P}las, Skye Wanderman-{M}ilne, and Qiao Zhang.
+\newblock {JAX}: composable transformations of {P}ython+{N}um{P}y programs, 2018.
+\newblock URL \url{http://github.com/google/jax}.
+
+\bibitem[Chi et~al.(2023)Chi, Feng, Du, Xu, Cousineau, Burchfiel, and Song]{chi2023diffusion}
+Cheng Chi, Siyuan Feng, Yilun Du, Zhenjia Xu, Eric Cousineau, Benjamin Burchfiel, and Shuran Song.
+\newblock Diffusion {P}olicy: {V}isuomotor {P}olicy {L}earning via {A}ction {D}iffusion.
+\newblock \emph{arXiv preprint arXiv:2303.04137}, 2023.
+
+\bibitem[Christiano et~al.(2017)Christiano, Leike, Brown, Martic, Legg, and Amodei]{christiano2017rlhf}
+Paul~F Christiano, Jan Leike, Tom Brown, Miljan Martic, Shane Legg, and Dario Amodei.
+\newblock Deep reinforcement learning from human preferences.
+\newblock In \emph{Neural Information Processing Systems}, 2017.
+
+\bibitem[Collette(2013)]{collette_python_hdf5_2014}
+Andrew Collette.
+\newblock \emph{Python and HDF5}.
+\newblock O'Reilly, 2013.
+
+\bibitem[Deng et~al.(2009)Deng, Dong, Socher, Li, Li, and Fei-Fei]{deng2009imagenet}
+Jia Deng, Wei Dong, Richard Socher, Li-Jia Li, Kai Li, and Li~Fei-Fei.
+\newblock Image{N}et: A large-scale hierarchical image database.
+\newblock In \emph{Conference on Computer Vision and Pattern Recognition}, 2009.
+
+\bibitem[Dhariwal \& Nichol(2021)Dhariwal and Nichol]{dhariwal2021diffusion}
+Prafulla Dhariwal and Alexander~Quinn Nichol.
+\newblock Diffusion models beat {GAN}s on image synthesis.
+\newblock In \emph{Advances in Neural Information Processing Systems}, 2021.
+
+\bibitem[Du et~al.(2023)Du, Durkan, Strudel, Tenenbaum, Dieleman, Fergus, Sohl-Dickstein, Doucet, and Grathwohl]{du2023reduce}
+Yilun Du, Conor Durkan, Robin Strudel, Joshua~B Tenenbaum, Sander Dieleman, Rob Fergus, Jascha Sohl-Dickstein, Arnaud Doucet, and Will Grathwohl.
+\newblock Reduce, reuse, recycle: Compositional generation with energy-based diffusion models and mcmc.
+\newblock \emph{arXiv preprint arXiv:2302.11552}, 2023.
+
+\bibitem[Duan et~al.(2016)Duan, Chen, Houthooft, Schulman, and Abbeel]{duan2016benchmarking}
+Yan Duan, Xi~Chen, Rein Houthooft, John Schulman, and Pieter Abbeel.
+\newblock Benchmarking deep reinforcement learning for continuous control.
+\newblock In \emph{International conference on machine learning}, pp.\  1329--1338. PMLR, 2016.
+
+\bibitem[Fan \& Lee(2023)Fan and Lee]{fan2023sft}
+Ying Fan and Kangwook Lee.
+\newblock Optimizing ddpm sampling with shortcut fine-tuning.
+\newblock \emph{arXiv preprint arXiv:2301.13362}, 2023.
+
+\bibitem[Fan et~al.(2023)Fan, Watkins, Du, Liu, Ryu, Boutilier, Abbeel, Ghavamzadeh, Lee, and Lee]{fan2023dpok}
+Ying Fan, Olivia Watkins, Yuqing Du, Hao Liu, Moonkyung Ryu, Craig Boutilier, Pieter Abbeel, Mohammad Ghavamzadeh, Kangwook Lee, and Kimin Lee.
+\newblock Dpok: Reinforcement learning for fine-tuning text-to-image diffusion models.
+\newblock \emph{arXiv preprint arXiv:2305.16381}, 2023.
+
+\bibitem[Gal et~al.(2022)Gal, Alaluf, Atzmon, Patashnik, Bermano, Chechik, and Cohen-Or]{gal2022image}
+Rinon Gal, Yuval Alaluf, Yuval Atzmon, Or~Patashnik, Amit~H Bermano, Gal Chechik, and Daniel Cohen-Or.
+\newblock An image is worth one word: Personalizing text-to-image generation using textual inversion.
+\newblock \emph{arXiv preprint arXiv:2208.01618}, 2022.
+
+\bibitem[Gao et~al.(2022)Gao, Schulman, and Hilton]{gao2022overoptimization}
+Leo Gao, John Schulman, and Jacob Hilton.
+\newblock Scaling laws for reward model overoptimization.
+\newblock \emph{arXiv preprint arXiv:2210.10760}, 2022.
+
+\bibitem[Goh et~al.(2021)Goh, †, †, Carter, Petrov, Schubert, Radford, and Olah]{goh2021multimodal}
+Gabriel Goh, Nick~Cammarata †, Chelsea~Voss †, Shan Carter, Michael Petrov, Ludwig Schubert, Alec Radford, and Chris Olah.
+\newblock Multimodal neurons in artificial neural networks.
+\newblock \emph{Distill}, 2021.
+\newblock https://distill.pub/2021/multimodal-neurons.
+
+\bibitem[Hansen-Estruch et~al.(2023)Hansen-Estruch, Kostrikov, Janner, Kuba, and Levine]{hansenestruch2023idql}
+Philippe Hansen-Estruch, Ilya Kostrikov, Michael Janner, Jakub~Grudzien Kuba, and Sergey Levine.
+\newblock {IDQL}: Implicit q-learning as an actor-critic method with diffusion policies.
+\newblock \emph{arXiv preprint arXiv:2304.10573}, 2023.
+
+\bibitem[Harris et~al.(2020)Harris, Millman, van~der Walt, Gommers, Virtanen, Cournapeau, Wieser, Taylor, Berg, Smith, Kern, Picus, Hoyer, van Kerkwijk, Brett, Haldane, del R{\'{i}}o, Wiebe, Peterson, G{\'{e}}rard-Marchant, Sheppard, Reddy, Weckesser, Abbasi, Gohlke, and Oliphant]{harris2020numpy}
+Charles~R. Harris, K.~Jarrod Millman, St{\'{e}}fan~J. van~der Walt, Ralf Gommers, Pauli Virtanen, David Cournapeau, Eric Wieser, Julian Taylor, Sebastian Berg, Nathaniel~J. Smith, Robert Kern, Matti Picus, Stephan Hoyer, Marten~H. van Kerkwijk, Matthew Brett, Allan Haldane, Jaime~Fern{\'{a}}ndez del R{\'{i}}o, Mark Wiebe, Pearu Peterson, Pierre G{\'{e}}rard-Marchant, Kevin Sheppard, Tyler Reddy, Warren Weckesser, Hameer Abbasi, Christoph Gohlke, and Travis~E. Oliphant.
+\newblock Array programming with {NumPy}.
+\newblock \emph{Nature}, 585\penalty0 (7825):\penalty0 357--362, 2020.
+
+\bibitem[Heek et~al.(2023)Heek, Levskaya, Oliver, Ritter, Rondepierre, Steiner, and van {Z}ee]{flax2020github}
+Jonathan Heek, Anselm Levskaya, Avital Oliver, Marvin Ritter, Bertrand Rondepierre, Andreas Steiner, and Marc van {Z}ee.
+\newblock {F}lax: A neural network library and ecosystem for {JAX}, 2023.
+\newblock URL \url{http://github.com/google/flax}.
+
+\bibitem[Ho \& Salimans(2021)Ho and Salimans]{ho2021classifierfree}
+Jonathan Ho and Tim Salimans.
+\newblock Classifier-free diffusion guidance.
+\newblock In \emph{NeurIPS 2021 Workshop on Deep Generative Models and Downstream Applications}, 2021.
+
+\bibitem[Ho et~al.(2020)Ho, Jain, and Abbeel]{ho2020denoising}
+Jonathan Ho, Ajay Jain, and Pieter Abbeel.
+\newblock Denoising diffusion probabilistic models.
+\newblock In \emph{Advances in Neural Information Processing Systems}, 2020.
+
+\bibitem[Ho et~al.(2022)Ho, Chan, Saharia, Whang, Gao, Gritsenko, Kingma, Poole, Norouzi, Fleet, and Salimans]{ho2022imagenvideo}
+Jonathan Ho, William Chan, Chitwan Saharia, Jay Whang, Ruiqi Gao, Alexey Gritsenko, Diederik~P. Kingma, Ben Poole, Mohammad Norouzi, David~J. Fleet, and Tim Salimans.
+\newblock Imagen video: High definition video generation with diffusion models.
+\newblock \emph{arXiv preprint arXiv:2210.02303}, 2022.
+
+\bibitem[Hu et~al.(2021)Hu, Shen, Wallis, Allen-Zhu, Li, Wang, Wang, and Chen]{hu2021lora}
+Edward~J Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-Zhu, Yuanzhi Li, Shean Wang, Lu~Wang, and Weizhu Chen.
+\newblock Lora: Low-rank adaptation of large language models.
+\newblock \emph{arXiv preprint arXiv:2106.09685}, 2021.
+
+\bibitem[Janner et~al.(2022)Janner, Du, Tenenbaum, and Levine]{janner2022diffuser}
+Michael Janner, Yilun Du, Joshua Tenenbaum, and Sergey Levine.
+\newblock Planning with diffusion for flexible behavior synthesis.
+\newblock In \emph{International Conference on Machine Learning}, 2022.
+
+\bibitem[Kakade \& Langford(2002)Kakade and Langford]{kakade2002approximately}
+Sham Kakade and John Langford.
+\newblock Approximately optimal approximate reinforcement learning.
+\newblock In \emph{Proceedings of the Nineteenth International Conference on Machine Learning}, pp.\  267--274, 2002.
+
+\bibitem[Kingma et~al.(2021)Kingma, Salimans, Poole, and Ho]{kingma2021vdms}
+Diederik~P Kingma, Tim Salimans, Ben Poole, and Jonathan Ho.
+\newblock Variational diffusion models.
+\newblock In \emph{Neural Information Processing Systems}, 2021.
+
+\bibitem[Knox \& Stone(2008)Knox and Stone]{knox2008tamer}
+W.~Bradley Knox and Peter Stone.
+\newblock {TAMER}: {T}raining an {A}gent {M}anually via {E}valuative {R}einforcement.
+\newblock In \emph{International Conference on Development and Learning}, 2008.
+
+\bibitem[Lee et~al.(2023)Lee, Liu, Ryu, Watkins, Du, Boutilier, Abbeel, Ghavamzadeh, and Gu]{lee2023aligning}
+Kimin Lee, Hao Liu, Moonkyung Ryu, Olivia Watkins, Yuqing Du, Craig Boutilier, Pieter Abbeel, Mohammad Ghavamzadeh, and Shixiang~Shane Gu.
+\newblock Aligning text-to-image models using human feedback.
+\newblock \emph{arXiv preprint arXiv:2302.12192}, 2023.
+
+\bibitem[Liu et~al.(2023)Liu, Li, Wu, and Lee]{liu2023llava}
+Haotian Liu, Chunyuan Li, Qingyang Wu, and Yong~Jae Lee.
+\newblock Visual instruction tuning.
+\newblock 2023.
+
+\bibitem[Liu et~al.(2022)Liu, Li, Du, Torralba, and Tenenbaum]{liu2022compositional}
+Nan Liu, Shuang Li, Yilun Du, Antonio Torralba, and Joshua~B Tenenbaum.
+\newblock Compositional visual generation with composable diffusion models.
+\newblock \emph{arXiv preprint arXiv:2206.01714}, 2022.
+
+\bibitem[Menick et~al.(2022)Menick, Trebacz, Mikulik, Aslanides, Song, Chadwick, Glaese, Young, Campbell-Gillingham, Irving, and McAleese]{menick2022teaching}
+Jacob Menick, Maja Trebacz, Vladimir Mikulik, John Aslanides, Francis Song, Martin Chadwick, Mia Glaese, Susannah Young, Lucy Campbell-Gillingham, Geoffrey Irving, and Nat McAleese.
+\newblock Teaching language models to support answers with verified quotes.
+\newblock \emph{arXiv preprint arXiv:2203.11147}, 2022.
+
+\bibitem[Mohamed et~al.(2020)Mohamed, Rosca, Figurnov, and Mnih]{mohamed2020monte}
+Shakir Mohamed, Mihaela Rosca, Michael Figurnov, and Andriy Mnih.
+\newblock Monte carlo gradient estimation in machine learning.
+\newblock \emph{The Journal of Machine Learning Research}, 21\penalty0 (1):\penalty0 5183--5244, 2020.
+
+\bibitem[Nair et~al.(2020)Nair, Dalal, Gupta, and Levine]{nair2020accelerating}
+Ashvin Nair, Murtaza Dalal, Abhishek Gupta, and Sergey Levine.
+\newblock Accelerating online reinforcement learning with offline datasets.
+\newblock \emph{arXiv preprint arXiv:2006.09359}, 2020.
+
+\bibitem[Nakano et~al.(2021)Nakano, Hilton, Balaji, Wu, Ouyang, Kim, Hesse, Jain, Kosaraju, Saunders, Jiang, Cobbe, Eloundou, Krueger, Button, Knight, Chess, and Schulman]{nakano2021webgpt}
+Reiichiro Nakano, Jacob Hilton, Suchir Balaji, Jeff Wu, Long Ouyang, Christina Kim, Christopher Hesse, Shantanu Jain, Vineet Kosaraju, William Saunders, Xu~Jiang, Karl Cobbe, Tyna Eloundou, Gretchen Krueger, Kevin Button, Matthew Knight, Benjamin Chess, and John Schulman.
+\newblock Webgpt: Browser-assisted question-answering with human feedback.
+\newblock \emph{arXiv preprint arXiv:2112.09332}, 2021.
+
+\bibitem[Nguyen et~al.(2017)Nguyen, Daum{\'e}~III, and Boyd-Graber]{nguyen2017reinforcement}
+Khanh Nguyen, Hal Daum{\'e}~III, and Jordan Boyd-Graber.
+\newblock Reinforcement learning for bandit neural machine translation with simulated human feedback.
+\newblock In \emph{Empirical Methods in Natural Language Processing}, 2017.
+
+\bibitem[Nichol \& Dhariwal(2021)Nichol and Dhariwal]{nichol2021improved}
+Alexander~Quinn Nichol and Prafulla Dhariwal.
+\newblock Improved denoising diffusion probabilistic models.
+\newblock In \emph{International Conference on Machine Learning}, 2021.
+
+\bibitem[Ouyang et~al.(2022)Ouyang, Wu, Jiang, Almeida, Wainwright, Mishkin, Zhang, Agarwal, Slama, Ray, Schulman, Hilton, Kelton, Miller, Simens, Askell, Welinder, Christiano, Leike, and Lowe]{ouyang2022instructgpt}
+Long Ouyang, Jeff Wu, Xu~Jiang, Diogo Almeida, Carroll~L. Wainwright, Pamela Mishkin, Chong Zhang, Sandhini Agarwal, Katarina Slama, Alex Ray, John Schulman, Jacob Hilton, Fraser Kelton, Luke Miller, Maddie Simens, Amanda Askell, Peter Welinder, Paul Christiano, Jan Leike, and Ryan Lowe.
+\newblock Training language models to follow instructions with human feedback.
+\newblock \emph{arXiv preprint arXiv:2203.02155}, 2022.
+
+\bibitem[Peng et~al.(2019)Peng, Kumar, Zhang, and Levine]{peng2019advantage}
+Xue~Bin Peng, Aviral Kumar, Grace Zhang, and Sergey Levine.
+\newblock Advantage-weighted regression: Simple and scalable off-policy reinforcement learning.
+\newblock \emph{CoRR}, abs/1910.00177, 2019.
+\newblock URL \url{https://arxiv.org/abs/1910.00177}.
+
+\bibitem[Peters \& Schaal(2007)Peters and Schaal]{peters2007rwr}
+Jan Peters and Stefan Schaal.
+\newblock Reinforcement learning by reward-weighted regression for operational space control.
+\newblock In \emph{International Conference on Machine learning}, 2007.
+
+\bibitem[Radford et~al.(2021)Radford, Kim, Hallacy, Ramesh, Goh, Agarwal, Sastry, Askell, Mishkin, Clark, Krueger, and Sutskever]{radford2021clip}
+Alec Radford, Jong~Wook Kim, Chris Hallacy, Aditya Ramesh, Gabriel Goh, Sandhini Agarwal, Girish Sastry, Amanda Askell, Pamela Mishkin, Jack Clark, Gretchen Krueger, and Ilya Sutskever.
+\newblock Learning transferable visual models from natural language supervision.
+\newblock \emph{arXiv preprint arXiv:2103.00020}, 2021.
+
+\bibitem[Ramesh et~al.(2021)Ramesh, Pavlov, Gabriel~Goh, Voss, Radford, Chen, and Sutskever]{ramesh2021dalle}
+Aditya Ramesh, Mikhail Pavlov, Scott~Gray Gabriel~Goh, Chelsea Voss, Alec Radford, Mark Chen, and Ilya Sutskever.
+\newblock Zero-shot text-to-image generation.
+\newblock \emph{arXiv preprint arXiv:2102.12092}, 2021.
+
+\bibitem[Rombach et~al.(2022)Rombach, Blattmann, Lorenz, Esser, and Ommer]{rombach2022latent}
+Robin Rombach, Andreas Blattmann, Dominik Lorenz, Patrick Esser, and Bj\"orn Ommer.
+\newblock High-resolution image synthesis with latent diffusion models.
+\newblock In \emph{IEEE Conference on Computer Vision and Pattern Recognition}, 2022.
+
+\bibitem[Ruiz et~al.(2022)Ruiz, Li, Jampani, Pritch, Rubinstein, and Aberman]{ruiz2022dreambooth}
+Nataniel Ruiz, Yuanzhen Li, Varun Jampani, Yael Pritch, Michael Rubinstein, and Kfir Aberman.
+\newblock Dreambooth: Fine tuning text-to-image diffusion models for subject-driven generation.
+\newblock \emph{arXiv preprint arXiv:2208.12242}, 2022.
+
+\bibitem[Saharia et~al.(2022)Saharia, Chan, Saxena, Li, Whang, Denton, Ghasemipour, Ayan, Mahdavi, Lopes, Salimans, Ho, Fleet, and Norouzi]{saharia2022imagen}
+Chitwan Saharia, William Chan, Saurabh Saxena, Lala Li, Jay Whang, Emily Denton, Seyed Kamyar~Seyed Ghasemipour, Burcu~Karagol Ayan, S.~Sara Mahdavi, Rapha~Gontijo Lopes, Tim Salimans, Jonathan Ho, David~J Fleet, and Mohammad Norouzi.
+\newblock Photorealistic text-to-image diffusion models with deep language understanding.
+\newblock \emph{arXiv preprint arXiv:2205.11487}, 2022.
+
+\bibitem[Schneuing et~al.(2022)Schneuing, Du, Charles~Harris, Igashov, Du, Blundell, Lió, Gomes, Max~Welling, and Correia]{schneuing2022structure}
+Arne Schneuing, Yuanqi Du, Arian~Jamasb Charles~Harris, Ilia Igashov, Weitao Du, Tom Blundell, Pietro Lió, Carla Gomes, Michael~Bronstein Max~Welling, and Bruno Correia.
+\newblock Structure-based drug design with equivariant diffusion models.
+\newblock \emph{arXiv preprint arXiv:2210.02303}, 2022.
+
+\bibitem[Schuhmann(2022)]{schuhmann2022laion}
+Chrisoph Schuhmann.
+\newblock Laion aesthetics, Aug 2022.
+\newblock URL \url{https://laion.ai/blog/laion-aesthetics/}.
+
+\bibitem[Schulman et~al.(2015)Schulman, Levine, Abbeel, Jordan, and Moritz]{schulman2015trpo}
+John Schulman, Sergey Levine, Pieter Abbeel, Michael Jordan, and Philipp Moritz.
+\newblock Trust region policy optimization.
+\newblock In \emph{International Conference on Machine Learning}, 2015.
+
+\bibitem[Schulman et~al.(2017)Schulman, Wolski, Dhariwal, Radford, and Klimov]{schulman2017ppo}
+John Schulman, Filip Wolski, Prafulla Dhariwal, Alec Radford, and Oleg Klimov.
+\newblock Proximal policy optimization algorithms.
+\newblock \emph{arXiv preprint arXiv:1707.06347}, 2017.
+
+\bibitem[Singer et~al.(2022)Singer, Polyak, Hayes, Yin, An, Zhang, Hu, Yang, Ashual, Gafni, et~al.]{singer2022make}
+Uriel Singer, Adam Polyak, Thomas Hayes, Xi~Yin, Jie An, Songyang Zhang, Qiyuan Hu, Harry Yang, Oron Ashual, Oran Gafni, et~al.
+\newblock Make-a-video: Text-to-video generation without text-video data.
+\newblock \emph{arXiv preprint arXiv:2209.14792}, 2022.
+
+\bibitem[Sohl-Dickstein et~al.(2015)Sohl-Dickstein, Weiss, Maheswaranathan, and Ganguli]{sohldickstein2015nonequilibrium}
+Jascha Sohl-Dickstein, Eric Weiss, Niru Maheswaranathan, and Surya Ganguli.
+\newblock Deep unsupervised learning using nonequilibrium thermodynamics.
+\newblock In \emph{International Conference on Machine Learning}, 2015.
+
+\bibitem[Song et~al.(2021)Song, Meng, and Ermon]{song2021denoising}
+Jiaming Song, Chenlin Meng, and Stefano Ermon.
+\newblock Denoising diffusion implicit models.
+\newblock In \emph{International Conference on Learning Representations}, 2021.
+\newblock URL \url{https://openreview.net/forum?id=St1giarCHLP}.
+
+\bibitem[Stiennon et~al.(2020)Stiennon, Ouyang, Wu, Ziegler, Lowe, Voss, Radford, Amodei, and Christiano]{stiennon2020feedback}
+Nisan Stiennon, Long Ouyang, Jeffrey Wu, Daniel Ziegler, Ryan Lowe, Chelsea Voss, Alec Radford, Dario Amodei, and Paul~F Christiano.
+\newblock Learning to summarize with human feedback.
+\newblock In \emph{Neural Information Processing Systems}, 2020.
+
+\bibitem[Sutton et~al.(1999)Sutton, McAllester, Singh, and Mansour]{sutton1999policy}
+Richard~S Sutton, David McAllester, Satinder Singh, and Yishay Mansour.
+\newblock Policy gradient methods for reinforcement learning with function approximation.
+\newblock In S.~Solla, T.~Leen, and K.~M\"{u}ller (eds.), \emph{Advances in Neural Information Processing Systems}, volume~12. MIT Press, 1999.
+\newblock URL \url{https://proceedings.neurips.cc/paper_files/paper/1999/file/464d828b85b0bed98e80ade0a5c43b0f-Paper.pdf}.
+
+\bibitem[von Platen et~al.(2022)von Platen, Patil, Lozhkov, Cuenca, Lambert, Rasul, Davaadorj, and Wolf]{von-platen-etal-2022-diffusers}
+Patrick von Platen, Suraj Patil, Anton Lozhkov, Pedro Cuenca, Nathan Lambert, Kashif Rasul, Mishig Davaadorj, and Thomas Wolf.
+\newblock Diffusers: State-of-the-art diffusion models.
+\newblock \url{https://github.com/huggingface/diffusers}, 2022.
+
+\bibitem[Wang et~al.(2022)Wang, Hunt, and Zhou]{wang2022dql}
+Zhendong Wang, Jonathan~J Hunt, and Mingyuan Zhou.
+\newblock Diffusion policies as an expressive policy class for offline reinforcement learning.
+\newblock \emph{arXiv preprint arXiv:2208.06193}, 2022.
+
+\bibitem[Williams(1992)]{williams1992simple}
+Ronald~J Williams.
+\newblock Simple statistical gradient-following algorithms for connectionist reinforcement learning.
+\newblock \emph{Reinforcement learning}, pp.\  5--32, 1992.
+
+\bibitem[Wolf et~al.(2020)Wolf, Debut, Sanh, Chaumond, Delangue, Moi, Cistac, Rault, Louf, Funtowicz, Davison, Shleifer, von Platen, Ma, Jernite, Plu, Xu, Scao, Gugger, Drame, Lhoest, and Rush]{wolf-etal-2020-transformers}
+Thomas Wolf, Lysandre Debut, Victor Sanh, Julien Chaumond, Clement Delangue, Anthony Moi, Pierric Cistac, Tim Rault, Rémi Louf, Morgan Funtowicz, Joe Davison, Sam Shleifer, Patrick von Platen, Clara Ma, Yacine Jernite, Julien Plu, Canwen Xu, Teven~Le Scao, Sylvain Gugger, Mariama Drame, Quentin Lhoest, and Alexander~M. Rush.
+\newblock Transformers: State-of-the-art natural language processing.
+\newblock In \emph{Proceedings of the 2020 Conference on Empirical Methods in Natural Language Processing: System Demonstrations}, pp.\  38--45, Online, October 2020. Association for Computational Linguistics.
+\newblock URL \url{https://www.aclweb.org/anthology/2020.emnlp-demos.6}.
+
+\bibitem[Xie et~al.(2021)Xie, Fu, Ganea, Barzilay, and Jaakkola]{xie2021crystal}
+Tian Xie, Xiang Fu, Octavian-Eugen Ganea, Regina Barzilay, and Tommi~S Jaakkola.
+\newblock Crystal diffusion variational autoencoder for periodic material generation.
+\newblock In \emph{International Conference on Learning Representations}, 2021.
+
+\bibitem[Xu et~al.(2023)Xu, Liu, Wu, Tong, Li, Ding, Tang, and Dong]{xu2023imagereward}
+Jiazheng Xu, Xiao Liu, Yuchen Wu, Yuxuan Tong, Qinkai Li, Ming Ding, Jie Tang, and Yuxiao Dong.
+\newblock Imagereward: Learning and evaluating human preferences for text-to-image generation.
+\newblock \emph{arXiv preprint arXiv:2304.05977}, 2023.
+
+\bibitem[Xu et~al.(2021)Xu, Yu, Song, Shi, Ermon, , and Tang]{xu2021geodiff}
+Minkai Xu, Lantao Yu, Yang Song, Chence Shi, Stefano Ermon, , and Jian Tang.
+\newblock {GeoDiff}: A geometric diffusion model for molecular conformation generation.
+\newblock In \emph{International Conference on Learning Representations}, 2021.
+
+\bibitem[Zeng et~al.(2022)Zeng, Vahdat, Williams, Gojcic, Litany, Fidler, and Kreis]{zeng2022lion}
+Xiaohui Zeng, Arash Vahdat, Francis Williams, Zan Gojcic, Or~Litany, Sanja Fidler, and Karsten Kreis.
+\newblock Lion: Latent point diffusion models for 3d shape generation.
+\newblock \emph{arXiv preprint arXiv:2210.06978}, 2022.
+
+\bibitem[Zhang \& Agrawala(2023)Zhang and Agrawala]{zhang2023adding}
+Lvmin Zhang and Maneesh Agrawala.
+\newblock Adding conditional control to text-to-image diffusion models, 2023.
+
+\bibitem[Zhang et~al.(2020)Zhang, Kishore*, Wu, Weinberger, and Artzi]{zhang2020bertscore}
+Tianyi Zhang, Varsha Kishore*, Felix Wu, Kilian~Q. Weinberger, and Yoav Artzi.
+\newblock {BERTS}core: Evaluating text generation with {BERT}.
+\newblock In \emph{International Conference on Learning Representations}, 2020.
+
+\bibitem[Zhou et~al.(2021)Zhou, Du, and Wu]{zhou20213d}
+Linqi Zhou, Yilun Du, and Jiajun Wu.
+\newblock 3d shape generation and completion through point-voxel diffusion.
+\newblock In \emph{Proceedings of the IEEE/CVF International Conference on Computer Vision}, pp.\  5826--5835, 2021.
+
+\bibitem[Ziegler et~al.(2019)Ziegler, Stiennon, Wu, Brown, Radford, Amodei, Christiano, and Irving]{ziegler2019rlhf}
+Daniel~M. Ziegler, Nisan Stiennon, Jeffrey Wu, Tom~B. Brown, Alec Radford, Dario Amodei, Paul Christiano, and Geoffrey Irving.
+\newblock Fine-tuning language models from human preferences.
+\newblock \emph{arXiv preprint arXiv:1909.08593}, 2019.
+
+\end{thebibliography}

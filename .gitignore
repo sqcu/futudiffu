@@ -126,6 +126,10 @@ tnt_v7_validation/
 validation_renders/**/*.png
 validation_renders/**/*.npy
 
+# rtheta policy demo renders (force-tracked)
+!validation_renders/rtheta_policy_demo/
+!validation_renders/rtheta_policy_demo/**
+
 # ============================================================
 # Heattest render trajectory subdirectories (PNG debugging)
 # The tracked manifest/summary files stay.
@@ -162,4 +166,4 @@ training_output/*
 # UN-IGNORE: .safetensors inside the two blessed runs
 # (overrides the global *.safetensors rule above)
 !training_output/reward_function_run/**
-!training_output/reward_function_run_tnt_v2/**
+!training_output/reward_function_run_tnt_v2/**ref_papers/

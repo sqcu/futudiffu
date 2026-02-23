@@ -39,7 +39,6 @@ from src_ii.visualization import (
     render_text_token_bar_chart,
 )
 
-# --- Configuration ---
 VAE_PATH = r"F:\dox\ai\comfyui\ComfyUI\models\vae\zimage.safetensors"
 OUTPUT_DIR = REPO_ROOT / "pinkify_thisnotthat_output" / "attention_maps"
 
@@ -56,18 +55,15 @@ def main():
     device = torch.device("cuda")
     dtype = torch.bfloat16
 
-    # Check that attention stats exist
     for name in LATENT_NAMES:
         stats_path = OUTPUT_DIR / f"attention_stats_{name}.pt"
         if not stats_path.exists():
             print(f"ERROR: Missing {stats_path}. Run attention_interpretability.py first.")
             sys.exit(1)
 
-    # --- Load VAE ---
     print("=== Loading VAE ===")
     vae = load_vae(VAE_PATH, device=device, dtype=dtype)
 
-    # --- Decode latents and render attention overlays ---
     print("\n=== Rendering attention maps ===")
 
     decoded_images = {}
@@ -98,7 +94,6 @@ def main():
         print(f"  Caption: {cap_len} tokens")
         print(f"  Layers captured: {len(stats)}")
 
-        # Render attention overlay using extracted function
         overlay = render_attention_map(
             decoded, stats, n_img_tokens, H_tokens, W_tokens, cap_len,
             alpha=0.4, colormap="hot",
@@ -106,7 +101,6 @@ def main():
         overlay.save(str(OUTPUT_DIR / f"overlay_{name}.png"))
         print(f"  Overlay saved: overlay_{name}.png")
 
-        # Text token attention bar chart
         n_layers = len(stats)
         agg_received = torch.zeros(first_stats["n_heads"], seq_len)
         for layer_idx in range(n_layers):
@@ -122,7 +116,6 @@ def main():
 
         summary_images.append((name, overlay))
 
-    # --- Render diff overlays ---
     print("\n=== Rendering attention diff maps ===")
 
     diff_configs = [
@@ -156,7 +149,6 @@ def main():
         cap_len_a = first_diff["seq_len_a"] - n_img_padded
         img_start_a = cap_len_a
 
-        # Aggregate diff across layers
         agg_diff = torch.zeros(n_heads_diff, min_seq)
         for layer_idx in range(n_layers):
             agg_diff += diff_stats[layer_idx]["received_diff"]
@@ -178,7 +170,6 @@ def main():
         print(f"  Diff overlay saved: overlay_{diff_name}.png")
         diff_overlays.append((title, overlay_diff))
 
-        # Text token diff
         text_diff = agg_diff[:, :min(cap_len_a, min_seq)].mean(dim=0)
         text_chart = render_text_token_bar_chart(
             text_diff, width=600, height=200,
@@ -186,7 +177,6 @@ def main():
         )
         text_chart.save(str(OUTPUT_DIR / f"text_diff_{diff_name}.png"))
 
-        # Layer x Head heatmap
         layer_head_img = render_layer_head_heatmap(
             diff_stats, n_layers, n_heads_diff,
             width=800, height=400,
@@ -195,7 +185,6 @@ def main():
         layer_head_img.save(str(OUTPUT_DIR / f"layer_head_{diff_name}.png"))
         print(f"  Layer-head heatmap saved: layer_head_{diff_name}.png")
 
-    # --- Summary strips ---
     print("\n=== Creating summary images ===")
     if summary_images:
         strip = render_strip(summary_images, max_width=1600)

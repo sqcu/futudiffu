@@ -19,7 +19,6 @@ import textwrap
 from collections import Counter
 from datetime import datetime, timezone
 
-# Add src_ii to path for bin_packer import
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src_ii"))
 from bin_packer import (
     DEFAULT_CAP_TOKENS,
@@ -38,9 +37,6 @@ from bin_packer import (
 )
 
 
-# ===========================================================================
-# Constants from the diffusion model
-# ===========================================================================
 VAE_SCALE = 8
 PATCH_SIZE = 2
 PAD_TOKENS_MULTIPLE = 32  # NextDiT default: pad_tokens_multiple=32
@@ -83,11 +79,7 @@ def compute_reference_total_len(
     return compute_padded_cap_tokens(cap_len) + compute_padded_img_tokens(width, height)
 
 
-# ===========================================================================
-# User-claimed resolution tiers and batch-per-tier estimates (image-only)
-# ===========================================================================
 USER_CLAIMS = {
-    # (width, height): (expected_seq_len, expected_items_per_batch)
     (256, 256): (256, 16),
     (320, 320): (400, 10),
     (384, 384): (576, 7),
@@ -98,9 +90,6 @@ USER_CLAIMS = {
 }
 
 
-# ===========================================================================
-# Typical prompt lengths for text overhead analysis
-# ===========================================================================
 PROMPT_SCENARIOS = {
     "empty": 7,
     "short_prompt": 20,
@@ -130,9 +119,6 @@ def run_audit() -> str:
     emit(f"PAD_TOKENS_MULTIPLE = {PAD_TOKENS_MULTIPLE}")
     emit(f"VAE_SCALE = {VAE_SCALE}, PATCH_SIZE = {PATCH_SIZE}")
 
-    # ===================================================================
-    # 1. ALIGNMENT VALIDATION
-    # ===================================================================
     emit(section("1. ALIGNMENT VALIDATION (16-pixel alignment)"))
     emit("All resolutions must be divisible by VAE_SCALE * PATCH_SIZE = 16.\n")
 
@@ -159,9 +145,6 @@ def run_audit() -> str:
 
     emit(f"\nAlignment verdict: {'ALL PASS' if alignment_ok else 'FAILURES DETECTED'}")
 
-    # ===================================================================
-    # 2. SEQ_LEN VERIFICATION vs USER CLAIMS (image-only, backward compat)
-    # ===================================================================
     emit(section("2. SEQ_LEN VERIFICATION vs USER CLAIMS (image-only)"))
     emit(f"{'Resolution':>12s}  {'Computed':>8s}  {'Claimed':>8s}  {'Match':>5s}  "
          f"{'items@{REFERENCE_SEQ_LEN}':>12s}  {'Claimed':>8s}  {'Match':>5s}")
@@ -181,9 +164,6 @@ def run_audit() -> str:
 
     emit(f"\nSeq_len/items verdict: {'ALL MATCH' if seq_len_ok else 'MISMATCHES DETECTED'}")
 
-    # ===================================================================
-    # 3. NEW: TEXT-AWARE EFFECTIVE SEQ_LEN TABLE
-    # ===================================================================
     emit(section("3. TEXT-AWARE EFFECTIVE SEQUENCE LENGTHS"))
     emit(f"Using DEFAULT_CAP_TOKENS={DEFAULT_CAP_TOKENS} (p90 of real dataset).")
     emit(f"REFERENCE_TOTAL_LEN = compute_effective_seq_len(1280, 832, {DEFAULT_CAP_TOKENS}) = {REFERENCE_TOTAL_LEN}")
@@ -201,9 +181,6 @@ def run_audit() -> str:
         emit(f"  {tier_name:>8s} {w:4d}x{h:<4d}  {img_raw:8d} {img_padded:8d} "
              f"{cap_padded:8d} {effective:10d} {items_fit:10d}")
 
-    # ===================================================================
-    # 4. COMPARISON: IMAGE-ONLY vs TEXT-AWARE PACKING
-    # ===================================================================
     emit(section("4. IMAGE-ONLY vs TEXT-AWARE PACKING COMPARISON"))
     emit("How many items fit per bin with image-only vs text-aware accounting?\n")
 
@@ -219,9 +196,6 @@ def run_audit() -> str:
         flag = " <-- CHANGED" if delta != 0 else ""
         emit(f"  {w:5d}x{h:<5d}  {img_only_fit:9d}  {text_aware_fit:10d}  {delta:+6d}{flag}")
 
-    # ===================================================================
-    # 5. PACKING SIMULATION: TEXT-AWARE (new default)
-    # ===================================================================
     emit(section("5. PACKING SIMULATION: TEXT-AWARE (REFERENCE_TOTAL_LEN)"))
 
     prompts = [f"prompt_{i}" for i in range(10)]
@@ -237,7 +211,6 @@ def run_audit() -> str:
     )
     emit(f"Plan: {len(plan)} items from {len(prompts)} prompts x {tiers} x {backends}")
 
-    # Text-aware scheduler (new default)
     scheduler = BinPackScheduler()  # uses REFERENCE_TOTAL_LEN
     bins = scheduler.pack_generation_plan(plan)
     efficiency = scheduler.estimate_efficiency(bins)
@@ -269,13 +242,9 @@ def run_audit() -> str:
              f"sparse={info['sparse_compute_ratio']:.3f} "
              f"({info['n_items']} items: {items_desc})")
 
-    # ===================================================================
-    # 5b. COMPARISON: Old image-only packing
-    # ===================================================================
     emit(section("5b. COMPARISON: OLD IMAGE-ONLY PACKING"))
 
     scheduler_old = BinPackScheduler(max_seq_len=REFERENCE_SEQ_LEN)
-    # Override default_cap_tokens to 0 to simulate old behavior
     plan_img_only = []
     for item in plan:
         item_copy = dict(item)
@@ -298,9 +267,6 @@ def run_audit() -> str:
     bin_delta = efficiency['n_bins'] - efficiency_old['n_bins']
     emit(f"  Bin count change: {bin_delta:+d}")
 
-    # ===================================================================
-    # 6. FLEXATTENTION SPARSITY ANALYSIS
-    # ===================================================================
     emit(section("6. FLEXATTENTION SPARSITY ANALYSIS"))
     emit("Underfilled bins are NOT wasted compute with FlexAttention block masks.")
     emit("Each image only self-attends to its own tokens (block-diagonal).")
@@ -319,9 +285,6 @@ def run_audit() -> str:
     emit("compute is only 66% of full capacity. The 19% 'wasted' capacity is")
     emit("not wasted -- it's simply not computed.")
 
-    # ===================================================================
-    # 7. DETAILED SPARSITY FOR ACTUAL PACKED BINS
-    # ===================================================================
     emit(section("7. SPARSE COMPUTE FOR ACTUAL PACKED BINS (first 20)"))
     emit("Detailed breakdown of sparse compute for text-aware packed bins.\n")
 
@@ -337,16 +300,12 @@ def run_audit() -> str:
              f"effective_flops={ratio:.1%} of dense  "
              f"({items_desc})")
 
-    # ===================================================================
-    # 8. UNDER-FILLED BIN ANALYSIS
-    # ===================================================================
     emit(section("8. UNDER-FILLED BIN ANALYSIS"))
     emit("Checking that the bin packer does NOT reject under-filled bins.\n")
 
     underfilled = [info for info in efficiency["per_bin"] if info["utilization"] < 0.5]
     emit(f"  Bins with <50% utilization: {len(underfilled)} / {len(efficiency['per_bin'])}")
 
-    # Test: single small item
     small_plan = [{"width": 256, "height": 256}]
     scheduler_test = BinPackScheduler()
     small_bins = scheduler_test.pack_generation_plan(small_plan)
@@ -354,9 +313,6 @@ def run_audit() -> str:
     assert len(small_bins) == 1, f"Expected 1 bin for single small item, got {len(small_bins)}"
     emit(f"  Single 256x256 -> 1 bin (utilization: {small_eff['per_bin'][0]['utilization']:.1%}) -- NOT rejected")
 
-    # ===================================================================
-    # 9. EDGE CASE: OVERSIZED ITEMS
-    # ===================================================================
     emit(section("9. EDGE CASE: ITEMS WITH seq_len > REFERENCE_TOTAL_LEN"))
 
     huge_eff = compute_effective_seq_len(2048, 2048, DEFAULT_CAP_TOKENS)
@@ -372,9 +328,6 @@ def run_audit() -> str:
         emit(f"    bin {i}: {len(b)} items, used={used}, sizes="
              f"{[(item.get('width','?'), item.get('height','?')) for item in b]}")
 
-    # ===================================================================
-    # 10. HOMOGENEOUS PACKING PER TIER (text-aware)
-    # ===================================================================
     emit(section("10. HOMOGENEOUS PACKING: TEXT-AWARE MAX ITEMS PER RESOLUTION"))
     emit(f"  How many items of each resolution fit in REFERENCE_TOTAL_LEN={REFERENCE_TOTAL_LEN}?\n")
 
@@ -389,16 +342,12 @@ def run_audit() -> str:
             remaining = REFERENCE_TOTAL_LEN - total
             util = total / REFERENCE_TOTAL_LEN if REFERENCE_TOTAL_LEN > 0 else 0
 
-            # Sparse compute for this homogeneous bin
             item_lens = [effective] * max_fit
             sparse_ratio = estimate_sparse_compute_ratio_detailed(item_lens, REFERENCE_TOTAL_LEN)
 
             emit(f"  {tier_name:>8s} {w:4d}x{h:<4d}  {effective:10d} {max_fit:8d} "
                  f"{total:10d} {remaining:10d} {util:5.1%} {sparse_ratio:8.4f}")
 
-    # ===================================================================
-    # 11. SUMMARY OF FINDINGS
-    # ===================================================================
     emit(section("11. SUMMARY OF FINDINGS"))
 
     findings = [
@@ -443,9 +392,6 @@ def run_audit() -> str:
     return "\n".join(lines)
 
 
-# ===========================================================================
-# Main
-# ===========================================================================
 
 def main():
     report = run_audit()
@@ -458,7 +404,6 @@ def main():
         f.write(report)
     print(f"\nReport saved to: {output_path}")
 
-    # Also save structured results as JSON
     json_path = os.path.join(output_dir, "validation_results_v2.json")
     json_data = {
         "generated_at": datetime.now(timezone.utc).isoformat(),

@@ -1,0 +1,18 @@
+\begin{figure}[hbtp]
+    \centering
+    \includegraphics[width=0.6\textwidth]{cfg.pdf} \\
+    \hspace*{\fill}
+    \hspace{4.5em}
+    \raisebox{0.14em}{\color{ppo}\rule{1.5em}{0.15em}}
+    ~with CFG training
+    \hspace{1.5em}
+    \raisebox{0.14em}{\color{pg}\rule{1.5em}{0.15em}}
+    ~without CFG training
+    \hspace*{\fill}
+    \caption{
+        \textbf{(CFG training)}
+        We run the \methodff{} algorithm while optimizing only the conditional $\bm \epsilon$-prediction (\emph{without CFG training}), and while optimizing the guided $\bm \epsilon$-prediction (\emph{with CFG training}).
+        Each point denotes a diffusion model update.
+        We find that CFG training is essential for methods that do more than one round of interleaved sampling and training.
+    } \label{fig:cfg}
+\end{figure}

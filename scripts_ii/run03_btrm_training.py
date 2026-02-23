@@ -30,9 +30,6 @@ REPO_ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-# ---------------------------------------------------------------------------
-# src_ii imports ONLY (R1: no imports from scripts/)
-# ---------------------------------------------------------------------------
 from src_ii.bin_packer import (
     REFERENCE_SEQ_LEN,
     REFERENCE_TOTAL_LEN,
@@ -49,13 +46,9 @@ from src_ii.pair_sampler import BTRMPairSampler, build_positions_from_v2
 from src_ii.rendering import save_tensor_as_png
 from src_ii.sigma_schedule import build_sigma_schedule, resolution_shift
 
-# futudiffu imports (allowed: these are the core library, not scripts/)
 from futudiffu.client import InferenceClient
 from futudiffu.dataset_v2 import DatasetReader, DatasetWriter
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
 
 OUTPUT_DIR = REPO_ROOT / "training_output" / "run03"
 RENDER_DIR = OUTPUT_DIR / "renders"
@@ -64,19 +57,16 @@ METRICS_PATH = OUTPUT_DIR / "btrm_metrics.jsonl"
 CONFIG_PATH = OUTPUT_DIR / "run03_config.json"
 SUMMARY_PATH = OUTPUT_DIR / "run03_summary.json"
 
-# Existing V2 datasets to merge for training
 EXISTING_V2_DATASETS = [
     REPO_ROOT / "btrm_dataset_v2",
     REPO_ROOT / "training_output" / "run02" / "run02_dataset",
 ]
 
-# Model weights
 FP8_WEIGHTS = r"F:\dox\ai\comfyui\ComfyUI\models\diffusion_models\z_image_fp8_blockwise.safetensors"
 VAE_WEIGHTS = r"F:\dox\ai\comfyui\ComfyUI\models\vae\zimage.safetensors"
 
 SERVER_ENDPOINT = "tcp://localhost:5555"
 
-# Prompts for new trajectory generation (subset of 24 built-in)
 GENERATION_PROMPTS = [
     'ahem.\n*ting ting ting ting ting*\nthe query model for this is a LARGE LANGUAGE MODEL, specifically QWEN-3-4B, a GENERAL PURPOSE SEMANTIC PARSER which is able to WRITE SENTENCES AT A TIME when they are participating in dialogue. however, in this situation, they are being used as a hidden state generator to steer an *image generation model*, z-image.\n\nqwen-3-4b, draw me an "enormous laser shark for the sega saturn".',
     'qwen-3-4b, draw me a "gigantic laser shark breaching out of the ocean at sunset".',
@@ -86,14 +76,11 @@ GENERATION_PROMPTS = [
     'An oil painting of a harbor at twilight, fishing boats with warm lanterns, impressionist style, visible brushstrokes.',
 ]
 
-# Generation plan: 6 prompts x 2 tiers x 2 backends = 24 base trajectories
-# Plus reduced-step variants for scrongle signal
 RESOLUTION_TIERS = ["full", "medium"]
 ATTENTION_BACKENDS = ["sdpa", "sage"]
 N_STEPS_FULL = 30
 N_STEPS_REDUCED = 10
 
-# BTRM training hyperparameters
 BTRM_LR = 3e-4
 BTRM_GRAD_CLIP = 0.1
 BTRM_N_STEPS = 100  # optimizer steps (doubled from run02's 30 macrobatches)
@@ -101,7 +88,6 @@ BTRM_WARMUP = 40
 BTRM_GRAD_ACCUM = 2  # 2 microbatches per optimizer step
 BTRM_CHECKPOINT_INTERVAL = 10
 
-# Head names: scrimble (quantization) and scrongle (step count)
 HEAD_NAMES = ("scrimble", "scrongle")
 PREF_KEYS = ("scrimble_pref", "scrongle_pref")
 
@@ -114,9 +100,6 @@ def _make_preference_fn():
 
     Returns a function that takes a pair dict and returns preferences.
     """
-    # We need access to the dataset metadata to determine preferences.
-    # The pair sampler gives us (traj_a, step_a, traj_b, step_b).
-    # We need to look up each trajectory's attention_backend and n_steps.
     _meta_cache = {}
 
     def _load_meta(reader, traj_id):
@@ -131,7 +114,6 @@ def _make_preference_fn():
 
         prefs = {}
 
-        # Scrimble: SDPA > SageAttention (at same step count)
         backend_a = meta_a.get("attention_backend", "sdpa")
         backend_b = meta_b.get("attention_backend", "sdpa")
         if backend_a != backend_b:
@@ -144,7 +126,6 @@ def _make_preference_fn():
         else:
             prefs["scrimble_pref"] = 0  # same backend, no scrimble signal
 
-        # Scrongle: more steps > fewer steps (at same backend)
         steps_a = meta_a.get("n_steps", 30)
         steps_b = meta_b.get("n_steps", 30)
         if steps_a != steps_b:
@@ -171,7 +152,6 @@ def phase1_generate(client: InferenceClient) -> Path:
 
     t0 = time.perf_counter()
 
-    # Generate full-step trajectories (SDPA + Sage, full + medium res)
     config_full = DatasetGenerationConfig(
         prompts=GENERATION_PROMPTS,
         resolution_tiers=RESOLUTION_TIERS,
@@ -191,8 +171,6 @@ def phase1_generate(client: InferenceClient) -> Path:
     generator_full = DatasetGenerator(config_full, client)
     summary_full = generator_full.generate_all()
 
-    # Now generate reduced-step trajectories (for scrongle signal)
-    # Only SDPA at full resolution, 10 steps
     config_reduced = DatasetGenerationConfig(
         prompts=GENERATION_PROMPTS[:4],  # Use first 4 prompts for reduced
         resolution_tiers=["full"],
@@ -214,7 +192,6 @@ def phase1_generate(client: InferenceClient) -> Path:
 
     gen_time = time.perf_counter() - t0
 
-    # Save generation metrics
     gen_metrics = {
         "full_step": summary_full,
         "reduced_step": summary_reduced,
@@ -247,17 +224,14 @@ def phase1_render(client: InferenceClient, dataset_dir: Path):
             continue
         meta, accessor = reader[traj_id]
 
-        # Get the final latent
         if "final" not in accessor.available_steps:
             print(f"  traj {traj_id:06d}: no final latent, skipping")
             continue
 
         final_latent = accessor["final"]
 
-        # VAE decode via server
         decoded = client.vae_decode(final_latent)
 
-        # Build filename from metadata
         w = meta.get("width", 0)
         h = meta.get("height", 0)
         backend = meta.get("attention_backend", "unknown")
@@ -286,12 +260,8 @@ def phase2_train(client: InferenceClient, gen_dataset_dir: Path):
 
     t0_phase = time.perf_counter()
 
-    # ---------------------------------------------------------------
-    # 2a: Merge datasets for training
-    # ---------------------------------------------------------------
     print("\n--- Merging datasets ---")
 
-    # Collect all available V2 datasets
     all_readers = []
     total_trajs = 0
 
@@ -303,7 +273,6 @@ def phase2_train(client: InferenceClient, gen_dataset_dir: Path):
             all_readers.append((r, ds_path))
             total_trajs += n
 
-    # Add run03's own generated data
     if gen_dataset_dir.exists() and (gen_dataset_dir / "index.parquet").exists():
         r = DatasetReader(str(gen_dataset_dir))
         n = len(r)
@@ -313,8 +282,6 @@ def phase2_train(client: InferenceClient, gen_dataset_dir: Path):
 
     print(f"  Total available: {total_trajs} trajectories")
 
-    # Use the largest dataset as primary reader (for pair sampling)
-    # We'll build positions from all datasets
     all_positions = []
     all_traj_meta = {}  # global_id -> (reader, local_traj_id, meta)
     global_id_offset = 0
@@ -322,12 +289,10 @@ def phase2_train(client: InferenceClient, gen_dataset_dir: Path):
     for reader, ds_path in all_readers:
         import pyarrow.parquet as pq
 
-        # Apply dataset filters
         from src_ii.dataset_filters import filter_training_trajectories
 
         raw_table = pq.read_table(str(ds_path / "index.parquet"))
 
-        # Only apply filter if run_name column exists
         if "run_name" in raw_table.column_names:
             filtered = filter_training_trajectories(raw_table)
         else:
@@ -335,18 +300,15 @@ def phase2_train(client: InferenceClient, gen_dataset_dir: Path):
 
         traj_ids = filtered.column("traj_id").to_pylist()
 
-        # Build positions from this reader
         positions = build_positions_from_v2(
             reader, traj_ids=traj_ids,
         )
 
-        # Remap positions to global IDs
         local_to_global = {}
         for pos in positions:
             if pos.traj_id not in local_to_global:
                 gid = global_id_offset + pos.traj_id
                 local_to_global[pos.traj_id] = gid
-                # Cache metadata
                 meta, accessor = reader[pos.traj_id]
                 all_traj_meta[gid] = {
                     "reader": reader,
@@ -361,9 +323,6 @@ def phase2_train(client: InferenceClient, gen_dataset_dir: Path):
 
     print(f"  Positions for sampling: {len(all_positions)} across {len(all_traj_meta)} trajectories")
 
-    # ---------------------------------------------------------------
-    # 2b: Build pair sampler
-    # ---------------------------------------------------------------
     print("\n--- Building pair sampler ---")
 
     sampler = BTRMPairSampler(
@@ -376,13 +335,8 @@ def phase2_train(client: InferenceClient, gen_dataset_dir: Path):
     print(f"  Trajectories: {sampler.n_trajectories}")
     print(f"  Positions: {sampler.n_positions}")
 
-    # ---------------------------------------------------------------
-    # 2c: Build preference function
-    # ---------------------------------------------------------------
     print("\n--- Building preference function ---")
 
-    # The preference function uses trajectory metadata to determine
-    # which image is "better" for each head.
     def preference_fn(pair):
         """Compute pairwise preferences from trajectory metadata.
 
@@ -397,7 +351,6 @@ def phase2_train(client: InferenceClient, gen_dataset_dir: Path):
 
         prefs = {}
 
-        # Scrimble: SDPA wins over SageAttention
         backend_a = meta_a.get("attention_backend", "sdpa")
         backend_b = meta_b.get("attention_backend", "sdpa")
         if backend_a == "sdpa" and backend_b == "sage":
@@ -407,7 +360,6 @@ def phase2_train(client: InferenceClient, gen_dataset_dir: Path):
         else:
             prefs["scrimble_pref"] = 0
 
-        # Scrongle: more steps wins
         steps_a = meta_a.get("n_steps", 30)
         steps_b = meta_b.get("n_steps", 30)
         if steps_a > steps_b:
@@ -419,14 +371,9 @@ def phase2_train(client: InferenceClient, gen_dataset_dir: Path):
 
         return prefs
 
-    # ---------------------------------------------------------------
-    # 2d: Load backbone model directly (not via server)
-    # ---------------------------------------------------------------
     print("\n--- Loading backbone model ---")
 
-    # Load WITHOUT compilation (training uses forward_checkpointed, not diff_compiled)
-    # This avoids Defect R2-03 (inductor SymPy recursion with LoRA)
-    _, raw_model = load_zimage_rlaif(
+    raw_model = load_zimage_rlaif(
         FP8_WEIGHTS,
         device=torch.device("cuda"),
         dtype=torch.bfloat16,
@@ -434,14 +381,10 @@ def phase2_train(client: InferenceClient, gen_dataset_dir: Path):
         fuse=True,
     )
 
-    # ---------------------------------------------------------------
-    # 2e: Create BTRMCompoundModel (R2: prevents Defect 24)
-    # ---------------------------------------------------------------
     print("\n--- Creating BTRM compound model ---")
 
     optimizer = setup_btrm_training(raw_model)
 
-    # Verify adapter params are in the model
     adapter_params_dict = get_adapter_params(raw_model, "rtheta")
     head_params_list = list(raw_model.score_proj.parameters()) + list(raw_model.score_norm.parameters())
 
@@ -451,16 +394,11 @@ def phase2_train(client: InferenceClient, gen_dataset_dir: Path):
     print(f"  Head params: {n_head:,}")
     print(f"  Total trainable: {n_adapter + n_head:,}")
 
-    # ---------------------------------------------------------------
-    # 2f: Build load_latent_fn
-    # ---------------------------------------------------------------
     print("\n--- Preparing latent loader ---")
 
-    # Pre-encode prompts for conditioning
     prompt_cache = {}
     neg_cond = None
 
-    # Collect unique prompts from all trajectories
     unique_prompts = set()
     for gid, info in all_traj_meta.items():
         prompt = info["meta"].get("prompt", "")
@@ -469,12 +407,10 @@ def phase2_train(client: InferenceClient, gen_dataset_dir: Path):
 
     print(f"  {len(unique_prompts)} unique prompts to encode")
 
-    # Encode prompts via server
     neg_cond = client.encode_prompt("")
     for prompt in unique_prompts:
         prompt_cache[prompt] = client.encode_prompt(prompt)
 
-    # Free text encoder on server
     client.free("te")
     print(f"  Prompts encoded, TE freed")
 
@@ -489,10 +425,8 @@ def phase2_train(client: InferenceClient, gen_dataset_dir: Path):
         meta = info["meta"]
         accessor = info["accessor"]
 
-        # Load latent
         latent = accessor[step_key].to(device="cuda", dtype=torch.bfloat16)
 
-        # Get sigma for this step
         n_steps = meta.get("n_steps", 30)
         denoise_val = meta.get("denoise") or 1.0
         recorded_shift = meta.get("sampling_shift")
@@ -508,7 +442,6 @@ def phase2_train(client: InferenceClient, gen_dataset_dir: Path):
             device="cpu", dtype=torch.float32,
         )
 
-        # Determine sigma from step_key
         if step_key == "final":
             sigma_val = float(sigmas[-2].item()) if len(sigmas) > 1 else 0.01
         else:
@@ -520,21 +453,16 @@ def phase2_train(client: InferenceClient, gen_dataset_dir: Path):
 
         timestep = torch.tensor([sigma_val], device="cuda", dtype=torch.bfloat16)
 
-        # Get conditioning
         prompt = meta.get("prompt", "")
         if prompt in prompt_cache:
             cond = prompt_cache[prompt].to(device="cuda")
         else:
-            # Fallback: use negative conditioning
             cond = neg_cond.to(device="cuda")
 
         num_tokens = cond.shape[1]
 
         return latent, timestep, cond, num_tokens
 
-    # ---------------------------------------------------------------
-    # 2g: Run training
-    # ---------------------------------------------------------------
     print("\n--- Starting BTRM training ---")
     print(f"  Steps: {BTRM_N_STEPS}")
     print(f"  LR: {BTRM_LR}")
@@ -543,7 +471,6 @@ def phase2_train(client: InferenceClient, gen_dataset_dir: Path):
     print(f"  Warmup: {BTRM_WARMUP}")
     print(f"  Heads: {HEAD_NAMES}")
 
-    # Open metrics file for streaming writes
     metrics_file = open(METRICS_PATH, "w")
 
     def training_callback(step, entry):
@@ -557,7 +484,6 @@ def phase2_train(client: InferenceClient, gen_dataset_dir: Path):
         metrics_file.write(json.dumps(record, default=str) + "\n")
         metrics_file.flush()
 
-        # Checkpoint at intervals
         if (step + 1) % BTRM_CHECKPOINT_INTERVAL == 0:
             ckpt_dir = OUTPUT_DIR / f"btrm_ckpt_{step + 1:04d}"
             persist_btrm(raw_model, "rtheta", str(ckpt_dir))
@@ -586,20 +512,13 @@ def phase2_train(client: InferenceClient, gen_dataset_dir: Path):
     train_time = time.perf_counter() - t0_phase
     print(f"\nPhase 2 complete: {train_time:.1f}s")
 
-    # ---------------------------------------------------------------
-    # 2h: Save final weights
-    # ---------------------------------------------------------------
     print("\n--- Saving final weights ---")
     final_dir = OUTPUT_DIR / "final"
     manifest = persist_btrm(raw_model, "rtheta", str(final_dir))
 
-    # Print sampler stats
     stats = sampler.stats()
     print(f"\nSampler stats: {json.dumps(stats, indent=2)}")
 
-    # ---------------------------------------------------------------
-    # 2i: Training summary
-    # ---------------------------------------------------------------
     if training_curve:
         first = training_curve[0]
         last = training_curve[-1]
@@ -617,11 +536,9 @@ def phase2_train(client: InferenceClient, gen_dataset_dir: Path):
 def main():
     wall_start = time.perf_counter()
 
-    # Create output directories
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     RENDER_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Save config
     config = {
         "run_name": "run03",
         "generation_prompts": len(GENERATION_PROMPTS),
@@ -641,7 +558,6 @@ def main():
     }
     CONFIG_PATH.write_text(json.dumps(config, indent=2))
 
-    # Connect to server
     print("Connecting to inference server...")
     client = InferenceClient(SERVER_ENDPOINT, timeout_ms=0)
 
@@ -654,25 +570,14 @@ def main():
         print("Start the server first.")
         return 1
 
-    # ---------------------------------------------------------------
-    # Phase 1: Generate trajectories
-    # ---------------------------------------------------------------
     gen_dataset_dir = phase1_generate(client)
 
-    # Render all generated trajectories
     phase1_render(client, gen_dataset_dir)
 
-    # ---------------------------------------------------------------
-    # Phase 2: BTRM Training
-    # ---------------------------------------------------------------
-    # Free diffusion model on server before loading locally
     client.free("diffusion")
 
     training_curve, train_time = phase2_train(client, gen_dataset_dir)
 
-    # ---------------------------------------------------------------
-    # Summary
-    # ---------------------------------------------------------------
     wall_total = time.perf_counter() - wall_start
 
     summary = {

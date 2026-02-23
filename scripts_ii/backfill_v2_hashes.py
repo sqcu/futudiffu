@@ -48,7 +48,6 @@ import os
 import sys
 from pathlib import Path
 
-# Windows venv path insertion for src imports
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
@@ -64,19 +63,11 @@ from src_ii.sampling_identity import (
     serialize_active_adapters,
 )
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
 
-# Placeholder hash for the base Z-Image model weights.
-# Not a real content hash (would require hashing ~6 GB of weights).
-# Replace with the actual SHA-256 if/when the model weights are fingerprinted.
 BASE_MODEL_HASH_PLACEHOLDER = "z_image_v1"
 
-# Run names where the model state is fully known (no adapters).
 KNOWN_BASE_RUN_NAMES = {"original_v1"}
 
-# Run names where adapters were active but their exact state is unknown.
 UNKNOWN_ADAPTER_RUN_NAMES = {"policy_rollout_v1", "2xh100_20260216"}
 
 
@@ -106,7 +97,6 @@ def backfill_hashes(
     n_total = len(rows)
 
     for row in rows:
-        # Skip rows that already have a model_state_hash
         if row.get("model_state_hash") is not None:
             n_already_filled += 1
             continue
@@ -114,7 +104,6 @@ def backfill_hashes(
         run_name = row.get("run_name", "")
 
         if run_name in KNOWN_BASE_RUN_NAMES:
-            # Original V1 data: base model, no adapters
             base_hash = BASE_MODEL_HASH_PLACEHOLDER
             adapter_list = []
             adapter_set_h = compute_adapter_set_hash(adapter_list)  # ""
@@ -137,7 +126,6 @@ def backfill_hashes(
             n_known_filled += 1
 
         elif run_name in UNKNOWN_ADAPTER_RUN_NAMES:
-            # Policy rollouts / H100 run: base model known, adapter state unknown
             row["base_model_hash"] = BASE_MODEL_HASH_PLACEHOLDER
             row["adapter_set_hash"] = None  # unknown
             row["model_state_hash"] = None  # cannot compute
@@ -146,7 +134,6 @@ def backfill_hashes(
             n_unknown_partial += 1
 
         else:
-            # Unknown run_name -- leave all hash columns null
             row["base_model_hash"] = None
             row["adapter_set_hash"] = None
             row["model_state_hash"] = None
@@ -172,10 +159,6 @@ def backfill_hashes(
         print(f"\n  DRY RUN -- no changes written.")
         return summary
 
-    # Reconstruct table with hash columns
-    # The existing schema may not have the hash columns yet if this is the
-    # first backfill. We need to use a schema that includes them.
-    # Read the current schema and add any missing hash columns.
     hash_columns = {
         "model_state_hash": pa.utf8(),
         "base_model_hash": pa.utf8(),
@@ -184,7 +167,6 @@ def backfill_hashes(
         "active_adapters": pa.utf8(),
     }
 
-    # Build output schema: start from existing, add missing hash columns
     existing_col_names = set(table.column_names)
     output_fields = list(table.schema)
     for col_name, col_type in hash_columns.items():
@@ -194,7 +176,6 @@ def backfill_hashes(
 
     updated_table = pa.Table.from_pylist(rows, schema=output_schema)
 
-    # Write atomically
     temp_path = index_path.with_suffix(".parquet.tmp")
     pq.write_table(
         updated_table,
@@ -240,13 +221,11 @@ def main():
 
     summary = backfill_hashes(v2_dir, dry_run=args.dry_run)
 
-    # Print a sample of the results for verification
     if not args.dry_run:
         print("\nVerification sample:")
         table = pq.read_table(str(v2_dir / "index.parquet"))
         import pyarrow.compute as pc
 
-        # Show one original_v1 row
         if "run_name" in table.column_names:
             v1_mask = pc.equal(table.column("run_name"), "original_v1")
             v1_rows = table.filter(v1_mask)
@@ -259,7 +238,6 @@ def main():
                 print(f"    trajectory_hash:  {row.get('trajectory_hash')}")
                 print(f"    active_adapters:  {row.get('active_adapters')}")
 
-            # Show one policy_rollout_v1 row
             pr_mask = pc.equal(table.column("run_name"), "policy_rollout_v1")
             pr_rows = table.filter(pr_mask)
             if len(pr_rows) > 0:

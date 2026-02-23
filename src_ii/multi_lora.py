@@ -541,12 +541,48 @@ def save_adapter(
     save_file(tensors, path)
 
 
+def _remap_old_adapter_keys(state: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """Remap old-format adapter keys to new format.
+
+    Old format: ``layers.0.attention.qkv.adapters.rtheta.lora_A``
+    New format: ``layers.0.attention.qkv.lora_A.rtheta``
+
+    Returns a new dict with remapped keys. Keys already in new format
+    are passed through unchanged.
+    """
+    remapped = {}
+    for key, tensor in state.items():
+        # Detect old format: *.adapters.{name}.lora_{A,B}
+        if ".adapters." in key:
+            parts = key.split(".")
+            try:
+                adapters_idx = parts.index("adapters")
+                adapter_name = parts[adapters_idx + 1]
+                lora_part = parts[adapters_idx + 2]  # lora_A or lora_B
+                prefix = ".".join(parts[:adapters_idx])
+                new_key = f"{prefix}.{lora_part}.{adapter_name}"
+                remapped[new_key] = tensor
+            except (IndexError, ValueError):
+                remapped[key] = tensor
+        else:
+            remapped[key] = tensor
+    return remapped
+
+
 def load_adapter(
     model: nn.Module,
     adapter_name: str,
     path: str,
 ) -> int:
     """Load one adapter's A, B weights from safetensors.
+
+    Supports both old-format keys (``*.adapters.{name}.lora_{A,B}``) and
+    new-format keys (``*.lora_{A,B}.{name}``). Old-format keys are
+    remapped transparently.
+
+    Raises RuntimeError if zero tensors are loaded (mismatched checkpoint
+    or wrong adapter_name). Warns if checkpoint contains unmatched keys
+    (expected for refiner tensors excluded by install_multi_lora).
 
     Args:
         model: Model with MultiLoRALinear modules installed (adapter must
@@ -557,8 +593,13 @@ def load_adapter(
     Returns:
         Number of parameter tensors loaded.
     """
-    state = load_file(path)
+    import logging
+    log = logging.getLogger(__name__)
 
+    raw_state = load_file(path)
+    state = _remap_old_adapter_keys(raw_state)
+
+    matched_keys: set[str] = set()
     loaded = 0
     for name, module in model.named_modules():
         if isinstance(module, MultiLoRALinear):
@@ -568,9 +609,29 @@ def load_adapter(
             if a_key in state and adapter_name in module.lora_A:
                 module.lora_A[adapter_name].data.copy_(state[a_key])
                 loaded += 1
+                matched_keys.add(a_key)
             if b_key in state and adapter_name in module.lora_B:
                 module.lora_B[adapter_name].data.copy_(state[b_key])
                 loaded += 1
+                matched_keys.add(b_key)
+
+    # Warn about unmatched checkpoint keys (expected for refiner tensors)
+    unmatched = set(state.keys()) - matched_keys
+    if unmatched:
+        log.warning(
+            f"[load_adapter] {len(unmatched)} checkpoint keys unmatched "
+            f"(expected for refiner/excluded layers): "
+            f"{sorted(unmatched)[:5]}{'...' if len(unmatched) > 5 else ''}"
+        )
+
+    if loaded == 0:
+        file_keys = sorted(raw_state.keys())[:10]
+        raise RuntimeError(
+            f"load_adapter loaded 0 tensors for adapter {adapter_name!r} "
+            f"from {path!r}. Checkpoint keys (first 10): {file_keys}. "
+            f"Ensure the model has MultiLoRALinear wrappers installed with "
+            f"adapter name {adapter_name!r}."
+        )
 
     return loaded
 

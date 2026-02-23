@@ -11,7 +11,6 @@ Usage:
   .venv/Scripts/python.exe F:\dox\repos\ai\futudiffu\scripts_ii\analyze_sweep_curves.py ^
       --sweep-dir F:\dox\repos\ai\futudiffu\rtheta_sweep_output_v2
 
-  # Or analyze v1 data:
   .venv/Scripts/python.exe F:\dox\repos\ai\futudiffu\scripts_ii\analyze_sweep_curves.py ^
       --sweep-dir F:\dox\repos\ai\futudiffu\rtheta_sweep_output
 """
@@ -56,7 +55,6 @@ def analyze_probe(probe_dir: Path) -> dict | None:
     n_steps = len(curve)
     probe_name = probe_dir.name
 
-    # Extract raw series
     losses = [e["loss"] for e in curve]
     bt_losses = [e.get("loss", e.get("bt_loss", 0.0)) for e in curve]
     acc_pink = [e.get("accuracy_pinkify", 0.0) for e in curve]
@@ -64,31 +62,24 @@ def analyze_probe(probe_dir: Path) -> dict | None:
     grad_norms = [e["grad_norm"] for e in curve]
     times = [e["time_s"] for e in curve]
 
-    # Optional v2 fields
     has_pre_clip = "pre_clip_grad_norm" in curve[0]
     has_lr = "lr" in curve[0]
     pre_clip_norms = [e["pre_clip_grad_norm"] for e in curve] if has_pre_clip else None
     lr_schedule = [e["lr"] for e in curve] if has_lr else None
 
-    # EMA (alpha=0.1)
     ema_loss = compute_ema(losses, alpha=0.1)
     ema_norm_loss = compute_ema(bt_losses, alpha=0.1)
 
-    # Running mean accuracy
     running_mean_pink = running_average(acc_pink)
     running_mean_tnt = running_average(acc_tnt)
 
-    # Finite differences of EMA loss (d_loss/d_step)
     d_ema_loss = finite_differences(ema_loss)
 
-    # Sliding window std (window=20)
     sliding_std_loss = sliding_std(losses, window=20)
 
-    # Summary scalars
     mean_acc_pink = sum(acc_pink) / n_steps
     mean_acc_tnt = sum(acc_tnt) / n_steps
 
-    # Tail statistics (last 20 steps)
     tail_n = min(20, n_steps)
     tail_losses = losses[-tail_n:]
     tail_mean = sum(tail_losses) / tail_n
@@ -97,15 +88,12 @@ def analyze_probe(probe_dir: Path) -> dict | None:
     tail_norm = bt_losses[-tail_n:]
     tail_norm_mean = sum(tail_norm) / tail_n
 
-    # Mean d_ema_loss over last 20 steps (convergence rate)
     d_ema_tail = d_ema_loss[-tail_n:] if len(d_ema_loss) >= tail_n else d_ema_loss
     mean_d_ema_tail = sum(d_ema_tail) / len(d_ema_tail) if d_ema_tail else 0.0
 
-    # Min loss and step at which it occurred
     min_loss = min(losses)
     min_loss_step = losses.index(min_loss)
 
-    # Check for divergence: is the loss monotonically increasing in the last quarter?
     quarter_n = max(n_steps // 4, 2)
     last_quarter_ema = ema_loss[-quarter_n:]
     diverging = all(
@@ -117,7 +105,6 @@ def analyze_probe(probe_dir: Path) -> dict | None:
         "probe_name": probe_name,
         "n_steps": n_steps,
         "format_version": "v2" if has_pre_clip else "v1",
-        # Summary scalars
         "mean_acc_pinkify": round(mean_acc_pink, 4),
         "mean_acc_thisnotthat": round(mean_acc_tnt, 4),
         "final_running_mean_pink": round(running_mean_pink[-1], 4),
@@ -135,7 +122,6 @@ def analyze_probe(probe_dir: Path) -> dict | None:
         "mean_grad_norm": round(sum(grad_norms) / n_steps, 6),
         "mean_step_time_s": round(sum(times) / n_steps, 3),
         "total_time_s": round(sum(times), 1),
-        # Per-step time series (for detailed inspection)
         "series": {
             "ema_loss": [round(v, 6) for v in ema_loss],
             "ema_norm_loss": [round(v, 6) for v in ema_norm_loss],
@@ -189,7 +175,6 @@ def analyze_sweep(sweep_dir: Path) -> dict:
         else:
             print("SKIP (empty)")
 
-    # Cross-probe comparison
     comparison = {}
     if probes:
         best_ema = min(probes, key=lambda p: p["ema_loss_final"])
@@ -267,7 +252,6 @@ def main():
 
     print(f"\nAnalysis written to {output_path}")
 
-    # Print comparison table
     if summary["comparison"]:
         c = summary["comparison"]
         print(f"\n{'=' * 70}")
@@ -283,7 +267,6 @@ def main():
         else:
             print(f"  No diverging probes detected.")
 
-    # Per-probe summary table
     if summary["probes"]:
         print(f"\n{'Probe':<20s} {'Steps':>6s} {'EMALoss':>9s} {'MinLoss':>9s} "
               f"{'MnPink':>7s} {'MnTNT':>7s} {'LStd20':>8s} {'dEMA/ds':>10s} {'Divg':>5s}")

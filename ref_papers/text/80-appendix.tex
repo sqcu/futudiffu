@@ -1,0 +1,188 @@
+\newpage
+\begin{appendices}
+
+\section{Overoptimization}
+\label{app:overoptimization}
+
+\input{figures/overoptimization}
+
+Section~\ref{sec:alg_comparison} highlights the optimization problem: given a reward function, how well can an RL algorithm maximize that reward?
+However, finetuning on a reward function, especially a learned one, has been observed to lead to reward overoptimization or exploitation \citep{gao2022overoptimization} in which the model achieves high reward while moving too far away from the pretraining distribution to be useful.
+
+Our setting is no exception, and we provide two examples of reward exploitation in Figure~\ref{fig:overoptimization}.
+When optimizing the incompressibility objective, the model eventually stops producing semantically meaningful content, degenerating into high-frequency noise.
+Similarly, we observed that LLaVA is susceptible to typographic attacks \citep{goh2021multimodal}.
+When optimizing for alignment with respect to prompts of the form ``\emph{$n$ animals}'', \methodours{} exploited deficiencies in the VLM by instead generating text loosely resembling the specified number: for example, ``\emph{sixx ttutttas}'' above a picture of eight turtles.
+
+There is currently no general-purpose method for preventing overoptimization.
+One common strategy is to add a KL-regularization term to the reward \citep{ouyang2022instructgpt,stiennon2020feedback}; we refer the reader to the concurrent work of \citet{fan2023dpok} for a study of KL-regularization in the context of finetuning text-to-image diffusion models.
+However, \citet{gao2022overoptimization} suggest that existing solutions, including KL-regularization, may be empirically equivalent to early stopping. As a result, in this work, we manually identified the last checkpoint before a model began to deteriorate for each method and used that as the reference for qualitative results.
+We highlight this problem as an important area for future work.
+
+\begin{table}[b]
+    \centering
+    \begin{tabular}{l|c}
+        Method & Aesthetic Score \\
+        \midrule
+        Base model & 5.95 $\pm$ 0.03 \\
+        Universal guidance & 6.14 $\pm$ 0.05 \\
+        $\text{DDPO}_{\text{IS}}$ @ 20k reward queries & 6.63 $\pm$ 0.03
+    \end{tabular}
+    \caption{Comparison of DDPO with universal guidance using the LAION aesthetic predictor. We report the mean and one standard error over 50 samples for the prompt ``wolf''.}
+    \label{tab:universal_guidance}
+\end{table}
+
+\section{Comparison to Classifier Guidance}
+Classifier guidance \citep{dhariwal2021diffusion} was originally introduced as a way to improve sample quality for conditional generation using the gradients from an image classifier. For a differentiable reward function such as the LAION aesthetics predictor \citep{schuhmann2022laion}, one could naturally imagine an extension to classifier guidance that uses gradients from such a predictor to improve aesthetic score. The issue is that classifier guidance uses gradients with respect to the noisy images in the intermediate stages of the denoising process, which requires retraining the guidance network on noisy images. Universal guidance \citep{bansal2023universal} sidesteps this issue by applying the guidance network to the fully denoised image predicted by the diffusion model at each step.
+
+We compare DDPO with universal guidance in Table~\ref{tab:universal_guidance}. We used the official implementation of universal guidance\footnote{\url{https://github.com/arpitbansal297/Universal-Guided-Diffusion}} with the recommended hyperparameters for style transfer, substituting the guidance network with the LAION aesthetics predictor. While universal guidance is able to produce a statistically significant improvement in aesthetic score, the change is small compared to DDPO. We only report results averaged over 50 samples for a single prompt, since universal guidance is very slow; on an NVIDIA A100 GPU, it takes almost 2 minutes to generate a single image, whereas standard generation (e.g., from a DDPO-finetuned model) takes 4 seconds.
+
+\section{Comparison to DPOK}
+\label{app:dpok}
+Here we directly compare our implementation of DDPO to the results reported in the DPOK paper \citep{fan2023dpok}, which was developed concurrently with this work. The key similarities and differences between our experimental setups are summarized below:
+\begin{itemize}
+    \item For this experiment only, we use Stable Diffusion v1-5 as the base model and train the UNet with low-rank adaptation (LoRA; \cite{hu2021lora}) in order to match DPOK.
+    \item Rather than matching the hyperparameters in DPOK, we use the same hyperparameters as in our other experiments (Appendix~\ref{app:hyperparams}) except for the learning rate which we increase to 3e-4. We found that when using LoRA, a higher learning rate is necessary to get comparable performance to full finetuning.
+    \item Like DPOK, we train on four prompts: ``a green colored rabbit'' (color), ``four wolves in the park'' (count), ``a dog and a cat'' (composition), and ``a dog on the moon'' (location). Unlike DPOK, we train a single model for all four prompts.
+    \item Like DPOK, we train the model using ImageReward \citep{xu2023imagereward} as the reward function. We evaluate the model using ImageReward and the LAION aesthetics predictor \citep{schuhmann2022laion}.
+    \item Unlike DPOK, we do not employ KL regularization.
+\end{itemize}
+
+\begin{figure}[h!]
+    \centering
+    \includegraphics[width=\textwidth]{images/dpok.pdf}
+    \caption{Comparison of $\text{DDPO}_\text{IS}$ with DPOK. We take the DPOK numbers directly from the paper, which only reports scores at one point in training (after 20k reward queries). Like in DPOK, scores are averaged over 50 samples for each prompt.}
+    \label{fig:dpok_comparison}
+\end{figure}
+
+\newpage
+
+The results are presented in Figure~\ref{fig:dpok_comparison}. Our implementation of $\text{DDPO}_\text{IS}$ outperforms DPOK accross the board, without using KL regularization. Figure~\ref{fig:dpok_comparison} also doubles as a quantitative study of overoptimization (Appendix~\ref{app:overoptimization}), since the model is trained with one reward function (ImageReward) and evaluated with another (LAION aesthetic score). We find that significant overoptimization does begin to happen within 25k reward queries for one of the prompts (count: ``four wolves in the park''), which is reflected by a drop in LAION aesthetic score. However, the overoptimization is not severe or unreasonably fast. We provide qualitative samples in Figure~\ref{fig:dpok_qualitative} showing that the model is able to produce high-quality images at 20k reward queries.
+
+\input{figures/dpok.tex}
+
+
+
+
+\section{Implementation Details}
+\label{app:details}
+
+For all experiments, we use Stable Diffusion v1.4 \citep{rombach2022latent} as the base model and finetune only the UNet weights while keeping the text encoder and autoencoder weights frozen.
+
+
+\subsection{\methodours{} Implementation}
+We collect 256 samples per training iteration.
+For \methodreinforce, we accumulate gradients across all 256 samples and perform one gradient update.
+For \methodppo, we split the samples into 4 minibatches and perform 4 gradient updates.
+Gradients are always accumulated across all denoising timesteps for a single sample.
+For \methodppo, we use the same clipped surrogate objective as in proximal policy optimization \citep{schulman2017ppo}, but find that we need to use a very small clip range compared to standard RL tasks. We use a clip range of 1e-4 for all experiments.
+
+\subsection{\methodrwr{} Implementation}
+We compute the weights for a training iteration using the entire dataset of samples collected for that training iteration.
+For $w_\methodrwr$, the weights are computed using the softmax function.
+For $w_\sparse$, we use a percentile-based threshold, meaning $C$ is dynamically selected such that the bottom $p$\% of a given pool of samples are discarded and the rest are used for training.
+
+\subsection{Reward Normalization}
+In practice, rewards are rarely used as-is, but instead are normalized to have zero mean and unit variance. Furthermore, this normalization can depend on the current state; in the policy gradient context, this is analogous to a value function baseline \citep{sutton1999policy}, and in the RWR context, this is analogous to advantage-weighted regression \citep{peng2019advantage}. In our experiments, we normalize the rewards on a per-context basis. For \methodours, this is implemented as normalization by a running mean and standard deviation that is tracked for each prompt independently. For \methodrwr, this is implemented by computing the softmax over rewards for each prompt independently. For \methodff, this is implemented by computing the percentile-based threshold $C$ for each prompt independently.
+
+\subsection{Resource Details}
+\label{app:resources}
+\methodrwr{} experiments were conducted on a v3-128 TPU pod, and took approximately 4 hours to reach 50k samples.
+\methodours{} experiments were conducted on a v4-64 TPU pod, and took approximately 4 hours to reach 50k samples.
+For the VLM-based reward function, LLaVA inference was conducted on a DGX machine with 8 80Gb A100 GPUs.
+
+
+\subsection{Full Hyperparameters}
+\label{app:hyperparams}
+\begin{center}
+    \begin{tabular}{c|l|c|c|c|c}
+        & & \methodppo{} & \methodreinforce{} & \methodrwr{} & \methodff{} \\
+        \midrule
+        \multirow{2}*{Diffusion} & Denoising steps ($T$) & 50 & 50 & 50 & 50 \\
+        & Guidance weight ($w$) & 5.0 & 5.0 & 5.0 & 5.0 \\
+        \midrule
+        \multirow{7}*{Optimization} & Optimizer & AdamW & AdamW & AdamW & AdamW \\
+        & Learning rate & 1e-5 & 1e-5 & 1e-5 & 1e-5 \\
+        & Weight decay & 1e-4 & 1e-4 & 1e-4 & 1e-4 \\
+        & $\beta_1$ & 0.9 & 0.9 & 0.9 & 0.9 \\
+        & $\beta_2$ & 0.999 & 0.999 & 0.999 & 0.999 \\
+        & $\epsilon$ & 1e-8 & 1e-8 & 1e-8 & 1e-8 \\
+        & Gradient clip norm & 1.0 & 1.0 & 1.0 & 1.0 \\
+        \midrule
+        \multirow{5}*{\methodrwr} & Inverse temperature ($\beta$) & - & - & 0.2 & - \\
+        & Percentile & - & - & - & 0.9 \\
+        & Batch size & - & - & 128 & 128 \\
+        & Gradient updates per iteration & - & - & 400 & 400 \\ 
+        & Samples per iteration & - & - & 10k & 10k \\
+        \midrule
+        \multirow{4}*{\methodours} & Batch size & 64 & 256 & - & - \\
+        & Samples per iteration & 256 & 256 & - & - \\
+        & Gradient updates per iteration & 4 & 1 & - & - \\
+        & Clip range & 1e-4 & - & - & - \\
+    \end{tabular}
+\end{center}
+
+\subsection{List of 45 Common Animals}
+This list was used for experiments with the aesthetic quality reward function and the VLM-based reward function.
+\begin{center}
+    \begin{tabular}{c|c|c|c|c|c|c|c|c}
+        cat & dog & horse & monkey & rabbit & zebra & spider & bird & sheep \\
+        deer & cow & goat & lion & tiger & bear & raccoon & fox & wolf \\
+        lizard & beetle & ant & butterfly & fish & shark & whale & dolphin & squirrel \\
+        mouse & rat & snake & turtle & frog & chicken & duck & goose & bee \\
+        pig & turkey & fly & llama & camel & bat & gorilla & hedgehog & kangaroo
+    \end{tabular}
+\end{center}
+
+\section{Additional Design Decisions}
+\label{app:design}
+
+\subsection{CFG Training}
+Recent text-to-image diffusion models rely critically on \emph{classifier-free guidance} (CFG) \citep{ho2021classifierfree} to produce perceptually high-quality results. CFG involves jointly training the diffusion model on conditional and unconditional objectives by randomly masking out the context $\bc$ during training. The conditional and unconditional predictions are then mixed at sampling time using a guidance weight $w$:
+\begin{align}
+    \tilde{\bm{\epsilon}}_\theta(\bx_t, t, \bc) &= w \bm{\epsilon}_\theta(\bx_t, t, \bc) + (1 - w) \bm{\epsilon}_\theta(\bx_t, t)
+\end{align}
+where $\bm{\epsilon}_\theta$ is the $\bm{\epsilon}$-prediction parameterization of the diffusion model \citep{ho2020denoising} and $\tilde{\bm{\epsilon}}_\theta$ is the guided $\bm \epsilon$-prediction that is used to compute the next denoised sample.
+
+For reinforcement learning, it does not make sense to train on the unconditional objective since the reward may depend on the context.
+However, we found that when only training on the conditional objective, performance rapidly deteriorated after the first round of finetuning. We hypothesized that this is due to the guidance weight becoming miscalibrated each time the model is updated, leading to degraded samples, which in turn impair the next round of finetuning, and so on.
+Our solution was to choose a fixed guidance weight and use the guided $\bm{\epsilon}$-prediction during training as well as sampling.
+We call this procedure \emph{CFG training}. Figure~\ref{fig:cfg} shows the effect of CFG training on \methodff{}; it has no effect after a single round of finetuning, but becomes essential for subsequent rounds.
+
+\input{figures/cfg}
+
+\subsection{Interleaving}
+There are two main differences between DDPO and RWR, as compared in Section~\ref{sec:alg_comparison}:
+the objective (DDPO uses the policy gradient) and the data distribution (DDPO is significantly more on-policy, collecting 256 samples per iteration as opposed to 10,000 for RWR).
+This choice is motivated by standard RL practice, in which policy gradient methods specifically require on-policy data \citep{sutton1999policy}, whereas RWR is designed to work in on off-policy data \citep{nair2020accelerating} and is known to underperform other algorithms in more online settings \citep{duan2016benchmarking}.
+
+However, we can isolate the effect of the data distribution by varying how interleaved the sampling and training are in RWR.
+At one extreme is a single-round algorithm \citep{lee2023aligning}, in which $N$ samples are collected from the pretrained model and used for finetuning.
+It is also possible to run $k$ rounds of finetuning each on $\frac{N}{k}$ samples collected from the most up-to-date model.
+In Figure~\ref{fig:interleaving}, we evaluate this hyperparameter and find that increased interleaving does help up to a point, after which it causes performance degradation. However, RWR is still unable to match the asymptotic performance of DDPO at any level of interleaving.
+
+\input{figures/interleaving}
+
+\section{Quantitative Results for Generalization}
+\label{app:generalization}
+In Section~\ref{sec:generalization}, we presented qualitative evidence of both the aesthetic quality model and the image-prompt alignment model generalizing to prompts that were unseen during finetuning. In Figure~\ref{fig:quant_generalization}, we provide an additional quantitative analysis of generalization with the aesthetic quality model, where we measure the average reward throughout training for several prompt distributions. In accordance with the qualitative evidence, we see that the model generalizes very well to unseen animals, and everyday objects to a lesser degree.
+
+\input{figures/quant_generalization}
+
+\section{More Samples}
+\label{app:more_samples}
+
+Figure~\ref{fig:rwr_samples} shows qualitative samples from the baseline \methodrwr{} method.
+Figure~\ref{fig:more-alignment} shows more samples on seen prompts from \methodours{} finetuning with the image-prompt alignment reward function.
+Figure~\ref{fig:more-generalization-aesthetic} shows more examples of generalization to unseen animals and everyday objects with the aesthetic quality reward function.
+Figure~\ref{fig:more-generalization-alignment} shows more examples of generalization to unseen subjects and activities with the image-prompt alignment reward function.
+
+\input{figures/rwr_samples}
+
+\input{figures/more-alignment}
+
+\input{figures/more-generalization-aesthetic}
+
+\input{figures/more-generalization-alignment}
+
+\end{appendices}

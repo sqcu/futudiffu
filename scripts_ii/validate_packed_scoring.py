@@ -32,9 +32,6 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 import torch
 import torch.nn.functional as F
 
-# =====================================================================
-# Configuration
-# =====================================================================
 
 FP8_PATH = r"F:\dox\ai\comfyui\ComfyUI\models\diffusion_models\z_image_fp8_blockwise.safetensors"
 TE_PATH = r"F:\dox\ai\comfyui\ComfyUI\models\text_encoders\qwen_3_4b.safetensors"
@@ -43,19 +40,14 @@ V2_DATASET_DIR = REPO_ROOT / "btrm_dataset_v2"
 
 OUTPUT_DIR = REPO_ROOT / "validation_output_ii" / "packed_scoring"
 
-# Images to test: mixed resolutions, same prompt for simplicity
 IMAGE_SPECS = [
     {"traj_id": 0, "step_key": "step_14", "label": "full_1280x832"},
     {"traj_id": 1, "step_key": "step_09", "label": "full_1280x832_b"},
-    # If the dataset has mixed resolutions, add them. Otherwise test with
-    # same-resolution images (packing still exercises block masking).
 ]
 
-# Score tolerance: max_abs_diff between packed and serial scores
 SCORE_TOLERANCE = 0.1  # per the spec
 SCORE_WARN = 0.05
 
-# Gradient threshold: minimum max_abs_grad to consider "nonzero"
 GRAD_THRESHOLD = 1e-10
 
 
@@ -81,9 +73,6 @@ def main():
     print("PACKED vs SERIAL BTRM Scoring Validation")
     print("=" * 72)
 
-    # =================================================================
-    # Phase 1: Load V2 dataset to get latents and metadata
-    # =================================================================
     print("\n--- Phase 1: Loading V2 dataset ---")
 
     from futudiffu.dataset_v2 import DatasetReader
@@ -91,7 +80,6 @@ def main():
     n_trajs = len(reader)
     print(f"  Dataset: {n_trajs} trajectories")
 
-    # Collect trajectory info to find mixed resolutions if available
     traj_metas = {}
     resolutions_available = set()
     for traj_id in range(min(n_trajs, 20)):
@@ -103,16 +91,13 @@ def main():
 
     print(f"  Resolutions found: {sorted(resolutions_available)}")
 
-    # Build image specs: try to get mixed resolutions
     image_specs = []
     seen_resolutions = set()
     for traj_id, (meta, accessor) in traj_metas.items():
         w = meta.get("width", 1280)
         h = meta.get("height", 832)
         res = (w, h)
-        # Include up to 4 images, preferring resolution diversity
         if res not in seen_resolutions or len(image_specs) < 2:
-            # step_indices from metadata tells us which steps are available
             step_indices = meta.get("step_indices", [0, 4, 9, 14, 19, 24, 29])
             if step_indices:
                 mid_idx = step_indices[len(step_indices) // 2]
@@ -128,9 +113,7 @@ def main():
         if len(image_specs) >= 4:
             break
 
-    # Fall back to default specs if we couldn't find enough
     if len(image_specs) < 2:
-        # Use simple known-good specs
         for i, traj_id in enumerate([0, 1]):
             meta, accessor = reader[traj_id]
             w = meta.get("width", 1280)
@@ -153,9 +136,6 @@ def main():
 
     results["config"]["image_specs"] = image_specs
 
-    # =================================================================
-    # Phase 2: Encode prompt(s) with text encoder
-    # =================================================================
     print("\n--- Phase 2: Encoding prompts ---")
 
     from futudiffu.text_encoder import create_tokenizer, load_text_encoder, encode_prompt
@@ -177,9 +157,6 @@ def main():
     vram_post_te = torch.cuda.memory_allocated() / 1e9
     print(f"  TE freed. VRAM: {vram_post_te:.2f} GB")
 
-    # =================================================================
-    # Phase 3: Load FP8 backbone + create BTRMCompoundModel
-    # =================================================================
     print("\n--- Phase 3: Loading backbone + creating BTRM model ---")
 
     from src_ii.zimage_model import load_zimage_rlaif
@@ -187,7 +164,7 @@ def main():
     from src_ii.multi_lora import get_adapter_params
     from src_ii.sigma_schedule import build_sigma_schedule, resolution_shift
 
-    _, raw_model = load_zimage_rlaif(
+    raw_model = load_zimage_rlaif(
         FP8_PATH, device=device, dtype=dtype,
         compile_model=False, fuse=True,
     )
@@ -214,9 +191,6 @@ def main():
         "vram_backbone_gb": vram_post_backbone,
     }
 
-    # =================================================================
-    # Phase 4: Build per-image inputs
-    # =================================================================
     print("\n--- Phase 4: Preparing per-image inputs ---")
 
     def load_image_for_scoring(spec):
@@ -227,7 +201,6 @@ def main():
 
         latent = accessor[step_key].to(device=device, dtype=dtype)
 
-        # Compute sigma
         n_steps = meta.get("n_steps", 30)
         denoise_val = meta.get("denoise") or 1.0
         recorded_shift = meta.get("sampling_shift")
@@ -270,9 +243,6 @@ def main():
         print(f"  {spec['label']}: latent={lat.shape}, sigma={ts.item():.4f}, "
               f"cond={cond.shape}, num_tokens={nt}")
 
-    # =================================================================
-    # Phase 5: Serial scoring (reference)
-    # =================================================================
     print("\n--- Phase 5: Serial scoring (reference) ---")
 
     serial_scores = []
@@ -282,7 +252,6 @@ def main():
         spec = inp["spec"]
         print(f"  [{i+1}/{len(per_image_inputs)}] {spec['label']} ... ", end="", flush=True)
 
-        # Zero grads before each serial scoring
         for p in get_all_trainable_params(raw_model, "rtheta"):
             if p.grad is not None:
                 p.grad.zero_()
@@ -297,11 +266,9 @@ def main():
         serial_scores.append(scores.detach().clone())
         serial_times.append(t1 - t0)
 
-        # Compute a dummy loss and backward to verify serial gradients
         dummy_loss = scores.sum()
         dummy_loss.backward()
 
-        # Check adapter grads
         n_nonzero = sum(
             1 for p in adapter_params
             if p.grad is not None and p.grad.abs().max().item() > GRAD_THRESHOLD
@@ -314,7 +281,6 @@ def main():
     print(f"\n  Serial scores stacked: {serial_scores_cat.shape}")
     print(f"  Serial total time: {sum(serial_times):.2f}s")
 
-    # Save serial scores
     torch.save(serial_scores_cat, OUTPUT_DIR / "serial_scores.pt")
 
     results["phases"]["serial_scoring"] = {
@@ -323,17 +289,12 @@ def main():
         "total_time_s": sum(serial_times),
     }
 
-    # =================================================================
-    # Phase 6: Packed scoring
-    # =================================================================
     print("\n--- Phase 6: Packed scoring ---")
 
-    # Zero all grads
     for p in get_all_trainable_params(raw_model, "rtheta"):
         if p.grad is not None:
             p.grad.zero_()
 
-    # Build images list for packed scoring
     packed_images = [
         (inp["latent"], inp["timestep"], inp["conditioning"], inp["num_tokens"])
         for inp in per_image_inputs
@@ -352,11 +313,9 @@ def main():
     print(f"  Packed scoring: {packed_time:.2f}s")
     print(f"  Packed scores: {packed_scores.detach().cpu().tolist()}")
 
-    # Backward through packed scores to verify gradient connectivity
     packed_loss = packed_scores.sum()
     packed_loss.backward()
 
-    # Check adapter gradients after packed backward
     adapter_grad_stats = []
     n_total_params = len(adapter_params)
     n_with_grad = 0
@@ -374,7 +333,6 @@ def main():
         else:
             adapter_grad_stats.append(0.0)
 
-    # Also check head gradients
     n_head_with_grad = 0
     max_head_grad = 0.0
     for p in head_params:
@@ -392,7 +350,6 @@ def main():
 
     grad_connected = n_nonzero_grad > 0 and max_adapter_grad > GRAD_THRESHOLD
 
-    # Save packed scores
     torch.save(packed_scores.detach(), OUTPUT_DIR / "packed_scores.pt")
 
     results["phases"]["packed_scoring"] = {
@@ -407,9 +364,6 @@ def main():
         "gradient_connected": grad_connected,
     }
 
-    # =================================================================
-    # Phase 7: Score comparison
-    # =================================================================
     print("\n--- Phase 7: Score comparison ---")
 
     serial_np = serial_scores_cat.cpu()
@@ -420,7 +374,6 @@ def main():
     max_abs = abs_diff.max().item()
     mean_abs = abs_diff.mean().item()
 
-    # Per-image comparison
     per_image_comparison = []
     for i, spec in enumerate(image_specs):
         s = serial_np[i]
@@ -461,9 +414,6 @@ def main():
         "tolerance": SCORE_TOLERANCE,
     }
 
-    # =================================================================
-    # Phase 8: Speedup analysis
-    # =================================================================
     print("\n--- Phase 8: Timing analysis ---")
 
     serial_total = sum(serial_times)
@@ -480,9 +430,6 @@ def main():
         "n_images": len(image_specs),
     }
 
-    # =================================================================
-    # Phase 9: Final verdict
-    # =================================================================
     print("\n" + "=" * 72)
 
     overall_pass = score_match and grad_connected
@@ -504,13 +451,11 @@ def main():
         print(f"  Max adapter grad: {max_adapter_grad:.6e}")
     print("=" * 72)
 
-    # Save results JSON
     results_path = OUTPUT_DIR / "results.json"
     with open(results_path, "w") as f:
         json.dump(results, f, indent=2, default=str)
     print(f"\nResults saved to: {results_path}")
 
-    # Also save a human-readable summary
     summary_path = OUTPUT_DIR / "summary.txt"
     with open(summary_path, "w") as f:
         f.write(f"Packed vs Serial BTRM Scoring Validation\n")
@@ -546,7 +491,6 @@ def main():
 
     print(f"Summary saved to: {summary_path}")
 
-    # Cleanup
     del raw_model
     torch.cuda.empty_cache()
 

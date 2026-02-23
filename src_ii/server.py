@@ -92,7 +92,7 @@ logger = logging.getLogger("futudiffu.server")
 class ModelBackend(Protocol):
     """Protocol that any model backend must implement.
 
-    The real backend (GPUModelBackend) wraps src_ii model_loading, rollout,
+    The real backend (GPUModelBackend) wraps src_ii zimage_model, rollout,
     btrm_lifecycle, etc. A mock backend can be injected for testing.
 
     Methods correspond 1:1 to the server's RPC handlers.
@@ -697,7 +697,6 @@ class GPUModelBackend:
         self._tokenizer = None
         self._diff_model = None
         self._diff_compiled = None
-        self._diff_compiled_packed = None
         self._vae_model = None
         self._phase = None
         self._sage_configured = False
@@ -776,10 +775,9 @@ class GPUModelBackend:
         if self._diff_model is not None:
             # Snapshot LoRA weights before freeing
             self._snapshot_lora_weights()
-            del self._diff_model, self._diff_compiled, self._diff_compiled_packed
+            del self._diff_model, self._diff_compiled
             self._diff_model = None
             self._diff_compiled = None
-            self._diff_compiled_packed = None
             torch.cuda.empty_cache()
 
     def _free_vae(self):
@@ -825,24 +823,20 @@ class GPUModelBackend:
             return
         self._free_te()
 
-        from src_ii.model_loading import load_fp8_diffusion_model
+        from src_ii.zimage_model import load_zimage_rlaif
         import torch
 
-        diff_compiled, diff_model = load_fp8_diffusion_model(
+        diff_model = load_zimage_rlaif(
             self._fp8_diff_path,
             device=self._device,
             dtype=self._dtype,
             fp8_block_size=self._fp8_block_size,
             compile_model=True,
             fuse=True,
+            use_sage=True,
         )
         self._diff_model = diff_model
-        self._diff_compiled = diff_compiled
-
-        # Compile forward_packed separately
-        self._diff_compiled_packed = torch.compile(
-            diff_model.forward_packed, mode="default"
-        )
+        self._diff_compiled = diff_model
 
         # Replay LoRA injections
         if self._lora_configs:
@@ -883,8 +877,11 @@ class GPUModelBackend:
 
     def _configure_sage_if_needed(self, attention_backend: str):
         if not self._sage_configured and attention_backend != "sdpa":
-            from src_ii.model_loading import configure_sage_attention
-            configure_sage_attention()
+            try:
+                from futudiffu.sage_attention import configure_sage
+                configure_sage(smooth_k=True, qk_quant="int8", pv_quant="bf16")
+            except ImportError:
+                pass
             self._sage_configured = True
 
     # --- Text encoding ---
@@ -907,9 +904,7 @@ class GPUModelBackend:
         attn = params.get("attention_backend", "sdpa")
         self._configure_sage_if_needed(attn)
 
-        from futudiffu.attention import set_attention_backend
         from futudiffu.sampling import run_trajectory
-        set_attention_backend(attn)
 
         result_tensors, metadata = run_trajectory(
             self._diff_compiled, self._diff_model,
@@ -923,12 +918,10 @@ class GPUModelBackend:
         attn = params.get("attention_backend", "sdpa")
         self._configure_sage_if_needed(attn)
 
-        from futudiffu.attention import set_attention_backend
         from futudiffu.sampling import run_trajectory_packed
-        set_attention_backend(attn)
 
         result_tensors, metadata = run_trajectory_packed(
-            self._diff_compiled_packed, self._diff_model,
+            self._diff_compiled, self._diff_model,
             self._device, self._dtype, params, tensors,
         )
         return result_tensors, metadata
@@ -961,9 +954,7 @@ class GPUModelBackend:
         self._ensure_diffusion()
         self._configure_sage_if_needed(attention_backend)
 
-        from futudiffu.attention import set_attention_backend
         from futudiffu.sampling import warmup_diffusion
-        set_attention_backend(attention_backend)
         warmup_diffusion(
             self._diff_compiled, self._diff_model,
             self._device, self._dtype,
@@ -974,7 +965,7 @@ class GPUModelBackend:
         self._ensure_diffusion()
         from futudiffu.sampling import warmup_packed
         warmup_packed(
-            self._diff_compiled_packed, self._diff_model,
+            self._diff_compiled, self._diff_model,
             self._device, self._dtype, n_images=n_images,
         )
 
@@ -1057,12 +1048,9 @@ class GPUModelBackend:
             "init_b_std": init_b_std,
         })
 
-        # Recompile
         torch._dynamo.reset()
-        self._diff_compiled = torch.compile(self._diff_model, mode="default")
-        self._diff_compiled_packed = torch.compile(
-            self._diff_model.forward_packed, mode="default"
-        )
+        self._diff_model.compile_for_execution()
+        self._diff_compiled = self._diff_model
 
         n_params = sum(a.lora_A.numel() + a.lora_B.numel() for a in injected.values())
         return {
@@ -1187,9 +1175,6 @@ class GPUModelBackend:
 
         attn = params.get("attention_backend", "sdpa")
         self._configure_sage_if_needed(attn)
-        from futudiffu.attention import set_attention_backend
-        set_attention_backend(attn)
-
         from futudiffu.training_utils import run_backbone_hidden
         tensors = _safetensors_bytes_to_tensors(tensor_bytes)
         hidden = run_backbone_hidden(
@@ -1209,9 +1194,7 @@ class GPUModelBackend:
 
         attn = params.get("attention_backend", "sdpa")
         self._configure_sage_if_needed(attn)
-        from futudiffu.attention import set_attention_backend
         from futudiffu.training_utils import train_btrm_step
-        set_attention_backend(attn)
 
         tensors = _safetensors_bytes_to_tensors(tensor_bytes)
         metadata = train_btrm_step(
@@ -1224,16 +1207,16 @@ class GPUModelBackend:
 
     def accumulate_policy_gradients(self, params: dict, tensor_bytes: bytes) -> dict:
         self._ensure_diffusion()
-        from futudiffu.training_utils import accumulate_policy_gradients
+        from src_ii.policy_step import accumulate_reinforce_gradients
 
         tensors = _safetensors_bytes_to_tensors(tensor_bytes)
-        return accumulate_policy_gradients(
+        return accumulate_reinforce_gradients(
             self._diff_model, self._device, self._dtype, params, tensors,
         )
 
     def policy_optimizer_step(self, params: dict) -> dict:
         self._ensure_diffusion()
-        from futudiffu.training_utils import policy_optimizer_step
+        from src_ii.policy_step import policy_optimizer_step
 
         return policy_optimizer_step(
             self._diff_model, self._policy_optimizers,

@@ -29,7 +29,6 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Windows path for src import
 sys.path.insert(0, r"F:\dox\repos\ai\futudiffu\src")
 
 import pyarrow as pa
@@ -37,9 +36,6 @@ import pyarrow.parquet as pq
 import torch
 from safetensors.torch import save_file
 
-# ---------------------------------------------------------------------------
-# Paths
-# ---------------------------------------------------------------------------
 
 REPO_ROOT = Path(r"F:\dox\repos\ai\futudiffu")
 V1_DIR = REPO_ROOT / "btrm_dataset"
@@ -57,11 +53,9 @@ def load_v1_manifest() -> dict[str, dict]:
     with open(str(V1_MANIFEST), "r", encoding="utf-8") as f:
         manifest = json.load(f)
 
-    # Build lookup: traj_dir basename -> record
     lookup = {}
     for record in manifest["records"]:
         traj_dir = record["traj_dir"]
-        # Extract basename like "traj_000000" from Windows path
         basename = traj_dir.rstrip("\\").split("\\")[-1]
         lookup[basename] = record
 
@@ -115,7 +109,6 @@ def load_v1_tensors(traj_dir: Path, step_labels: list[str], has_final: bool) -> 
     for label in step_labels:
         pt_path = traj_dir / f"{label}.pt"
         t = torch.load(str(pt_path), weights_only=True, map_location="cpu")
-        # V1 tensors are (1, C, H, W) -- squeeze to (C, H, W)
         if t.dim() == 4 and t.shape[0] == 1:
             t = t.squeeze(0)
         tensors[label] = t.contiguous()
@@ -139,16 +132,12 @@ def build_v2_metadata(
 
     Field mapping follows docs/dataset_v2_spec.md section 10.
     """
-    # V1 "precision" -> V2 "attention_backend"
     attention_backend = meta.get("precision", "sdpa")
 
-    # V1 "type" -> V2 "batch_type"
     batch_type = meta.get("type", "t2i")
 
-    # n_steps
     n_steps = meta.get("n_steps", 30)
 
-    # Dimensions: from manifest record if i2i, else defaults for t2i
     if manifest_record and "output_width" in manifest_record:
         width = manifest_record["output_width"]
         height = manifest_record["output_height"]
@@ -156,38 +145,27 @@ def build_v2_metadata(
         width = 1280
         height = 832
     else:
-        # Fallback for non-manifest trajectories (should all be t2i)
         width = 1280
         height = 832
 
-    # cfg: V1 doesn't store this; default is 4.0
     cfg = meta.get("cfg", 4.0)
 
-    # Prompt
     prompt = meta.get("prompt", "")
 
-    # Seed
     seed = meta.get("seed", 0)
 
-    # prompt_idx
     prompt_idx = meta.get("prompt_idx", -1)
 
-    # batch_idx
     batch_idx = meta.get("batch_idx", 0)
 
-    # denoise (i2i only)
     denoise = meta.get("denoise") or (manifest_record.get("denoise") if manifest_record else None)
 
-    # image_file (i2i only)
     image_file = meta.get("image_file") or (manifest_record.get("image_file") if manifest_record else None)
 
-    # is_gold: sdpa + 30 steps
     is_gold = (attention_backend == "sdpa" and n_steps == 30)
 
-    # packed
     packed = meta.get("packed", False)
 
-    # Provenance
     if is_manifest:
         run_name = "original_v1"
     else:
@@ -212,7 +190,6 @@ def build_v2_metadata(
         "parent_traj_id": None,
         "parent_step": None,
         "parent_denoise": None,
-        # Provenance
         "source_dir": "btrm_dataset",
         "run_name": run_name,
         "source_device": "local",
@@ -224,9 +201,6 @@ def main():
     print("V1 -> V2 Migration: btrm_dataset/ into btrm_dataset_v2/")
     print("=" * 70)
 
-    # ------------------------------------------------------------------
-    # Step 1: Read existing V2 state
-    # ------------------------------------------------------------------
     print("\n[1/6] Reading existing V2 index...")
     existing_table = pq.read_table(str(V2_INDEX))
     existing_rows = existing_table.to_pylist()
@@ -234,7 +208,6 @@ def main():
     existing_traj_ids = [r["traj_id"] for r in existing_rows]
     next_traj_id = max(existing_traj_ids) + 1 if existing_traj_ids else 0
 
-    # Count existing blobs
     existing_blobs = sorted([
         f for f in os.listdir(str(V2_BLOBS))
         if f.startswith("blob_") and f.endswith(".safetensors")
@@ -245,9 +218,6 @@ def main():
     print(f"  Next traj_id: {next_traj_id}")
     print(f"  Existing blobs: {len(existing_blobs)} (next: blob_{next_blob_num:03d})")
 
-    # ------------------------------------------------------------------
-    # Step 2: Load V1 manifest and discover all trajectory dirs
-    # ------------------------------------------------------------------
     print("\n[2/6] Loading V1 manifest and discovering trajectories...")
     manifest_lookup = load_v1_manifest()
     traj_dirs = discover_v1_trajectories()
@@ -265,13 +235,9 @@ def main():
     print(f"    In manifest: {n_manifest}")
     print(f"    Extra (policy rollouts): {n_extra}")
 
-    # ------------------------------------------------------------------
-    # Step 3: Process all V1 trajectories
-    # ------------------------------------------------------------------
     print("\n[3/6] Processing V1 trajectories...")
 
     new_rows = []
-    # Blob accumulation
     current_blob_tensors: dict[str, torch.Tensor] = {}
     current_blob_bytes = 0
     blob_num = next_blob_num
@@ -295,7 +261,6 @@ def main():
         print(f"    Sealed {blob_name}: {n_tensors} tensors, {mb:.1f} MB")
         sealed_blobs.append(blob_name)
 
-        # Update blob_file for all pending rows that reference WIP
         for row in new_rows:
             if row["blob_file"] == "_wip_":
                 row["blob_file"] = blob_name
@@ -314,34 +279,26 @@ def main():
         is_manifest = traj_dir_name in manifest_lookup
         manifest_record = manifest_lookup.get(traj_dir_name)
 
-        # Discover step files
         step_labels, has_final = discover_step_files(traj_path)
         step_indices = [int(s.split("_")[1]) for s in step_labels]
 
-        # Load tensors
         tensors = load_v1_tensors(traj_path, step_labels, has_final)
 
-        # Compute bytes
         traj_bytes = sum(t.nelement() * t.element_size() for t in tensors.values())
         n_tensors_traj = len(tensors)
 
-        # Extract shape from first tensor
         ref_tensor = next(iter(tensors.values()))
         c, h, w = ref_tensor.shape
         dtype_str = str(ref_tensor.dtype).replace("torch.", "")
 
-        # Build metadata
         v2_meta = build_v2_metadata(meta, manifest_record, is_manifest)
 
-        # Assign traj_id
         traj_id = next_traj_id + i
         key_prefix = f"{traj_id:06d}"
 
-        # Check blob rotation
         if current_blob_tensors and (current_blob_bytes + traj_bytes > MAX_BLOB_BYTES):
             seal_blob()
 
-        # Add tensors to current blob
         for label, t in tensors.items():
             blob_key = f"{key_prefix}/{label}"
             current_blob_tensors[blob_key] = t
@@ -350,7 +307,6 @@ def main():
         total_bytes += traj_bytes
         total_tensors += n_tensors_traj
 
-        # Build parquet row
         now = datetime.now(timezone.utc)
         row = {
             "traj_id": traj_id,
@@ -395,7 +351,6 @@ def main():
                   f"({tag}, {n_tensors_traj} tensors, {traj_bytes/1e6:.2f} MB, "
                   f"{c}x{h}x{w} {dtype_str})")
 
-    # Seal final blob
     seal_blob()
 
     print(f"\n  Processed {len(traj_dirs)} trajectories:")
@@ -403,29 +358,18 @@ def main():
     print(f"    Total bytes: {total_bytes / 1e6:.1f} MB")
     print(f"    New blobs created: {len(sealed_blobs)}")
 
-    # ------------------------------------------------------------------
-    # Step 4: Verify all rows have valid blob_file
-    # ------------------------------------------------------------------
     print("\n[4/6] Validating blob assignments...")
     bad_rows = [r for r in new_rows if r["blob_file"] == "_wip_"]
     if bad_rows:
         raise RuntimeError(f"{len(bad_rows)} rows still reference _wip_ blob!")
     print("  All rows have valid blob_file references.")
 
-    # ------------------------------------------------------------------
-    # Step 5: Merge with existing index and write
-    # ------------------------------------------------------------------
     print("\n[5/6] Merging with existing V2 index...")
 
-    # Combine existing + new rows
     all_rows = existing_rows + new_rows
 
-    # Build the extended schema (existing has source_dir, run_name, source_device
-    # which are not in the base INDEX_SCHEMA)
-    # We read the schema from the existing table and ensure new rows match
     merged_table = pa.Table.from_pylist(all_rows, schema=existing_table.schema)
 
-    # Write atomically
     temp_path = V2_INDEX.with_suffix(".parquet.tmp")
     pq.write_table(
         merged_table,
@@ -448,25 +392,18 @@ def main():
     os.replace(str(temp_path), str(V2_INDEX))
     print(f"  Wrote merged index: {len(all_rows)} total rows")
 
-    # ------------------------------------------------------------------
-    # Step 6: Summary
-    # ------------------------------------------------------------------
     print("\n[6/6] Verification and summary...")
 
-    # Re-read and verify
     verify_table = pq.read_table(str(V2_INDEX))
     verify_n = len(verify_table)
 
-    # Distribution by source_dir
     source_dirs = verify_table.column("source_dir").to_pylist()
     from collections import Counter
     source_dist = Counter(source_dirs)
 
-    # Distribution by run_name
     run_names = verify_table.column("run_name").to_pylist()
     run_dist = Counter(run_names)
 
-    # Count blobs
     all_blobs = sorted([
         f for f in os.listdir(str(V2_BLOBS))
         if f.startswith("blob_") and f.endswith(".safetensors")
@@ -500,7 +437,6 @@ def main():
         print(f"    {rn}: {count}")
     print()
 
-    # Traj ID range check
     traj_ids = verify_table.column("traj_id").to_pylist()
     print(f"  traj_id range: {min(traj_ids)} - {max(traj_ids)}")
     print(f"  traj_id count unique: {len(set(traj_ids))}")

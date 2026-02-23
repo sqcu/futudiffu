@@ -1,0 +1,20 @@
+\vspace{-8pt}
+\section{Discussion and Limitations}
+\vspace{-3pt}
+\label{sec:discussion}
+
+We presented an RL-based framework for training denoising diffusion models to directly optimize a variety of reward functions.
+By posing the iterative denoising procedure as a multi-step decision-making problem, we were able to design a class of policy gradient algorithms that are highly effective at training diffusion models.
+We found that \methodours{} was an effective optimizer for tasks that are difficult to specify via prompts, such as image compressibility, and difficult to evaluate programmatically, such as semantic alignment with prompts.
+To provide an automated way to derive rewards, we also proposed a method for using VLMs to provide feedback on the quality of generated images.
+While our evaluation considers a variety of prompts, the full range of images in our experiments was constrained (\emph{e.g.}, animals performing activities). Future iterations could expand both the questions posed to the VLM, possibly using language models to propose relevant questions based on the prompt, as well as the diversity of the prompt distribution.
+We also chose not to study the problem of overoptimization, a common issue with RL finetuning in which the model diverges too far from the original distribution to be useful (see Appendix~\ref{app:overoptimization}); we highlight this as an important area for future work.
+We hope that this work will provide a step toward more targeted training of large generative models, where optimization via RL can produce models that are effective at achieving user-specified goals rather than simply matching an entire data distribution.
+
+
+
+\textbf{Broader Impacts.}
+Generative models can be valuable productivity aids, but may also pose harm when used for disinformation, impersonation, or phishing.
+Our work aims to make diffusion models more useful by enabling them to optimize user-specified objectives.
+This adaptation has beneficial applications, such as the generation of more understandable educational material, but may also be used maliciously, in ways that we do not outline here.
+Work on the reliable detection of synthetic content remains important to mitigate such harms from generative models.

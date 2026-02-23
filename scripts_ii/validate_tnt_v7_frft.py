@@ -43,9 +43,6 @@ from PIL import Image
 from src_ii.reward_functions import thisnotthat_score_gpu
 from src_ii.frft import frft_descriptor, frft_similarity
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
 
 I2I_DIR = PROJECT_ROOT / "i2i_off_policies"
 THIS_PATH = I2I_DIR / "pizza-ratto.png"
@@ -95,9 +92,6 @@ FRACTIONAL_ROTATION_ANGLES = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# Image loading + transforms (reused from v6 validation)
-# ---------------------------------------------------------------------------
 
 def load_image_tensor(path: Path, device: torch.device) -> torch.Tensor:
     img = Image.open(path).convert("RGB")
@@ -229,9 +223,6 @@ def rotate_image_border(img: torch.Tensor, angle_deg: float) -> torch.Tensor:
                          padding_mode="border", align_corners=False).squeeze(0).clamp(0, 1)
 
 
-# ---------------------------------------------------------------------------
-# Scoring wrappers
-# ---------------------------------------------------------------------------
 
 def score_frft(image: torch.Tensor, this_ref: torch.Tensor, that_ref: torch.Tensor) -> float:
     score = thisnotthat_score_gpu(image, this_ref.unsqueeze(0), that_ref.unsqueeze(0))
@@ -242,9 +233,6 @@ SCORE_FNS = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Constraint checking
-# ---------------------------------------------------------------------------
 
 def check_constraints(scores: dict[str, float]) -> dict[str, dict]:
     this_ref_score = that_ref_score = nightmode_score = None
@@ -295,9 +283,6 @@ def check_constraints(scores: dict[str, float]) -> dict[str, dict]:
     return results
 
 
-# ---------------------------------------------------------------------------
-# Part A: Constraint scoring
-# ---------------------------------------------------------------------------
 
 def run_part_a(this_ref: torch.Tensor, that_ref: torch.Tensor, images: list[Path]):
     print("\n" + "=" * 70)
@@ -337,9 +322,6 @@ def run_part_a(this_ref: torch.Tensor, that_ref: torch.Tensor, images: list[Path
     return all_scores, all_timings
 
 
-# ---------------------------------------------------------------------------
-# Part B: Invariance suite
-# ---------------------------------------------------------------------------
 
 def run_part_b(this_ref: torch.Tensor, that_ref: torch.Tensor, anchors: dict[str, torch.Tensor]):
     print("\n" + "=" * 70)
@@ -355,7 +337,6 @@ def run_part_b(this_ref: torch.Tensor, that_ref: torch.Tensor, anchors: dict[str
         for anchor_name, anchor_img in anchors.items():
             expected_sign = 1 if anchor_name == "pizza-ratto" else -1
 
-            # Basic transforms
             for tx_name, tx_fn in zip(BASIC_TRANSFORM_NAMES, BASIC_TRANSFORM_FNS):
                 transformed = tx_fn(anchor_img)
                 sc = score_fn(transformed, this_ref, that_ref)
@@ -363,7 +344,6 @@ def run_part_b(this_ref: torch.Tensor, that_ref: torch.Tensor, anchors: dict[str
                 key = f"{anchor_name}/{tx_name}"
                 method_results[key] = {"score": sc, "passed": passed}
 
-            # Fractional rotations
             for rot_name, rot_angle in FRACTIONAL_ROTATION_ANGLES:
                 rotated = rotate_image_border(anchor_img, rot_angle)
                 sc = score_fn(rotated, this_ref, that_ref)
@@ -373,11 +353,9 @@ def run_part_b(this_ref: torch.Tensor, that_ref: torch.Tensor, anchors: dict[str
 
         results[method_name] = method_results
 
-        # Summary
         n_pass = sum(1 for v in method_results.values() if v["passed"])
         n_total = len(method_results)
 
-        # Per-anchor counts
         pizza_pass = sum(1 for k, v in method_results.items()
                         if k.startswith("pizza-ratto") and v["passed"])
         pizza_total = sum(1 for k in method_results if k.startswith("pizza-ratto"))
@@ -385,7 +363,6 @@ def run_part_b(this_ref: torch.Tensor, that_ref: torch.Tensor, anchors: dict[str
                           if k.startswith("offhand_pleometric") and v["passed"])
         offhand_total = sum(1 for k in method_results if k.startswith("offhand_pleometric"))
 
-        # Fractional rotation counts
         frac_pass = sum(1 for k, v in method_results.items()
                        if "rot_" in k and v["passed"])
         frac_total = sum(1 for k in method_results if "rot_" in k)
@@ -395,7 +372,6 @@ def run_part_b(this_ref: torch.Tensor, that_ref: torch.Tensor, anchors: dict[str
         print(f"  pizza-ratto: {pizza_pass}/{pizza_total}  offhand_pleometric: {offhand_pass}/{offhand_total}")
         print(f"  Fractional rotations: {frac_pass}/{frac_total}")
 
-        # Show failures
         failures = [(k, v) for k, v in method_results.items() if not v["passed"]]
         if failures:
             print(f"  Failures:")
@@ -407,9 +383,6 @@ def run_part_b(this_ref: torch.Tensor, that_ref: torch.Tensor, anchors: dict[str
     return results
 
 
-# ---------------------------------------------------------------------------
-# Part C: Discrimination diagnostic (FrFT descriptor space)
-# ---------------------------------------------------------------------------
 
 def run_part_c(this_ref: torch.Tensor, that_ref: torch.Tensor,
                anchors: dict[str, torch.Tensor]):
@@ -417,15 +390,12 @@ def run_part_c(this_ref: torch.Tensor, that_ref: torch.Tensor,
     print("PART C: Discrimination diagnostic in FrFT descriptor space")
     print("=" * 70)
 
-    # Compute descriptors at native resolution
     desc_this = frft_descriptor(anchors["pizza-ratto"])
     desc_that = frft_descriptor(anchors["offhand_pleometric"])
 
-    # Cross-image distance
     cross_sim = frft_similarity(desc_this, desc_that)
     cross_dist = 1.0 - float(cross_sim.item())
 
-    # Self-rotation distances for each anchor at multiple angles
     results = {"cross_cosine_sim": float(cross_sim.item()), "cross_dist": cross_dist}
 
     for anchor_name, anchor_img in anchors.items():
@@ -439,7 +409,6 @@ def run_part_c(this_ref: torch.Tensor, that_ref: torch.Tensor,
             self_sim = frft_similarity(desc_orig, desc_rot)
             self_dist = 1.0 - float(self_sim.item())
 
-            # Also: cosine sim between rotated and the OTHER anchor
             desc_other = desc_that if anchor_name == "pizza-ratto" else desc_this
             cross_rot_sim = frft_similarity(desc_rot, desc_other)
 
@@ -461,7 +430,6 @@ def run_part_c(this_ref: torch.Tensor, that_ref: torch.Tensor,
                   f"ratio(cross/self)={ratio_str}  "
                   f"rot→other_sim={r['cross_rot_cosine_sim']:.6f}")
 
-    # Descriptor dimensionality info
     print(f"\n  Descriptor dim: {desc_this.shape[0]}")
     print(f"  THIS norm: {torch.linalg.norm(desc_this):.2f}")
     print(f"  THAT norm: {torch.linalg.norm(desc_that):.2f}")
@@ -469,9 +437,6 @@ def run_part_c(this_ref: torch.Tensor, that_ref: torch.Tensor,
     return results
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 def main():
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -493,16 +458,12 @@ def main():
         "offhand_pleometric": that_ref,
     }
 
-    # Part A
     all_scores, all_timings = run_part_a(this_ref, that_ref, images)
 
-    # Part B
     invariance_results = run_part_b(this_ref, that_ref, anchors)
 
-    # Part C
     discrimination_results = run_part_c(this_ref, that_ref, anchors)
 
-    # Save results
     summary = {
         "device": str(DEVICE),
         "scoring_functions": SCORING_FUNCTIONS,
@@ -539,7 +500,6 @@ def main():
 
     print(f"\nResults saved to {OUTPUT_DIR}/")
 
-    # Final summary table
     print("\n" + "=" * 70)
     print("SUMMARY")
     print("=" * 70)

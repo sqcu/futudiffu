@@ -1,0 +1,37 @@
+\section{Related Work}
+\label{sec:related}
+
+\textbf{Diffusion probabilistic models.}
+Denoising diffusion models ~\citep{sohldickstein2015nonequilibrium,ho2020denoising} have emerged as an effective class of generative models for modalities including images~\citep{ramesh2021dalle,saharia2022imagen}, videos~\citep{ho2022imagenvideo,singer2022make}, 3D shapes~\citep{zhou20213d, zeng2022lion}, and robotic trajectories~\citep{janner2022diffuser,ajay2022conditional,chi2023diffusion}.
+While the denoising objective is conventionally derived as an approximation to likelihood, the training of diffusion models typically departs from maximum likelihood in several ways \citep{ho2020denoising}.
+Modifying the objective to more strictly optimize likelihood ~\citep{nichol2021improved, kingma2021vdms} often leads to worsened image quality, as likelihood is not a faithful proxy for visual quality.
+In this paper, we show how diffusion models can be optimized directly for downstream objectives.
+
+\textbf{Controllable generation with diffusion models.}
+Recent progress in text-to-image diffusion models~\citep{ramesh2021dalle,saharia2022imagen} has enabled fine-grained high-resolution image synthesis.
+To further improve the controllability and quality of diffusion models, recent approaches have investigated finetuning on limited user-provided data~\citep{ruiz2022dreambooth},
+optimizing text embeddings for new concepts~\citep{gal2022image},
+composing models~\citep{du2023reduce,liu2022compositional},
+adapters for additional input constraints~\citep{zhang2023adding},
+and inference-time techniques such as classifier \citep{dhariwal2021diffusion} and classifier-free \citep{ho2021classifierfree} guidance.
+
+\textbf{Reinforcement learning from human feedback.}
+A number of works have studied using human feedback to optimize models in settings such as simulated robotic control \citep{christiano2017rlhf},
+game-playing \citep{knox2008tamer},
+machine translation \citep{nguyen2017reinforcement},
+citation retrieval \citep{menick2022teaching},
+browsing-based question-answering \citep{nakano2021webgpt},
+summarization \citep{stiennon2020feedback,ziegler2019rlhf},
+instruction-following \citep{ouyang2022instructgpt},
+and alignment with specifications \citep{bai2022hhh}.
+Recently, \citet{lee2023aligning} studied the alignment of text-to-image diffusion models to human preferences using a method based on reward-weighted likelihood maximization.
+In our comparisons, their method corresponds to one iteration of the reward-weighted regresion (RWR) method.
+Our results demonstrate that DDPO significantly outperforms even multiple iterations of weighted likelihood maximization (RWR-style) optimization.
+
+\textbf{Diffusion models as sequential decision-making processes.}
+Although predating diffusion models, \citet{bachman2015data} similarly posed data generation as a sequential decision-making problem and used the resulting framework to apply reinforcement learning methods to image generation.
+More recently, \citet{fan2023sft} introduced a policy gradient method for training diffusion models. However, this paper aimed to improve data distribution matching rather than optimizing downstream objectives, and therefore the only reward function considered was a GAN-like discriminator.
+In concurrent work to ours, DPOK~\citep{fan2023dpok} built upon \citet{fan2023sft} and \citet{lee2023aligning} to better align text-to-image diffusion models to human preferences using a policy gradient algorithm. 
+Like \citet{lee2023aligning}, DPOK only considers a single preference-based reward function \citep{xu2023imagereward}; additionally, their work studies KL-regularization and primarily focuses on training a different diffusion model for each prompt.
+In contrast, we train on many prompts at once (up to 398) and demonstrate generalization to many more prompts outside of the training set. Furthermore, we study how DDPO can be applied to multiple reward functions beyond those based on human feedback, including how rewards derived automatically from VLMs can improve prompt-image alignment. We provide a direct comparison to DPOK in Appendix~\ref{app:dpok}.
+

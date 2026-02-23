@@ -43,7 +43,6 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 import torch
 import torch.nn as nn
 
-# --- VRAM Instrumentation ---
 def vram_report(phase: str) -> dict:
     """Print and return VRAM stats at a named phase boundary."""
     alloc_gb = torch.cuda.memory_allocated() / (1024**3)
@@ -63,7 +62,6 @@ def vram_report(phase: str) -> dict:
     return report
 
 
-# --- Configuration ---
 FP8_PATH = r"F:\dox\ai\comfyui\ComfyUI\models\diffusion_models\z_image_fp8_blockwise.safetensors"
 TE_PATH = r"F:\dox\ai\comfyui\ComfyUI\models\text_encoders\qwen_3_4b.safetensors"
 TOKENIZER_PATH = str(REPO_ROOT / "src" / "futudiffu" / "tokenizer")
@@ -77,12 +75,10 @@ PREF_KEYS = ("pinkify_pref", "thisnotthat_pref")
 N_TRAJECTORIES = 10  # default; overridable via --n-trajectories
 LOGSQUARE_WEIGHT = 0.05
 
-# LR sweep grid (v2 sweep confirmed lr=3e-4 as winner by ema_loss_final)
 PROBE_LRS = [1e-2, 3e-3, 1e-3, 3e-4, 1e-4]
 PROBE_STEPS = 100
 WINNER_STEPS = 1000
 
-# Secondary sweeps
 RANK_SWEEP = [8, 32, 64]
 LAYER_SUBSETS = {
     "all_30": None,
@@ -207,7 +203,6 @@ def build_latent_loader(
     from src_ii.stats import sigma_for_step
     from futudiffu.sampling import make_rope_cache
 
-    # Pre-compute sigma, conditioning, rope_cache per image for reuse
     cache = {}
 
     def load_latent(image_idx: int):
@@ -219,21 +214,17 @@ def build_latent_loader(
         step_key = entry["step_key"]
         prompt = records[traj_idx]["prompt"]
 
-        # Load latent from disk
         traj_dir = REPO_ROOT / "btrm_dataset" / "latents" / f"traj_{traj_idx:06d}"
         pt_path = traj_dir / f"{step_key}.pt"
         latent = torch.load(str(pt_path), weights_only=True).to(device=device, dtype=dtype)
 
-        # Conditioning
         conditioning = unique_prompts[prompt].to(device=device, dtype=dtype)
         num_tokens = conditioning.shape[1]
 
-        # Sigma -> timestep
         n_steps = records[traj_idx]["n_steps"]
         sigma_val = sigma_for_step(step_key, n_steps, device=device, dtype=dtype)
         timestep = sigma_val.unsqueeze(0)
 
-        # RoPE cache
         B, C, H, W = latent.shape
         rope_cache = make_rope_cache(diff_model, H, W, num_tokens, device)
 
@@ -367,7 +358,6 @@ def run_probe(
     probe_dir = output_dir / name
     probe_dir.mkdir(parents=True, exist_ok=True)
 
-    # Set up BTRM training on the model (adapter install is idempotent)
     optimizer = setup_btrm_training(
         diff_model,
         adapter_name="rtheta",
@@ -377,7 +367,6 @@ def run_probe(
 
     n_adapter_params = sum(p.numel() for p in get_adapter_params(diff_model, "rtheta").values())
 
-    # Streaming JSONL callback: crash-safe per-step logging + VRAM peak tracking
     streaming_cb = _make_streaming_callback(probe_dir / "training_curve.jsonl")
     torch.cuda.reset_peak_memory_stats()  # baseline before first step
 
@@ -408,21 +397,16 @@ def run_probe(
     )
     total_time = time.perf_counter() - t0
 
-    # Close the streaming JSONL file
     streaming_cb._fh.close()
 
-    # VRAM after first probe's forward+backward
     if vram_timeline is not None:
         vram_timeline.append(vram_report(f"probe_{name}_done"))
 
-    # Save training curve
     with open(probe_dir / "training_curve.json", "w") as f:
         json.dump(training_curve, f, indent=2)
 
-    # Persist adapter + head
     persist_btrm(diff_model, "rtheta", str(probe_dir))
 
-    # Compute summary metrics
     final = training_curve[-1]
     min_loss = min(e["loss"] for e in training_curve)
     best_pink = max(e["accuracy_pinkify"] for e in training_curve)
@@ -430,19 +414,15 @@ def run_probe(
     mean_step_time = sum(e["time_s"] for e in training_curve) / len(training_curve)
     mean_grad_norm = sum(e["grad_norm"] for e in training_curve) / len(training_curve)
 
-    # Meaningful accuracy: mean over all steps (each step is binary, but the
-    # mean over 100 steps is informative -- a random model scores ~0.5)
     n_tc = len(training_curve)
     mean_acc_pink = sum(e["accuracy_pinkify"] for e in training_curve) / n_tc
     mean_acc_tnt = sum(e["accuracy_thisnotthat"] for e in training_curve) / n_tc
 
-    # EMA of loss (alpha=0.1) -- smoothed final value
     ema_alpha = 0.1
     ema_loss = training_curve[0]["loss"]
     for e in training_curve[1:]:
         ema_loss = ema_alpha * e["loss"] + (1.0 - ema_alpha) * ema_loss
 
-    # Loss std over last 20 steps (optimization noise measure)
     tail = training_curve[-20:] if n_tc >= 20 else training_curve
     tail_losses = [e["loss"] for e in tail]
     tail_mean = sum(tail_losses) / len(tail_losses)
@@ -474,10 +454,6 @@ def run_probe(
     with open(probe_dir / "final_metrics.json", "w") as f:
         json.dump(asdict(result), f, indent=2)
 
-    # Clean up: remove hook, free head, clear cache.
-    # DO NOT call remove_all_adapters -- that strips LoRALinear wrappers
-    # and invalidates the compiled graph. Adapter structure persists.
-    # No cleanup needed - adapter structure persists on diff_model
     torch.cuda.empty_cache()
 
     return result
@@ -513,7 +489,6 @@ def _collect_trajectory_metadata(
         precisions.add(rec.get("precision", "unknown"))
         step_counts.add(rec["n_steps"])
 
-        # Resolution: for t2i, default 1280x832; for i2i, use output_width/height
         if traj_type == "i2i":
             w = rec.get("output_width", 1280)
             h = rec.get("output_height", 832)
@@ -590,21 +565,16 @@ def main():
     if args.output_dir is not None:
         OUTPUT_DIR = Path(args.output_dir)
 
-    # --- Resolve trajectory indices ---
     if args.trajectory_range is not None:
         trajectory_indices = parse_trajectory_range(args.trajectory_range)
     else:
         trajectory_indices = list(range(args.n_trajectories))
     if args.include_multires:
-        # Add i2i multi-resolution trajectories 40-49
         multires_indices = list(range(40, 50))
         trajectory_indices = sorted(set(trajectory_indices) | set(multires_indices))
 
     use_sigma_weighting = not args.no_sigma_weighting
 
-    # Dataset deprecation filter overrides (used when loading from V2 format).
-    # Default: exclude policy rollouts from BTRM training. --include-rollouts
-    # overrides this for experiments that intentionally include adapter-contaminated data.
     dataset_filter_overrides = None
     if args.include_rollouts:
         dataset_filter_overrides = {"exclude_policy_rollouts": False}
@@ -612,7 +582,6 @@ def main():
     t_total = time.perf_counter()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Tee stdout+stderr to sweep_log.txt (Windows Python + WSL redirect is unreliable)
     import io
     class TeeStream:
         def __init__(self, original, logfile):
@@ -641,12 +610,10 @@ def main():
     print(f"  logSNR schedule: threshold={args.logsnr_threshold}, "
           f"interval={args.logsnr_interval}, decay_rate={args.logsnr_decay_rate}")
 
-    # --- Load training data ---
     print("\n=== Loading training data ===")
     labels, per_image_scores, manifest = load_training_data()
     records = manifest["records"]
 
-    # Collect trajectory metadata for summary
     traj_meta = _collect_trajectory_metadata(records, trajectory_indices)
     print(f"  Trajectory metadata: {len(trajectory_indices)} trajectories, "
           f"resolutions={sorted(traj_meta['resolutions'])}, "
@@ -655,7 +622,6 @@ def main():
     training_pairs = build_training_pairs(labels, per_image_scores)
     print(f"  {len(training_pairs)} training pairs from {len(per_image_scores)} images")
 
-    # --- Build sigma lookup for loss weighting ---
     sigma_lookup_map = build_sigma_lookup(per_image_scores, records)
     def sigma_lookup_fn(image_idx: int) -> float:
         return sigma_lookup_map[image_idx]
@@ -676,26 +642,22 @@ def main():
               f"interval={args.logsnr_interval}, decay_rate={args.logsnr_decay_rate}")
         print(f"  Sigma weight distribution: {weight_dist}")
 
-    # --- Encode prompts (loads TE, encodes, frees TE) ---
     print("\n=== Encoding prompts ===")
     unique_prompts = encode_all_prompts(records, device, dtype,
                                         trajectory_indices=trajectory_indices)
 
-    # --- VRAM timeline ---
     vram_timeline = []
     vram_timeline.append(vram_report("00_before_model_load"))
 
-    # --- Load diffusion model (NO compile yet -- adapter must be allocated first) ---
     print("\n=== Loading diffusion model ===")
     from src_ii.zimage_model import load_zimage_rlaif
 
-    _, diff_model = load_zimage_rlaif(
+    diff_model = load_zimage_rlaif(
         FP8_PATH, device=device, dtype=dtype,
         compile_model=False, fuse=True,
     )
     vram_timeline.append(vram_report("01_model_loaded_uncompiled"))
 
-    # --- Allocate adapter structure BEFORE compile (graph-mutating) ---
     print("\n=== Allocating adapter (before compile) ===")
     from futudiffu.lora import allocate_adapter, init_adapter_weights
     allocate_adapter(
@@ -707,7 +669,6 @@ def main():
     )
     vram_timeline.append(vram_report("02_adapter_allocated"))
 
-    # --- torch.compile (sees adapter structure, custom_ops stay opaque) ---
     print("\n=== Compiling model (torch.compile, mode='default') ===")
     t_compile = time.perf_counter()
     diff_compiled = torch.compile(diff_model, mode="default")
@@ -715,22 +676,12 @@ def main():
     print(f"  torch.compile wrapper created in {compile_time:.1f}s")
     vram_timeline.append(vram_report("03_compiled"))
 
-    # --- Build latent loader ---
-    # Note on multi-resolution: train_btrm_differentiable() processes each
-    # image in a pair independently (two sequential B=1 forward passes), so
-    # different spatial dimensions between images in a pair are handled
-    # correctly -- they never get concatenated along the batch dim.
-    #
-    # Packing opportunity: 4x 512x512 (seq_len=1024 each) fit in one
-    # 1280x832 (seq_len=4160) FlexAttention slot. Future: pack small
-    # images for 4x gradient samples at same FLOPS cost.
     print("\n=== Building latent loader ===")
     load_latent_fn = build_latent_loader(
         per_image_scores, records, unique_prompts,
         diff_model, device, dtype,
     )
 
-    # Pre-warm the cache by loading a few latents
     print("  Pre-warming latent cache...")
     t_cache = time.perf_counter()
     unique_indices = set()
@@ -744,9 +695,6 @@ def main():
 
     all_results: list[ProbeResult] = []
 
-    # =====================================================================
-    # PHASE 1: LR Binary Search (5 probes x 100 steps)
-    # =====================================================================
     print("\n" + "=" * 70)
     print("  PHASE 1: LR Binary Search (5 probes x 100 steps)")
     print("=" * 70)
@@ -779,10 +727,6 @@ def main():
               f"gnorm={result.mean_grad_norm:.4f}, "
               f"time={result.total_time_s:.0f}s ({result.mean_step_time_s:.1f}s/step)")
 
-    # Find winner: lowest EMA-smoothed final loss (stable convergence, not lucky spikes).
-    # min_loss is wrong here -- it picks the most volatile LR (e.g. lr=1e-2 can spike
-    # to min_loss=0.022 before diverging to final_loss=0.898). EMA(alpha=0.1) at the
-    # final step reflects actual converged performance.
     phase1_results = [r for r in all_results if r.name.startswith("lr_")]
     winner = min(phase1_results, key=lambda r: r.ema_loss_final)
     winning_lr = winner.lr
@@ -794,13 +738,7 @@ def main():
           f"mean_tnt={winner.mean_acc_thisnotthat:.3f}, "
           f"loss_std_last_20={winner.loss_std_last_20:.4f}")
 
-    # NOTE: Phases 2-4 skipped for v2 sweep (Phase 1 only, per task spec)
-    # Phase 2 (1000 steps at winner), Phase 3 (rank/layer/init sweeps),
-    # Phase 4 (attention diff) can be re-enabled for extended runs.
 
-    # =====================================================================
-    # SUMMARY
-    # =====================================================================
     print("\n" + "=" * 70)
     print("  SWEEP SUMMARY")
     print("=" * 70)
@@ -825,7 +763,6 @@ def main():
     with open(OUTPUT_DIR / "sweep_summary.json", "w") as f:
         json.dump(summary, f, indent=2)
 
-    # Print results table
     print(f"\n{'Name':<20s} {'LR':>10s} {'Steps':>6s} {'Loss':>8s} {'MinLoss':>8s} "
           f"{'EMALoss':>8s} {'MnPink':>7s} {'MnTNT':>7s} {'LStd20':>7s} "
           f"{'GNorm':>7s} {'Time':>7s} {'Params':>8s}")
@@ -872,7 +809,6 @@ def run_attention_diff(
         {"name": "low_thisnotthat", "traj_idx": 7, "step_key": "final"},
     ]
 
-    # Load trained weights from persisted model
     config_path = model_dir / "btrm_compound_config.json"
     if not config_path.exists():
         print(f"  No compound config at {config_path}, skipping attention diff")
@@ -881,14 +817,12 @@ def run_attention_diff(
     install_multi_lora(diff_model, [{"name": "rtheta", "rank": 8, "alpha": 16.0}])
     load_btrm(diff_model, "rtheta", str(model_dir))
 
-    # Helper to globally set adapter scale on all MultiLoRALinear modules
     def _set_global_adapter_scale(scale: float):
         scale_t = torch.tensor([scale], device=device)
         for m in diff_model.modules():
             if isinstance(m, MultiLoRALinear):
                 m._adapter_scales = scale_t
 
-    # Install attention capture
     set_attention_backend("sdpa")
     capture = AttentionCapture()
     capture.install()
@@ -916,19 +850,16 @@ def run_attention_diff(
         B, C, H, W = latent.shape
         rope_cache = make_rope_cache(diff_model, H, W, num_tokens, device)
 
-        # Forward A: scale=0 (unadapted)
         _set_global_adapter_scale(0.0)
         stats_a = capture.capture_forward(
             diff_model, latent, timestep, conditioning, num_tokens, rope_cache,
         )
 
-        # Forward B: scale=1 (adapter active)
         _set_global_adapter_scale(1.0)
         stats_b = capture.capture_forward(
             diff_model, latent, timestep, conditioning, num_tokens, rope_cache,
         )
 
-        # Compute mean absolute diff across main layers
         from collections import Counter
         dom_a = Counter(v["seq_len"] for v in stats_a.values()).most_common(1)[0][0]
         dom_b = Counter(v["seq_len"] for v in stats_b.values()).most_common(1)[0][0]
@@ -965,7 +896,6 @@ def run_attention_diff(
     with open(attn_dir / "attention_diff_manifest.json", "w") as f:
         json.dump(attn_manifest, f, indent=2)
 
-    # Clean up
     _set_global_adapter_scale(1.0)
     capture.remove()
 

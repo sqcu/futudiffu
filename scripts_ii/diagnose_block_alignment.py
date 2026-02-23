@@ -34,11 +34,9 @@ def main():
     print(f"BLOCK_N (KV tiles) = {BLOCK_N}")
     print()
 
-    # Load model (we only need the backbone, not TE)
     print("Loading model...")
     model = load_zimage_rlaif(FP8_PATH, device=DEVICE, dtype=DTYPE)
 
-    # Encode a dummy prompt (need real conditionings for cap_embedder)
     print("Encoding text...")
     from futudiffu.text_encoder import load_text_encoder, encode_text
     te_model, te_tokenizer = load_text_encoder(TE_PATH, device=DEVICE)
@@ -48,12 +46,10 @@ def main():
     del te_model
     torch.cuda.empty_cache()
 
-    # CFG: stack pos+neg → B=2
     pos_cond = pos_cond.to(dtype=DTYPE)
     neg_cond = neg_cond.to(dtype=DTYPE)
     context = torch.cat([pos_cond, neg_cond], dim=0)  # (2, seq, dim)
 
-    # Test multiple resolution combinations
     test_cases = [
         [(512, 512), (640, 384)],    # mixed res
         [(512, 512), (512, 512)],    # same res square
@@ -66,12 +62,10 @@ def main():
         K = len(resolutions)
         print(f"\n--- K={K}, resolutions={resolutions} ---")
 
-        # Build img_sizes (H, W) AFTER pad_to_patch_size
         patch_size = model.patch_size  # 2
         img_sizes = []
         for w, h in resolutions:
             lat_h, lat_w = h // 8, w // 8
-            # pad_to_patch_size
             padded_h = lat_h + (-lat_h % patch_size)
             padded_w = lat_w + (-lat_w % patch_size)
             img_sizes.append((padded_h, padded_w))
@@ -79,7 +73,6 @@ def main():
         context_list = [context] * K
         cap_lens = [cap_len] * K
 
-        # Prepare packed state (this builds packing_info)
         with torch.no_grad():
             from futudiffu.attention import set_attention_backend; set_attention_backend("sdpa")
             state = prepare_packed_forward(
@@ -108,7 +101,6 @@ def main():
             print(f"    Q-block aligned (mod {BLOCK_M}): {q_aligned}  (remainder={cumulative_offset % BLOCK_M})")
             print(f"    KV-block aligned (mod {BLOCK_N}): {kv_aligned}  (remainder={cumulative_offset % BLOCK_N})")
             if not q_aligned:
-                # How many tokens straddle?
                 block_start = (cumulative_offset // BLOCK_M) * BLOCK_M
                 straddle_from_prev = cumulative_offset - block_start
                 straddle_from_next = BLOCK_M - straddle_from_prev
@@ -117,7 +109,6 @@ def main():
                 print(f"        {straddle_from_next} tokens of img {i+1} attend to img {i}'s KV!")
 
         print(f"\n  Block mask shape: {block_mask.shape}")
-        # Print the block mask
         if block_mask.shape[0] <= 30:  # Don't print huge masks
             mask_str = ""
             for qi in range(block_mask.shape[0]):

@@ -15,7 +15,6 @@ All rendering uses PIL (Pillow). No matplotlib.
 Execution:
   PYTHONUNBUFFERED=1 /mnt/f/dox/repos/ai/futudiffu/.venv/Scripts/python.exe ^
       F:\dox\repos\ai\futudiffu\scripts_ii\plot_sweep_curves.py
-  # or with explicit sweep dir:
   PYTHONUNBUFFERED=1 /mnt/f/dox/repos/ai/futudiffu/.venv/Scripts/python.exe ^
       F:\dox\repos\ai\futudiffu\scripts_ii\plot_sweep_curves.py ^
       --sweep-dir F:\dox\repos\ai\futudiffu\rtheta_sweep_output_v2
@@ -35,9 +34,6 @@ from typing import Optional
 
 from PIL import Image, ImageDraw, ImageFont
 
-# ---------------------------------------------------------------------------
-# src_ii imports
-# ---------------------------------------------------------------------------
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -47,9 +43,6 @@ if str(REPO_ROOT) not in sys.path:
 from src_ii.stats import finite_differences
 
 
-# ---------------------------------------------------------------------------
-# Data loading
-# ---------------------------------------------------------------------------
 
 
 def discover_probes(sweep_dir: Path) -> list[str]:
@@ -59,14 +52,9 @@ def discover_probes(sweep_dir: Path) -> list[str]:
         if p.is_dir() and p.name.startswith("lr_") and (p / "training_curve.json").exists():
             probes.append(p.name)
 
-    # Sort by actual LR value (descending: highest LR first)
     def lr_sort_key(name: str) -> float:
-        # "lr_1e-02" -> 0.01, "lr_3e-03" -> 0.003
         lr_str = name.replace("lr_", "").replace("-", "e-")
-        # Handle the format: "1e-02" is already valid, "3e-03" is already valid
-        # But our format is "1e-02" which means "1e-02", need to parse carefully
         parts = name.replace("lr_", "")  # "1e-02" or "3e-03"
-        # Convert "1e-02" -> 1e-02, "3e-03" -> 3e-03
         coeff, exp = parts.split("e-")
         return -float(f"{coeff}e-{exp}")
 
@@ -80,9 +68,6 @@ def load_curve(sweep_dir: Path, name: str) -> list[dict]:
         return json.load(f)
 
 
-# ---------------------------------------------------------------------------
-# EMA + finite difference
-# ---------------------------------------------------------------------------
 
 def ema(values: list[float], alpha: float) -> list[float]:
     """Exponential moving average. alpha is the weight on the new sample."""
@@ -94,9 +79,6 @@ def ema(values: list[float], alpha: float) -> list[float]:
     return out
 
 
-# ---------------------------------------------------------------------------
-# PIL chart renderer
-# ---------------------------------------------------------------------------
 
 class PILChart:
     """Minimal line/scatter chart renderer using PIL.
@@ -136,7 +118,6 @@ class PILChart:
         self.x_label: str = ""
         self.y_label: str = ""
 
-        # Try to load a monospace font; fall back to default
         self.font = ImageFont.load_default()
         self.font_small = self.font
 
@@ -195,7 +176,6 @@ class PILChart:
         x_min, x_max = min(all_xs), max(all_xs)
         y_min, y_max = min(all_ys), max(all_ys)
 
-        # Add 5% padding
         x_range = x_max - x_min if x_max != x_min else 1.0
         y_range = y_max - y_min if y_max != y_min else 1.0
         x_min -= 0.05 * x_range
@@ -216,14 +196,12 @@ class PILChart:
 
     def _draw_axes(self, x_min, x_max, y_min, y_max):
         d = self.draw
-        # Plot area border
         d.rectangle(
             [self.ml, self.mt, self.ml + self.plot_w, self.mt + self.plot_h],
             outline="#cccccc",
             width=1,
         )
 
-        # Grid lines and tick labels
         n_x_ticks = 6
         n_y_ticks = 6
 
@@ -231,9 +209,7 @@ class PILChart:
             frac = i / n_x_ticks
             val = x_min + frac * (x_max - x_min)
             px = self.ml + int(frac * self.plot_w)
-            # Grid line
             d.line([(px, self.mt), (px, self.mt + self.plot_h)], fill="#eeeeee", width=1)
-            # Tick label
             label = _format_tick(val)
             d.text((px, self.mt + self.plot_h + 5), label, fill="#333333", font=self.font, anchor="mt")
 
@@ -241,13 +217,10 @@ class PILChart:
             frac = i / n_y_ticks
             val = y_min + frac * (y_max - y_min)
             py = self.mt + int((1.0 - frac) * self.plot_h)
-            # Grid line
             d.line([(self.ml, py), (self.ml + self.plot_w, py)], fill="#eeeeee", width=1)
-            # Tick label
             label = _format_tick(val)
             d.text((self.ml - 5, py), label, fill="#333333", font=self.font, anchor="rm")
 
-        # Axis labels
         if self.x_label:
             d.text(
                 (self.ml + self.plot_w // 2, self.img_h - 10),
@@ -257,8 +230,6 @@ class PILChart:
                 anchor="mb",
             )
         if self.y_label:
-            # Rotate would be ideal but PIL doesn't easily support rotated text
-            # with the default font. Just place it at top-left of y axis.
             d.text(
                 (5, self.mt + self.plot_h // 2),
                 self.y_label,
@@ -286,7 +257,6 @@ class PILChart:
         y_start = self.mt + 10
         line_height = 18
 
-        # Background
         n = len(labeled)
         d.rectangle(
             [x_start - 5, y_start - 5, x_start + 195, y_start + n * line_height + 5],
@@ -297,7 +267,6 @@ class PILChart:
         for i, s in enumerate(labeled):
             y = y_start + i * line_height
             color = s["color"]
-            # Color swatch
             if s["type"] == "line":
                 style = s.get("style", "solid")
                 if style == "dashed":
@@ -330,7 +299,6 @@ class PILChart:
                     continue
                 if style == "dashed":
                     for i in range(len(points) - 1):
-                        # Draw every other segment
                         if i % 2 == 0:
                             d.line([points[i], points[i + 1]], fill=color, width=lw)
                 else:
@@ -372,11 +340,7 @@ def _format_tick(val: float) -> str:
     return f"{val:.3f}"
 
 
-# ---------------------------------------------------------------------------
-# Color palette for N probes
-# ---------------------------------------------------------------------------
 
-# Distinct colors for up to 7 probes, ordered from warm to cool
 PALETTE = [
     ("#cc3333", "#ee8888", "#880000"),  # red
     ("#cc7733", "#eebb88", "#884400"),  # orange
@@ -398,9 +362,6 @@ def probe_label(name: str) -> str:
     return name.replace("lr_", "lr=")
 
 
-# ---------------------------------------------------------------------------
-# Plot generators (N-probe versions)
-# ---------------------------------------------------------------------------
 
 def plot_loss_vs_step(
     probes: dict[str, list[dict]],
@@ -418,11 +379,8 @@ def plot_loss_vs_step(
         ema_01 = ema(loss, 0.1)
         ema_03 = ema(loss, 0.3)
 
-        # Raw (thin, light)
         chart.add_line(steps, loss, color=light, label="", line_width=1)
-        # EMA alpha=0.1 (solid)
         chart.add_line(steps, ema_01, color=solid, label=f"{probe_label(name)} EMA(0.1)", line_width=2)
-        # EMA alpha=0.3 (dashed)
         chart.add_line(steps, ema_03, color=solid, label=f"{probe_label(name)} EMA(0.3)", line_width=2, style="dashed")
 
     chart.save(output_dir / "loss_vs_step.png")
@@ -451,7 +409,6 @@ def plot_pre_clip_grad_norm_vs_step(
     output_dir: Path,
 ):
     """Pre-clip grad norm vs step (v2 data only)."""
-    # Check if data has pre_clip_grad_norm
     first_data = next(iter(probes.values()))
     if "pre_clip_grad_norm" not in first_data[0]:
         print("  Skipping pre-clip grad norm plot (field not present)")
@@ -518,7 +475,6 @@ def plot_accuracy_vs_step(
     output_dir: Path,
 ):
     """Accuracy (pinkify and thisnotthat) vs step."""
-    # Pinkify
     chart_p = PILChart(width=1000, height=650)
     chart_p.set_title("Accuracy (pinkify) vs Step (r_theta LR sweep)")
     chart_p.set_labels("Step", "Accuracy (pinkify)")
@@ -532,7 +488,6 @@ def plot_accuracy_vs_step(
 
     chart_p.save(output_dir / "accuracy_pinkify_vs_step.png")
 
-    # Thisnotthat
     chart_t = PILChart(width=1000, height=650)
     chart_t.set_title("Accuracy (thisnotthat) vs Step (r_theta LR sweep)")
     chart_t.set_labels("Step", "Accuracy (thisnotthat)")
@@ -569,10 +524,8 @@ def plot_down_and_left(
         dloss = finite_differences(ema_loss)
         x_vals = ema_loss[:-1]
 
-        # Plot as scatter with connecting lines
         chart.add_line(x_vals, dloss, color=light, label="", line_width=1)
         chart.add_scatter(x_vals, dloss, color=solid, label=probe_label(name), size=3)
-        # Mark the final point with a bigger dot
         chart.add_scatter([x_vals[-1]], [dloss[-1]], color=dark, label=f"{probe_label(name)} final", size=6)
 
     chart.save(output_dir / f"down_and_left_{suffix}.png")
@@ -584,7 +537,6 @@ def compute_summary(
     """Compute summary statistics for the sweep."""
     results = {}
 
-    # Per-alpha EMA analysis
     for alpha in [0.1, 0.3]:
         key = f"alpha_{alpha}"
         results[key] = {}
@@ -623,7 +575,6 @@ def compute_summary(
                 f"{best_dloss_name} has fastest mean descent ({best_mean_dloss:.6f})"
             )
 
-    # Grad norm stats
     results["grad_norm"] = {}
     for name, data in probes.items():
         gn = [d["grad_norm"] for d in data]
@@ -634,7 +585,6 @@ def compute_summary(
             "final": gn[-1],
         }
 
-    # Pre-clip grad norm (v2 only)
     first_data = next(iter(probes.values()))
     if "pre_clip_grad_norm" in first_data[0]:
         results["pre_clip_grad_norm"] = {}
@@ -647,7 +597,6 @@ def compute_summary(
                 "final": gn[-1],
             }
 
-    # Step time stats
     results["step_time"] = {}
     for name, data in probes.items():
         time = [d["time_s"] for d in data]
@@ -657,14 +606,12 @@ def compute_summary(
             "max_step": time.index(max(time)),
             "total": sum(time),
         }
-        # Compute slowdown ratio if we have enough steps
         if len(time) > 20:
             baseline_mean = sum(time[1:20]) / 19  # skip step 0 (compile warmup)
             if baseline_mean > 0:
                 entry["slowdown_ratio_at_max"] = max(time) / baseline_mean
         results["step_time"][probe_label(name)] = entry
 
-    # Accuracy stats
     results["accuracy"] = {}
     for name, data in probes.items():
         acc_p = [d["accuracy_pinkify"] for d in data]
@@ -680,9 +627,6 @@ def compute_summary(
     return results
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 def _generate_all_plots(
     probes: dict[str, list[dict]],
@@ -697,7 +641,6 @@ def _generate_all_plots(
         suffix: appended to each filename (e.g. "_zoomed")
         label_extra: appended to each title (e.g. " [excl lr=1e-02]")
     """
-    # 1. Loss vs step
     print(f"\nPlotting loss vs step{suffix}...")
     chart = PILChart(width=1000, height=650)
     chart.set_title(f"Loss vs Step (r_theta LR sweep){label_extra}")
@@ -713,7 +656,6 @@ def _generate_all_plots(
         chart.add_line(steps, ema_03, color=solid, label=f"{probe_label(name)} EMA(0.3)", line_width=2, style="dashed")
     chart.save(output_dir / f"loss_vs_step{suffix}.png")
 
-    # 1b. Log-scale loss vs step
     print(f"Plotting log-scale loss vs step{suffix}...")
     chart_log = PILChart(width=1000, height=650)
     chart_log.set_title(f"log10(Loss) vs Step (r_theta LR sweep){label_extra}")
@@ -728,7 +670,6 @@ def _generate_all_plots(
         chart_log.add_line(steps, log_ema_01, color=solid, label=f"{probe_label(name)} EMA(0.1)", line_width=2)
     chart_log.save(output_dir / f"loss_vs_step_logscale{suffix}.png")
 
-    # 2. Grad norm vs step
     print(f"Plotting grad norm vs step{suffix}...")
     chart = PILChart(width=1000, height=650)
     chart.set_title(f"Grad Norm vs Step (r_theta LR sweep){label_extra}")
@@ -740,7 +681,6 @@ def _generate_all_plots(
         chart.add_line(steps, gn, color=solid, label=probe_label(name), line_width=2)
     chart.save(output_dir / f"grad_norm_vs_step{suffix}.png")
 
-    # 3. Pre-clip grad norm vs step (v2 only)
     first_data = next(iter(probes.values()))
     if "pre_clip_grad_norm" in first_data[0]:
         print(f"Plotting pre-clip grad norm vs step{suffix}...")
@@ -754,7 +694,6 @@ def _generate_all_plots(
             chart.add_line(steps, gn, color=solid, label=probe_label(name), line_width=2)
         chart.save(output_dir / f"pre_clip_grad_norm_vs_step{suffix}.png")
 
-        # 3b. Log-scale pre-clip grad norm
         print(f"Plotting log-scale pre-clip grad norm vs step{suffix}...")
         chart_log = PILChart(width=1000, height=650)
         chart_log.set_title(f"log10(Pre-Clip Grad Norm) vs Step{label_extra}")
@@ -766,7 +705,6 @@ def _generate_all_plots(
             chart_log.add_line(steps, gn, color=solid, label=probe_label(name), line_width=2)
         chart_log.save(output_dir / f"pre_clip_grad_norm_vs_step_logscale{suffix}.png")
 
-    # 4. Step time vs step
     print(f"Plotting step time vs step{suffix}...")
     chart = PILChart(width=1000, height=650)
     chart.set_title(f"Step Time vs Step (r_theta LR sweep){label_extra}")
@@ -778,7 +716,6 @@ def _generate_all_plots(
         chart.add_line(steps, time, color=solid, label=probe_label(name), line_width=2)
     chart.save(output_dir / f"time_vs_step{suffix}.png")
 
-    # 5. BT loss (per-term normalized) vs step (v2 only)
     if "loss" in first_data[0] or "bt_loss" in first_data[0]:
         print(f"Plotting BT loss vs step{suffix}...")
         chart = PILChart(width=1000, height=650)
@@ -793,7 +730,6 @@ def _generate_all_plots(
             chart.add_line(steps, ema_bt, color=solid, label=f"{probe_label(name)} EMA(0.1)", line_width=2)
         chart.save(output_dir / f"bt_loss_vs_step{suffix}.png")
 
-    # 6. Accuracy vs step
     print(f"Plotting accuracy vs step{suffix}...")
     chart_p = PILChart(width=1000, height=650)
     chart_p.set_title(f"Accuracy (pinkify) vs Step{label_extra}")
@@ -817,7 +753,6 @@ def _generate_all_plots(
         chart_t.add_line(steps, ema_acc, color=solid, label=probe_label(name), line_width=2)
     chart_t.save(output_dir / f"accuracy_thisnotthat_vs_step{suffix}.png")
 
-    # 7. Down-and-to-the-left plots
     for alpha in [0.1, 0.3]:
         alpha_str = f"alpha{alpha:.1f}".replace(".", "")
         print(f"Plotting down-and-to-the-left (alpha={alpha}){suffix}...")
@@ -857,7 +792,6 @@ def main():
 
     print(f"Discovered {len(probe_names)} probes: {', '.join(probe_names)}")
 
-    # Load all curves (ordered dict preserving discovery order = descending LR)
     probes: dict[str, list[dict]] = {}
     for name in probe_names:
         data = load_curve(sweep_dir, name)
@@ -866,15 +800,12 @@ def main():
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # --- Pass 1: All probes (original linear-scale plots preserved) ---
     print("\n" + "=" * 60)
     print("PASS 1: All probes (original)")
     print("=" * 60)
     _generate_all_plots(probes, output_dir, probe_names)
 
-    # --- Pass 2: Zoomed (excluding highest-LR outlier) ---
     if len(probe_names) > 2:
-        # Exclude the first probe (highest LR, most likely to be the outlier)
         excl_name = probe_names[0]
         zoomed_probes = {k: v for k, v in probes.items() if k != excl_name}
         zoomed_names = [n for n in probe_names if n != excl_name]
@@ -887,7 +818,6 @@ def main():
             label_extra=f" [excl {probe_label(excl_name)}]",
         )
 
-    # --- Summary JSON (uses all probes) ---
     print("\nComputing summary statistics...")
     summary = compute_summary(probes)
     summary_path = output_dir / "summary.json"
@@ -895,7 +825,6 @@ def main():
         json.dump(summary, f, indent=2)
     print(f"  Saved: {summary_path}")
 
-    # Print key results
     print("\n" + "=" * 60)
     print("SUMMARY")
     print("=" * 60)
@@ -936,7 +865,6 @@ def main():
     for pname in probe_names:
         plabel = probe_label(pname)
         acc = summary["accuracy"][plabel]
-        # Find the last-N keys
         pink_key = [k for k in acc if k.startswith("pinkify_last")][0]
         tnt_key = [k for k in acc if k.startswith("thisnotthat_last")][0]
         print(f"    {plabel}: pinkify={acc[pink_key]:.0%}, thisnotthat={acc[tnt_key]:.0%}")

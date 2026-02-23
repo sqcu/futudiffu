@@ -35,9 +35,6 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 import torch
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
 
 FP8_PATH = r"F:\dox\ai\comfyui\ComfyUI\models\diffusion_models\z_image_fp8_blockwise.safetensors"
 TE_PATH = r"F:\dox\ai\comfyui\ComfyUI\models\text_encoders\qwen_3_4b.safetensors"
@@ -67,9 +64,6 @@ PINKIFY_HEAD_NAME = "pinkify"
 RUN_NAME = "pinkify_validated_training"
 
 
-# ---------------------------------------------------------------------------
-# PINKIFY latent cache: encode challenge images ONCE
-# ---------------------------------------------------------------------------
 
 def encode_pinkify_challenge_latents(
     challenge_dir: Path,
@@ -101,7 +95,6 @@ def encode_pinkify_challenge_latents(
     cache = {}
 
     for label in labels:
-        # Try both naming conventions
         candidates = [
             challenge_dir / f"PINKER_{label}.png",
             challenge_dir / f"{label}.png",
@@ -136,7 +129,6 @@ def encode_pinkify_challenge_latents(
         }
         print(f"    {label}: {w_pixels}x{h_pixels}, latent shape {latent.shape}")
 
-    # Free VAE
     del vae
     torch.cuda.empty_cache()
     print(f"  VAE freed after encoding {len(cache)} challenge images.")
@@ -214,9 +206,6 @@ def main():
     print(f"  Output: {OUTPUT_DIR}")
     print("=" * 70)
 
-    # ==================================================================
-    # Phase 0: Pre-flight checks
-    # ==================================================================
     if not CHALLENGE_DIR.exists():
         print(f"\n  FATAL: PINKIFY challenge directory not found: {CHALLENGE_DIR}")
         print(f"  Expected files: PINKER_A.png through PINKER_F.png")
@@ -226,9 +215,6 @@ def main():
         print(f"\n  FATAL: Multi-res dataset not found: {DATASET_DIR}")
         return 1
 
-    # ==================================================================
-    # Phase 1: Load dataset + build pair sampler with clean-biased sampling
-    # ==================================================================
     print("\n" + "=" * 60)
     print("  Phase 1: Loading multi-res V2 dataset")
     print("=" * 60)
@@ -249,7 +235,6 @@ def main():
     positions = build_positions_from_v2(reader, traj_ids=traj_ids)
     print(f"  Positions: {len(positions)} across {len(traj_ids)} trajectories")
 
-    # Resolution distribution
     res_dist = {}
     for pos in positions:
         key = f"{pos.width}x{pos.height}"
@@ -257,10 +242,8 @@ def main():
     n_unique_res = len(res_dist)
     print(f"  Unique resolutions: {n_unique_res}")
 
-    # Compute FLOPS weights
     flops_weights = compute_flops_sampling_weights_from_positions(positions)
 
-    # Build sampler WITH clean_fraction=0.8
     sampler = BTRMPairSampler(
         positions=positions,
         allow_inter_trajectory=True,
@@ -273,9 +256,6 @@ def main():
     print(f"  Clean fraction: {CLEAN_FRACTION}")
     print(f"  Populated tiers: {sampler.populated_tiers}")
 
-    # ==================================================================
-    # Phase 2: Encode prompts with text encoder (then free)
-    # ==================================================================
     print("\n" + "=" * 60)
     print("  Phase 2: Encoding prompts")
     print("=" * 60)
@@ -300,9 +280,6 @@ def main():
     torch.cuda.empty_cache()
     print(f"  TE freed. VRAM: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
-    # ==================================================================
-    # Phase 3: Encode PINKIFY challenge images to latents (VAE, then free)
-    # ==================================================================
     print("\n" + "=" * 60)
     print("  Phase 3: Encoding PINKIFY challenge images to latents")
     print("=" * 60)
@@ -312,9 +289,6 @@ def main():
     )
     print(f"  Cached {len(pinkify_latent_cache)} challenge latents")
 
-    # ==================================================================
-    # Phase 3b: Ground truth PINKIFY validation (pixel-space)
-    # ==================================================================
     print("\n" + "=" * 60)
     print("  Phase 3b: Ground truth PINKIFY scores (pixel-space)")
     print("=" * 60)
@@ -340,9 +314,6 @@ def main():
         print(f"    [{status}] {check['name']}: {check['detail']}")
     print(f"  Saved to {gt_path}")
 
-    # ==================================================================
-    # Phase 4: Load FP8 backbone + create BTRMCompoundModel
-    # ==================================================================
     print("\n" + "=" * 60)
     print("  Phase 4: Loading backbone + creating BTRM compound model")
     print("=" * 60)
@@ -352,9 +323,7 @@ def main():
     from src_ii.multi_lora import get_adapter_params
     from src_ii.sigma_schedule import build_sigma_schedule, resolution_shift
 
-    # compile_model=False is CORRECT here: whole-model torch.compile is
-    # incompatible with per-block gradient checkpointing.
-    _, raw_model = load_zimage_rlaif(
+    raw_model = load_zimage_rlaif(
         FP8_PATH, device=device, dtype=dtype,
         compile_model=False, fuse=True,
     )
@@ -375,15 +344,11 @@ def main():
     print(f"  Head params: {n_head:,}")
     print(f"  Total trainable: {n_adapter + n_head:,}")
 
-    # ==================================================================
-    # Phase 4b: Initial PINKIFY evaluation (step 0, before training)
-    # ==================================================================
     print("\n" + "=" * 60)
     print("  Phase 4b: Initial PINKIFY evaluation (before training)")
     print("=" * 60)
 
     pinkify_log_path = OUTPUT_DIR / "pinkify_validation_log.jsonl"
-    # Clear any existing log
     if pinkify_log_path.exists():
         pinkify_log_path.unlink()
 
@@ -404,9 +369,6 @@ def main():
         status = "PASS" if check["passed"] else "FAIL"
         print(f"    [{status}] {check['name']}")
 
-    # ==================================================================
-    # Build load_latent_fn
-    # ==================================================================
     _v2_meta_cache = {}
 
     def _get_v2_meta(traj_id):
@@ -453,9 +415,6 @@ def main():
 
         return latent, timestep, cond, num_tokens
 
-    # ==================================================================
-    # Build preference function
-    # ==================================================================
     def preference_fn(pair: dict) -> dict:
         """Deterministic preference: cleaner image (lower sigma) wins."""
         prefs = {}
@@ -470,9 +429,6 @@ def main():
                 prefs[pref_key] = 0   # tie
         return prefs
 
-    # ==================================================================
-    # Phase 5: Training loop with PINKIFY validation callback
-    # ==================================================================
     print("\n" + "=" * 60)
     print(f"  Phase 5: Training ({N_STEPS} steps) + PINKIFY validation")
     print(f"  macrobatch_budget={MACROBATCH_BUDGET}, clean_fraction={CLEAN_FRACTION}")
@@ -492,7 +448,6 @@ def main():
 
     curve_writer = TrainingCurveWriter(OUTPUT_DIR / "training_curve.jsonl")
 
-    # PINKIFY validation callback: called after each training step
     pinkify_eval_count = 0
 
     def pinkify_validation_callback(step: int, entry: dict) -> None:
@@ -518,7 +473,6 @@ def main():
         eval_result["eval_time_s"] = eval_time
         eval_result["training_loss"] = entry.get("loss", entry.get("bt_loss", 0.0))
 
-        # Extract per-head accuracy from the training entry
         for name in HEAD_NAMES:
             eval_result[f"training_accuracy_{name}"] = entry.get(f"accuracy_{name}", 0.0)
 
@@ -532,7 +486,6 @@ def main():
               f"{'ALL PASS' if eval_result['passed'] else 'INCOMPLETE'} | "
               f"{eval_time:.1f}s")
 
-        # Re-enable training mode after eval
         raw_model.gradient_checkpointing = True
         raw_model.train()
 
@@ -569,14 +522,10 @@ def main():
     print(f"\n  Training complete: {train_time:.1f}s "
           f"({train_time / N_STEPS:.1f}s/step)")
 
-    # ==================================================================
-    # Phase 6: Final PINKIFY evaluation + summary
-    # ==================================================================
     print("\n" + "=" * 60)
     print("  Phase 6: Final analysis")
     print("=" * 60)
 
-    # Run standard analysis
     run_config = {
         "mode": "pinkify_validated_training",
         "n_steps": N_STEPS,
@@ -598,11 +547,9 @@ def main():
     report_path = artifacts.generate_analysis(run_config=run_config)
     print(f"  Analysis: {report_path}")
 
-    # Persist the model
     persist_info = persist_btrm(raw_model, "rtheta", str(OUTPUT_DIR))
     print(f"  Model persisted: {persist_info}")
 
-    # Load and summarize PINKIFY validation log
     pinkify_entries = []
     with open(str(pinkify_log_path), "r") as f:
         for line in f:
@@ -613,7 +560,6 @@ def main():
                 except json.JSONDecodeError:
                     pass
 
-    # Build summary of PINKIFY validation trajectory
     pinkify_summary = {
         "n_evaluations": len(pinkify_entries),
         "ground_truth": ground_truth,
@@ -633,7 +579,6 @@ def main():
             summary_entry["training_loss"] = entry["training_loss"]
         pinkify_summary["evaluations"].append(summary_entry)
 
-    # First step with all 5 constraints passing
     first_all_pass = None
     for e in pinkify_summary["evaluations"]:
         if e["passed"]:
@@ -652,9 +597,6 @@ def main():
         json.dump(pinkify_summary, f, indent=2, default=str)
     print(f"  PINKIFY summary: {pinkify_json_path}")
 
-    # ==================================================================
-    # Phase 7: Run summary
-    # ==================================================================
     print("\n" + "=" * 60)
     print("  Phase 7: Summary")
     print("=" * 60)
@@ -702,7 +644,6 @@ def main():
     with open(str(summary_path), "w") as f:
         json.dump(summary, f, indent=2, default=str)
 
-    # Save training curve as JSON too
     curve_path = OUTPUT_DIR / "training_curve.json"
     with open(str(curve_path), "w") as f:
         json.dump(training_curve, f, indent=2, default=str)
@@ -723,7 +664,6 @@ def main():
     print(f"  Clean fraction (measured): {sampler.get_clean_fraction():.1%}")
     print(f"  Output: {OUTPUT_DIR}")
 
-    # Cleanup
     reader.close()
     torch.cuda.empty_cache()
 

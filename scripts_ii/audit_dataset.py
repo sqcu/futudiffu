@@ -29,15 +29,11 @@ from typing import Any
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
 
-# Make src_ii importable.
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 OUTPUT_DIR = REPO_ROOT / "dataset_audit_output"
 
-# ---------------------------------------------------------------------------
-# All known dataset locations
-# ---------------------------------------------------------------------------
 
 DATASET_LOCATIONS = {
     "btrm_dataset": REPO_ROOT / "btrm_dataset",
@@ -51,7 +47,6 @@ DATASET_LOCATIONS = {
     "training_output": REPO_ROOT / "training_output",
 }
 
-# Which datasets are referenced by training code and how
 TRAINING_CODE_REFERENCES = {
     "btrm_dataset": [
         "scripts_ii/sweep_rtheta_lr.py (reads manifest.json + latents/*.pt)",
@@ -86,9 +81,6 @@ TRAINING_CODE_REFERENCES = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Utility: directory size
-# ---------------------------------------------------------------------------
 
 def dir_size_bytes(path: Path) -> int:
     """Total size of all files in a directory tree."""
@@ -116,19 +108,6 @@ def format_size(n_bytes: int) -> str:
         return f"{n_bytes / 1024 ** 3:.2f} GB"
 
 
-# ---------------------------------------------------------------------------
-# Sigma schedule -- imported from canonical module
-# ---------------------------------------------------------------------------
-# Previously this file contained an inline Karras sigma schedule
-# (_build_sigma_schedule with sigma_max=1.0, rho=7.0), which does NOT match
-# the server's ComfyUI simple_scheduler schedule. The Karras formula produces
-# different sigma values from what the server uses to generate trajectories,
-# so the step-to-sigma mapping was incorrect.
-#
-# We now use src_ii.sigma_schedule.build_sigma_schedule_py, which is the
-# pure-Python equivalent of the server's exact ComfyUI schedule (no torch
-# required). This means sigma bins in the audit report now reflect the actual
-# sigma values present in the trajectory latents.
 
 from src_ii.sigma_schedule import build_sigma_schedule_py as _build_sigma_schedule_py
 
@@ -143,8 +122,6 @@ def sigma_for_step_key(step_key: str, n_steps: int) -> float:
     """
     sigmas = _build_sigma_schedule_py(n_steps)
     if step_key == "final":
-        # "final" latent was produced after the last euler step (sigma -> 0).
-        # Return the last non-terminal sigma (index n_steps - 1).
         return sigmas[n_steps - 1] if n_steps < len(sigmas) else sigmas[-2]
     elif step_key.startswith("step_"):
         idx = int(step_key.split("_")[1])
@@ -153,9 +130,6 @@ def sigma_for_step_key(step_key: str, n_steps: int) -> float:
     return -1.0
 
 
-# ---------------------------------------------------------------------------
-# V1 dataset scanner
-# ---------------------------------------------------------------------------
 
 def scan_v1_dataset(path: Path) -> dict[str, Any]:
     """Scan a v1 btrm_dataset directory."""
@@ -182,7 +156,6 @@ def scan_v1_dataset(path: Path) -> dict[str, Any]:
 
     result["size_bytes"] = dir_size_bytes(path)
 
-    # Read manifest
     manifest_path = path / "manifest.json"
     if manifest_path.exists():
         result["has_manifest"] = True
@@ -209,11 +182,9 @@ def scan_v1_dataset(path: Path) -> dict[str, Any]:
         except (json.JSONDecodeError, KeyError):
             pass
 
-    # Check uploaded manifest
     if (path / ".uploaded_manifest.json").exists():
         result["has_uploaded_manifest"] = True
 
-    # Count actual trajectory directories
     latents_dir = path / "latents"
     if latents_dir.exists():
         traj_dirs = sorted(
@@ -222,7 +193,6 @@ def scan_v1_dataset(path: Path) -> dict[str, Any]:
         )
         result["n_trajectories"] = len(traj_dirs)
 
-        # Sample a few to get step keys
         for traj_dir in traj_dirs:
             pt_files = [f for f in traj_dir.iterdir() if f.suffix == ".pt"]
             n_images = len(pt_files)
@@ -232,7 +202,6 @@ def scan_v1_dataset(path: Path) -> dict[str, Any]:
                 step_key = pf.stem  # "step_00", "step_04", ..., "final"
                 result["step_keys"][step_key] += 1
 
-            # Read meta.json for this traj to get n_steps for sigma calc
             meta_path = traj_dir / "meta.json"
             if meta_path.exists():
                 try:
@@ -267,9 +236,6 @@ def _sigma_bin(sigma: float) -> str:
         return "zero (s=0)"
 
 
-# ---------------------------------------------------------------------------
-# V2 dataset scanner (parquet-free, reads schema from file bytes)
-# ---------------------------------------------------------------------------
 
 def scan_v2_dataset(path: Path) -> dict[str, Any]:
     """Scan a v2 dataset directory. Reads index.parquet metadata without pyarrow."""
@@ -297,10 +263,7 @@ def scan_v2_dataset(path: Path) -> dict[str, Any]:
     if index_path.exists():
         result["has_index_parquet"] = True
         result["parquet_size_bytes"] = index_path.stat().st_size
-        # Try to read row count from parquet footer (last 8 bytes contain
-        # 4-byte LE row group count + 4-byte magic "PAR1")
         result["index_readable"] = True
-        # We'll attempt a lightweight parse
         result["index_row_count"] = _parquet_row_count_heuristic(index_path)
 
     if (path / "_write_lock").exists():
@@ -309,7 +272,6 @@ def scan_v2_dataset(path: Path) -> dict[str, Any]:
     if (path / ".uploaded_manifest.json").exists():
         result["has_uploaded_manifest"] = True
 
-    # Count blobs
     blobs_dir = path / "blobs"
     if blobs_dir.exists():
         blobs = sorted(
@@ -322,7 +284,6 @@ def scan_v2_dataset(path: Path) -> dict[str, Any]:
             for b in blobs
         ]
 
-    # Renders
     renders_dir = path / "renders"
     if renders_dir.exists():
         result["n_renders"] = sum(1 for f in renders_dir.iterdir() if f.is_file())
@@ -343,13 +304,10 @@ def _parquet_row_count_heuristic(parquet_path: Path) -> str:
         if size < 12:
             return "empty"
         with open(parquet_path, "rb") as f:
-            # Check magic at start
             magic_start = f.read(4)
-            # Check magic at end
             f.seek(-4, 2)
             magic_end = f.read(4)
             if magic_start == b"PAR1" and magic_end == b"PAR1":
-                # Read footer length
                 f.seek(-8, 2)
                 footer_len = struct.unpack("<I", f.read(4))[0]
                 return f"valid parquet ({format_size(size)}, footer={footer_len}B)"
@@ -359,9 +317,6 @@ def _parquet_row_count_heuristic(parquet_path: Path) -> str:
         return f"unreadable ({e})"
 
 
-# ---------------------------------------------------------------------------
-# Packed dataset scanner (JSONL manifest + per-traj safetensors)
-# ---------------------------------------------------------------------------
 
 def scan_packed_dataset(path: Path) -> dict[str, Any]:
     """Scan the packed_dataset directory (JSONL manifest + per-traj .safetensors)."""
@@ -382,11 +337,9 @@ def scan_packed_dataset(path: Path) -> dict[str, Any]:
 
     result["size_bytes"] = dir_size_bytes(path)
 
-    # Count .safetensors files
     st_files = [f for f in path.iterdir() if f.suffix == ".safetensors"]
     result["n_safetensors_files"] = len(st_files)
 
-    # Read manifest.jsonl
     manifest_path = path / "manifest.jsonl"
     if manifest_path.exists():
         try:
@@ -400,7 +353,6 @@ def scan_packed_dataset(path: Path) -> dict[str, Any]:
                     result["step_counts"][rec.get("n_steps", -1)] += 1
                     result["precision_counts"][rec.get("precision", "unknown")] += 1
                     result["type_counts"][rec.get("type", "unknown")] += 1
-                    # All packed are 1280x832 t2i (from the original generation)
                     result["resolutions"]["1280x832"] += 1
         except (json.JSONDecodeError, KeyError):
             pass
@@ -408,9 +360,6 @@ def scan_packed_dataset(path: Path) -> dict[str, Any]:
     return result
 
 
-# ---------------------------------------------------------------------------
-# Pinkify output scanner
-# ---------------------------------------------------------------------------
 
 def scan_pinkify_output(path: Path) -> dict[str, Any]:
     """Scan the pinkify_thisnotthat_output directory."""
@@ -433,7 +382,6 @@ def scan_pinkify_output(path: Path) -> dict[str, Any]:
 
     result["size_bytes"] = dir_size_bytes(path)
 
-    # per_image_scores.json
     scores_path = path / "per_image_scores.json"
     if scores_path.exists():
         result["has_per_image_scores"] = True
@@ -448,7 +396,6 @@ def scan_pinkify_output(path: Path) -> dict[str, Any]:
         except (json.JSONDecodeError, KeyError):
             pass
 
-    # preference_labels.json
     labels_path = path / "preference_labels.json"
     if labels_path.exists():
         result["has_preference_labels"] = True
@@ -464,7 +411,6 @@ def scan_pinkify_output(path: Path) -> dict[str, Any]:
         except (json.JSONDecodeError, KeyError):
             pass
 
-    # Check for trained artifacts
     if (path / "rtheta_adapter.safetensors").exists():
         result["has_adapter"] = True
     if (path / "btrm_head.safetensors").exists() or (path / "trained_head.safetensors").exists():
@@ -473,9 +419,6 @@ def scan_pinkify_output(path: Path) -> dict[str, Any]:
     return result
 
 
-# ---------------------------------------------------------------------------
-# Training output scanner
-# ---------------------------------------------------------------------------
 
 def scan_training_output(path: Path) -> dict[str, Any]:
     """Scan the training_output directory."""
@@ -511,9 +454,6 @@ def scan_training_output(path: Path) -> dict[str, Any]:
     return result
 
 
-# ---------------------------------------------------------------------------
-# Report formatting
-# ---------------------------------------------------------------------------
 
 def _box(title: str, width: int = 60) -> str:
     """Draw an ASCII box top with title."""
@@ -550,9 +490,6 @@ def format_counter(counter: Counter, label: str = "") -> list[str]:
     return lines
 
 
-# ---------------------------------------------------------------------------
-# Main audit
-# ---------------------------------------------------------------------------
 
 def run_audit() -> str:
     """Run the full dataset audit and return the formatted report string."""
@@ -564,43 +501,31 @@ def run_audit() -> str:
     lines.append(f"  Repo root: {REPO_ROOT}")
     lines.append("=" * 78)
 
-    # -----------------------------------------------------------------------
-    # Scan all datasets
-    # -----------------------------------------------------------------------
     scans: dict[str, dict] = {}
 
-    # V1 dataset
     lines.append("")
     lines.append("Scanning datasets...")
 
     v1 = scan_v1_dataset(DATASET_LOCATIONS["btrm_dataset"])
     scans["btrm_dataset"] = v1
 
-    # V2 datasets
     for name in ["btrm_dataset_v2", "btrm_dataset_v2_gpu0", "btrm_dataset_v2_gpu0_gpu0",
                   "btrm_dataset_v2_gpu1", "btrm_dataset_v2_gpu1_gpu1"]:
         scans[name] = scan_v2_dataset(DATASET_LOCATIONS[name])
 
-    # Packed dataset
     scans["packed_dataset"] = scan_packed_dataset(DATASET_LOCATIONS["packed_dataset"])
 
-    # Pinkify output
     scans["pinkify_thisnotthat_output"] = scan_pinkify_output(
         DATASET_LOCATIONS["pinkify_thisnotthat_output"]
     )
 
-    # Training output
     scans["training_output"] = scan_training_output(DATASET_LOCATIONS["training_output"])
 
-    # -----------------------------------------------------------------------
-    # Section 1: Per-dataset reports
-    # -----------------------------------------------------------------------
     lines.append("")
     lines.append("-" * 78)
     lines.append("  SECTION 1: DATASET INVENTORY")
     lines.append("-" * 78)
 
-    # V1 dataset report
     lines.append("")
     lines.append(_box("btrm_dataset/ (V1)", 74))
     lines.append(_row(f"Path: {DATASET_LOCATIONS['btrm_dataset']}", 74))
@@ -631,7 +556,6 @@ def run_audit() -> str:
                 lines.append(_row(f"  {sb}: {count} images", 74))
     lines.append(_bottom(74))
 
-    # V2 datasets
     for name in ["btrm_dataset_v2", "btrm_dataset_v2_gpu0", "btrm_dataset_v2_gpu0_gpu0",
                   "btrm_dataset_v2_gpu1", "btrm_dataset_v2_gpu1_gpu1"]:
         s = scans[name]
@@ -655,7 +579,6 @@ def run_audit() -> str:
                 lines.append(_row(f"Renders: {s['n_renders']}", 74))
         lines.append(_bottom(74))
 
-    # Packed dataset
     pk = scans["packed_dataset"]
     lines.append("")
     lines.append(_box("packed_dataset/ (HF upload format)", 74))
@@ -676,7 +599,6 @@ def run_audit() -> str:
                 lines.append(_row(f"  {p}: {count} trajectories", 74))
     lines.append(_bottom(74))
 
-    # Pinkify output
     pf = scans["pinkify_thisnotthat_output"]
     lines.append("")
     lines.append(_box("pinkify_thisnotthat_output/", 74))
@@ -698,7 +620,6 @@ def run_audit() -> str:
                 lines.append(_row(f"  {k}: {v}", 74))
     lines.append(_bottom(74))
 
-    # Training output
     to = scans["training_output"]
     lines.append("")
     lines.append(_box("training_output/", 74))
@@ -713,16 +634,12 @@ def run_audit() -> str:
         lines.append(_row(f"PNG renders: {to['n_png']}", 74))
     lines.append(_bottom(74))
 
-    # -----------------------------------------------------------------------
-    # Section 2: Data flow diagram
-    # -----------------------------------------------------------------------
     lines.append("")
     lines.append("-" * 78)
     lines.append("  SECTION 2: DATA FLOW DIAGRAM")
     lines.append("-" * 78)
     lines.append("")
 
-    # Build dynamic counts for the diagram
     v1_traj = v1["n_trajectories"] if v1["exists"] else 0
     v1_manifest = v1["n_trajectories_manifest"] if v1["exists"] else 0
     v1_images = v1["n_images_total"] if v1["exists"] else 0
@@ -731,9 +648,7 @@ def run_audit() -> str:
     pf_trajs = pf["n_trajectories_covered"] if pf["exists"] else 0
     pk_trajs = pk["n_trajectories"] if pk["exists"] else 0
 
-    # Determine resolutions string
     res_str = ", ".join(f"{r}" for r, _ in v1["resolutions"].most_common(3)) if v1["resolutions"] else "unknown"
-    # Determine step counts string
     step_str = ", ".join(f"{s}" for s, _ in v1["step_counts"].most_common(3)) if v1["step_counts"] else "unknown"
 
     lines.append("  GENERATION PIPELINE:")
@@ -809,9 +724,6 @@ def run_audit() -> str:
     lines.append("  | (nested staging artifact)   |  | (nested staging artifact)   |")
     lines.append("  +-----------------------------+  +-----------------------------+")
 
-    # -----------------------------------------------------------------------
-    # Section 3: Training data flow detail
-    # -----------------------------------------------------------------------
     lines.append("")
     lines.append("-" * 78)
     lines.append("  SECTION 3: TRAINING PAIR SELECTION (sweep_rtheta_lr.py)")
@@ -855,16 +767,12 @@ def run_audit() -> str:
     lines.append("    Default: threshold=10.0, interval=5.0, decay_rate=0.5")
     lines.append("    This is SAMPLING probability, not loss weighting.")
 
-    # -----------------------------------------------------------------------
-    # Section 4: Orphan analysis
-    # -----------------------------------------------------------------------
     lines.append("")
     lines.append("-" * 78)
     lines.append("  SECTION 4: ORPHAN ANALYSIS")
     lines.append("-" * 78)
     lines.append("")
 
-    # Orphaned = exists on disk but not referenced by any training code
     orphaned = []
     referenced = []
     for name, path in DATASET_LOCATIONS.items():
@@ -892,9 +800,6 @@ def run_audit() -> str:
     else:
         lines.append("  No orphaned datasets found.")
 
-    # -----------------------------------------------------------------------
-    # Section 5: V1 vs V2 format comparison
-    # -----------------------------------------------------------------------
     lines.append("")
     lines.append("-" * 78)
     lines.append("  SECTION 5: V1 vs V2 FORMAT COMPARISON")
@@ -921,9 +826,6 @@ def run_audit() -> str:
     lines.append("    - The btrm_dataset_v2/ directory exists but is EMPTY (no blobs)")
     lines.append("      (migration script ran but created empty structure)")
 
-    # -----------------------------------------------------------------------
-    # Section 6: Data on HuggingFace
-    # -----------------------------------------------------------------------
     lines.append("")
     lines.append("-" * 78)
     lines.append("  SECTION 6: HUGGINGFACE DATA STATUS")
@@ -939,16 +841,12 @@ def run_audit() -> str:
     lines.append("    weights from Comfy-Org/z_image, NOT the BTRM dataset.")
     lines.append("    No code in the repo downloads SQCU/futudiffu-btrm back to local.")
 
-    # -----------------------------------------------------------------------
-    # Section 7: Discrepancies
-    # -----------------------------------------------------------------------
     lines.append("")
     lines.append("-" * 78)
     lines.append("  SECTION 7: DISCREPANCIES AND NOTES")
     lines.append("-" * 78)
     lines.append("")
 
-    # V1 disk vs manifest count
     if v1["exists"]:
         disk_count = v1["n_trajectories"]
         manifest_count = v1["n_trajectories_manifest"]
@@ -964,7 +862,6 @@ def run_audit() -> str:
 
     lines.append("")
 
-    # Preference labels coverage
     if pf["exists"] and v1["exists"]:
         lines.append(f"  [NOTE] Preference labels cover {pf_trajs} of {v1_traj}")
         lines.append(f"    trajectories on disk ({pf_images} images, {pf_pairs} pairs).")
@@ -974,7 +871,6 @@ def run_audit() -> str:
 
     lines.append("")
 
-    # V2 empty dataset
     v2_empty = scans["btrm_dataset_v2"]
     if v2_empty["exists"] and v2_empty["n_blobs"] == 0:
         lines.append("  [NOTE] btrm_dataset_v2/ exists but has no blobs and no index.parquet.")
@@ -983,7 +879,6 @@ def run_audit() -> str:
 
     lines.append("")
 
-    # GPU naming collision
     for suffix in ["gpu0_gpu0", "gpu1_gpu1"]:
         name = f"btrm_dataset_v2_{suffix}"
         s = scans.get(name, {})
@@ -997,7 +892,6 @@ def run_audit() -> str:
 
     lines.append("")
 
-    # Total size summary
     total_size = sum(s.get("size_bytes", 0) for s in scans.values() if s.get("exists"))
     lines.append(f"  TOTAL SIZE (all datasets): {format_size(total_size)}")
 
@@ -1013,14 +907,12 @@ def main():
     report = run_audit()
     print(report)
 
-    # Save to disk
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     report_path = OUTPUT_DIR / f"audit_report_{timestamp}.txt"
     with open(report_path, "w", encoding="utf-8") as f:
         f.write(report)
 
-    # Also save as the latest
     latest_path = OUTPUT_DIR / "audit_report.txt"
     with open(latest_path, "w", encoding="utf-8") as f:
         f.write(report)

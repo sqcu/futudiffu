@@ -29,7 +29,6 @@ import math
 import sys
 from pathlib import Path
 
-# Ensure repo root is on path
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(REPO_ROOT))
@@ -43,9 +42,6 @@ from src_ii.dataset_catalog import (
 )
 
 
-# ---------------------------------------------------------------------------
-# Formatting helpers
-# ---------------------------------------------------------------------------
 
 _DOUBLE_LINE = "\u2550"  # box drawing double horizontal
 _SINGLE_LINE = "\u2500"  # box drawing light horizontal
@@ -104,9 +100,6 @@ def _format_size(mb: float) -> str:
     return f"{mb:.1f} MB"
 
 
-# ---------------------------------------------------------------------------
-# Commands
-# ---------------------------------------------------------------------------
 
 def cmd_list(catalog: DatasetCatalog) -> None:
     """List all registered datasets."""
@@ -125,23 +118,19 @@ def cmd_list(catalog: DatasetCatalog) -> None:
         unique_counts = summary.get("unique_counts", {})
         splits = entry.get("splits", {})
 
-        # Compute quick metrics
         n_prompts = unique_counts.get("prompt_idx", "?")
         n_widths = unique_counts.get("width", 0)
         n_heights = unique_counts.get("height", 0)
         n_resolutions = max(n_widths, n_heights)
         n_backends = unique_counts.get("attention_backend", "?")
 
-        # Verify integrity
         ok, msg = catalog.verify(did)
 
-        # Format splits
         split_str = "none"
         if splits:
             split_parts = [f"{name} ({len(ids)})" for name, ids in splits.items()]
             split_str = ", ".join(split_parts)
 
-        # Format tags
         tags = entry.get("tags", [])
         tag_str = ", ".join(tags) if tags else "none"
 
@@ -169,7 +158,6 @@ def cmd_inspect(catalog: DatasetCatalog, dataset_id: str) -> None:
     columns = summary.get("columns", [])
     splits = entry.get("splits", {})
 
-    # Verify
     ok, msg = catalog.verify(dataset_id)
 
     print(_header(f"DATASET: {dataset_id}"))
@@ -182,11 +170,9 @@ def cmd_inspect(catalog: DatasetCatalog, dataset_id: str) -> None:
           f"Blobs: {entry['blob_count']}  |  "
           f"Size: {_format_size(entry['total_size_mb'])}")
 
-    # --- Variation analysis table ---
     print(_subheader("Index Columns (variation analysis)"))
     print()
 
-    # Determine column widths
     col_w = max(len(c) for c in columns) + 1 if columns else 20
     col_w = max(col_w, 20)
 
@@ -205,7 +191,6 @@ def cmd_inspect(catalog: DatasetCatalog, dataset_id: str) -> None:
 
         n_unique = unique_counts.get(col_name, 0)
 
-        # Determine range/values string
         if col_name in value_distributions and n_unique <= _LOW_CARDINALITY_THRESHOLD:
             dist = value_distributions[col_name]
             if n_unique == 1:
@@ -219,36 +204,27 @@ def cmd_inspect(catalog: DatasetCatalog, dataset_id: str) -> None:
         else:
             rv_str = ""
 
-        # Track max-variation columns
         if n_unique > 0 and n_unique == n_traj:
             max_variation_cols.append((col_name, n_unique, n_traj))
 
         print(f"{col_name:<{col_w}} {n_unique:>7}  {rv_str}")
 
-    # --- Constant columns ---
     if constant_cols:
         print(_subheader("Columns with NO variation (constant)"))
         for col_name, val in constant_cols:
             print(f"{col_name} = {val} (all trajectories)")
 
-    # --- Max variation columns ---
     if max_variation_cols:
         print(_subheader("Columns with MAXIMUM variation (all unique)"))
         parts = [f"{c} ({n}/{t})" for c, n, t in max_variation_cols]
         print(", ".join(parts))
 
-    # --- Resolution distribution ---
     width_dist = value_distributions.get("width", {})
     height_dist = value_distributions.get("height", {})
 
     if width_dist or height_dist:
         print(_subheader("Resolution Distribution"))
 
-        # Build (width, height) pairs from the parquet if possible
-        # We can reconstruct from the distributions of width and height
-        # For a more accurate view, we look at the combined width+height data
-        # But since we only have marginal distributions, show them separately
-        # unless we can read the actual parquet
         try:
             import pyarrow.parquet as pq
             dataset_dir = Path(entry["path"])
@@ -262,14 +238,11 @@ def cmd_inspect(catalog: DatasetCatalog, dataset_id: str) -> None:
                     key = f"{w}x{h}"
                     res_counter[key] = res_counter.get(key, 0) + 1
 
-                # Group by approximate megapixel tier
                 tier_groups: dict[str, list[tuple[str, int]]] = {}
                 for res_str, count in sorted(res_counter.items()):
                     w, h = res_str.split("x")
                     pixels = int(w) * int(h)
-                    # Assign to nearest square-root tier
                     side = int(math.sqrt(pixels))
-                    # Round to nearest 128
                     tier_side = max(128, round(side / 128) * 128)
                     tier_label = f"{tier_side}sq"
                     tier_groups.setdefault(tier_label, []).append((res_str, count))
@@ -284,13 +257,11 @@ def cmd_inspect(catalog: DatasetCatalog, dataset_id: str) -> None:
                         res_list += ", ..."
                     print(f"{tier_label:>8s}: {total:>3d} ({pct:>5.1f}%)  | {res_list}")
         except Exception:
-            # Fallback: show width and height distributions separately
             if width_dist:
                 print(f"  Width distribution: {_format_distribution(width_dist)}")
             if height_dist:
                 print(f"  Height distribution: {_format_distribution(height_dist)}")
 
-    # --- Splits ---
     if splits:
         print(_subheader("Splits"))
         for split_name, traj_ids in splits.items():
@@ -398,13 +369,9 @@ def cmd_unregister(catalog: DatasetCatalog, dataset_id: str) -> None:
         sys.exit(1)
 
 
-# Constant used in inspect for NO VARIATION flagging
 _LOW_CARDINALITY_THRESHOLD = 50
 
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
 
 def main() -> int:
     parser = argparse.ArgumentParser(
@@ -420,24 +387,19 @@ def main() -> int:
 
     subparsers = parser.add_subparsers(dest="command", help="Command to run")
 
-    # list
     subparsers.add_parser("list", help="List all registered datasets")
 
-    # inspect
     p_inspect = subparsers.add_parser("inspect", help="Inspect a dataset")
     p_inspect.add_argument("dataset_id", help="Dataset ID to inspect")
 
-    # register
     p_register = subparsers.add_parser("register", help="Register a V2 dataset")
     p_register.add_argument("path", help="Path to the dataset directory")
     p_register.add_argument("--name", type=str, default=None, help="Human-readable name")
     p_register.add_argument("--tags", type=str, default=None,
                             help="Comma-separated tags")
 
-    # verify
     subparsers.add_parser("verify", help="Verify integrity of all datasets")
 
-    # split
     p_split = subparsers.add_parser("split", help="Define a named split")
     p_split.add_argument("dataset_id", help="Dataset ID")
     p_split.add_argument("split_name", help="Split name (e.g., train, val)")
@@ -446,7 +408,6 @@ def main() -> int:
     p_split.add_argument("--ids", type=str, dest="traj_ids",
                          help="Comma-separated trajectory IDs")
 
-    # unregister
     p_unreg = subparsers.add_parser("unregister",
                                      help="Remove a dataset from catalog")
     p_unreg.add_argument("dataset_id", help="Dataset ID to remove")

@@ -78,6 +78,11 @@ def _scatter(queries: list[dict]) -> list[dict]:
         base_res = q["base_resolution"]  # (W, H)
         sigma = q["sigma"]
         adapter_scales = q.get("adapter_scales")
+        # Normalize to 1D (n_adapters,) for per-entry storage.
+        # Queries pass (1, n_adapters) or (n_adapters,); _execute_plan
+        # stacks entries to (n_entries_in_bin, n_adapters) for packed forward.
+        if adapter_scales is not None and adapter_scales.dim() == 2:
+            adapter_scales = adapter_scales.squeeze(0)
 
         # Precompute the base resolution's shift alpha so forks can derive
         # their own resolution-dependent sigma from the client's base sigma.
@@ -133,11 +138,11 @@ def _structure_hash(entries: list[dict]) -> str:
 
 
 def _build_plan(entries, model, device, max_total_len):
-    """Bin-pack entries into REFERENCE_TOTAL_LEN-sized bins and prepare state.
+    """Bin-pack entries into max_total_len-sized bins and prepare state.
 
-    Uses FFD bin packing from inference_packing. Each bin is padded to the
-    same REFERENCE_TOTAL_LEN by prepare_packed_forward, so every forward call
-    hits the same compiled graph. Handles arbitrary workload sizes.
+    Uses FFD bin packing from inference_packing. Each bin is padded to
+    max_total_len by prepare_packed_forward, so every forward call at the
+    same max_total_len hits the same compiled graph.
     """
     # Compute seq_len per entry (latent dims, not pixel dims)
     entry_seq_lens = [
@@ -148,13 +153,16 @@ def _build_plan(entries, model, device, max_total_len):
     # PACKSOLVE: bin-pack into REFERENCE_TOTAL_LEN-sized bins
     bins = pack_for_inference(entry_seq_lens, max_total_len=max_total_len)
 
-    # Prepare CONSTANT state for each bin (all padded to REFERENCE_TOTAL_LEN)
+    # Prepare CONSTANT state for each bin (all padded to max_total_len)
     per_bin = []
     for bin_indices in bins:
         context_list = [entries[i]["cond"] for i in bin_indices]
         img_sizes = [(entries[i]["x"].shape[2], entries[i]["x"].shape[3]) for i in bin_indices]
         cap_lens = [entries[i]["cap_len"] for i in bin_indices]
-        prepared = prepare_packed_forward(model, context_list, img_sizes, cap_lens, device)
+        prepared = prepare_packed_forward(
+            model, context_list, img_sizes, cap_lens, device,
+            target_len=max_total_len,
+        )
         per_bin.append({"indices": bin_indices, "prepared": prepared})
 
     return {"bins": per_bin}

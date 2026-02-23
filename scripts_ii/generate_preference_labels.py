@@ -34,7 +34,6 @@ from PIL import Image
 from src_ii.reward_functions import pinkify_score, thisnotthat_score_gpu, _pil_to_tensor, pairwise_preference
 from src_ii.vae_utils import load_vae, decode_latent_to_pil
 
-# --- Configuration ---
 N_TRAJECTORIES = 10
 VAE_PATH = r"F:\dox\ai\comfyui\ComfyUI\models\vae\zimage.safetensors"
 THIS_PATH = REPO_ROOT / "i2i_off_policies" / "pizza-ratto.png"
@@ -46,27 +45,23 @@ def main():
     t0_total = time.perf_counter()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Load reference images for THISNOTTHAT
     print("Loading reference images...")
     this_ref_pil = Image.open(str(THIS_PATH))
     that_ref_pil = Image.open(str(THAT_PATH))
     print(f"  THIS: {THIS_PATH.name} ({this_ref_pil.size})")
     print(f"  THAT: {THAT_PATH.name} ({that_ref_pil.size})")
 
-    # Load manifest
     manifest_path = REPO_ROOT / "btrm_dataset" / "manifest.json"
     with open(manifest_path) as f:
         manifest = json.load(f)
     records = manifest["records"]
     print(f"  Manifest has {len(records)} trajectories, using first {N_TRAJECTORIES}")
 
-    # --- Phase 1: Load VAE and decode all latents ---
     print("\n=== Phase 1: VAE Decode ===")
     device = torch.device("cuda")
     vae = load_vae(VAE_PATH, device=device, dtype=torch.bfloat16)
     print(f"  VAE loaded on CUDA")
 
-    # Convert references to GPU tensors for thisnotthat_score_gpu
     this_ref_t = _pil_to_tensor(this_ref_pil, device)  # (1, 3, H, W)
     that_ref_t = _pil_to_tensor(that_ref_pil, device)
 
@@ -108,7 +103,6 @@ def main():
     torch.cuda.empty_cache()
     print(f"\n  VAE freed. Total images scored: {len(all_image_scores)}")
 
-    # --- Phase 2: Generate pairwise preferences ---
     print("\n=== Phase 2: Pairwise Preferences ===")
 
     traj_scores: dict[int, list[dict]] = {}
@@ -159,7 +153,6 @@ def main():
     print(f"  Pinkify: A={stats['pinkify_wins_a']}, B={stats['pinkify_wins_b']}, ties={stats['pinkify_ties']}")
     print(f"  TNT: A={stats['thisnotthat_wins_a']}, B={stats['thisnotthat_wins_b']}, ties={stats['thisnotthat_ties']}")
 
-    # --- Phase 3: Write outputs ---
     print("\n=== Phase 3: Writing outputs ===")
 
     with open(OUTPUT_DIR / "per_image_scores.json", "w") as f:

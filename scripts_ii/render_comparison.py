@@ -70,7 +70,6 @@ def main():
         repro_img.save(repro_out)
         diff_img.save(diff_out)
 
-        # Step strip using extracted render_strip
         strip = render_strip(
             [("ref", ref_img), ("repro", repro_img), ("diff", diff_img)],
             max_width=ref_img.width * 3,

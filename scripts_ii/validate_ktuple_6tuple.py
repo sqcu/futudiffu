@@ -36,9 +36,6 @@ if str(REPO_ROOT) not in sys.path:
 import numpy as np
 import torch
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
 
 FP8_PATH = r"F:\dox\ai\comfyui\ComfyUI\models\diffusion_models\z_image_fp8_blockwise.safetensors"
 TE_PATH  = r"F:\dox\ai\comfyui\ComfyUI\models\text_encoders\qwen_3_4b.safetensors"
@@ -53,7 +50,6 @@ DTYPE  = torch.bfloat16
 
 OUTPUT_DIR = REPO_ROOT / "validation_renders" / "ktuple_6tuple"
 
-# Prompts
 P_BASE   = 'qwen-3-4b, draw me "pink shrimp with crisp typography in a banana field".'
 P_SHRIMP = "pink shrimp, detailed color, clear shape"
 P_TYPO   = "clean typography, sharp letterforms, no blur"
@@ -62,8 +58,6 @@ P_BANANA = "banana, yellow, tropical poem"
 P_NEG = ""   # empty negative for K=2 CFG baseline
 UNIQUE_PROMPTS = [P_BASE, P_SHRIMP, P_TYPO, P_BANANA, P_NEG]
 
-# 6-tuple spec definition: (prompt_key, (W, H), scale)
-# Entry 0 is the base trajectory (scale=1.0). Entries 1-5 are guidance branches.
 SPEC_DEF = [
     (P_BASE,   (1024, 1024), +1.0),   # 0 base trajectory
     (P_SHRIMP, (1024, 1024), +3.0),   # 1 attractive: shrimp emphasis
@@ -74,9 +68,6 @@ SPEC_DEF = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def _log(msg: str) -> None:
     print(msg, flush=True)
@@ -93,9 +84,6 @@ def _pixel_stats(pil_img) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# Phase 1: Text encoder
-# ---------------------------------------------------------------------------
 
 def phase1_encode(device, dtype) -> dict[str, torch.Tensor]:
     """Load TE, encode all 4 unique prompts, free TE. Returns CPU tensors."""
@@ -124,15 +112,7 @@ def phase1_encode(device, dtype) -> dict[str, torch.Tensor]:
     return conds
 
 
-# ---------------------------------------------------------------------------
-# Serial executor
-# ---------------------------------------------------------------------------
 
-# TODO: Replace with BatchExecutor.execute() when available.
-# BatchExecutor will bin entries into multi-entry launches, dramatically reducing
-# launches for entries with small latents (256x256 and 512x512 entries can share
-# a launch with each other and potentially with a 1024x1024 entry).
-# For now: one entry per launch. Correct but slow (K=6 = 6 launches/step).
 
 def make_serial_executor(model, spec, device, dtype):
     """Build a serial executor for a fixed spec (one query).
@@ -151,11 +131,8 @@ def make_serial_executor(model, spec, device, dtype):
         build_per_image_sigmas, scatter, denoise_all,
     )
 
-    # Build per-entry sigma schedules once (constant across steps).
     entry_sigmas = build_per_image_sigmas(spec, N_STEPS, device, dtype)
 
-    # Build packing plans once per (conditioning, resolution).
-    # Cond tensors in spec are already on device.
     plans = []
     for cond, (rw, rh), _ in spec:
         lh, lw = rh // 8, rw // 8
@@ -184,8 +161,6 @@ def make_serial_executor(model, spec, device, dtype):
             fields_list.append(fields[0])
             all_scores.append(scores)
 
-        # denoised_i = entry_x - field_i * sigma_i
-        # (field = -img per model sign convention; denoise_all applies x - field*sigma)
         sigmas = [entry_sigmas[i][step_i] for i in range(len(spec))]
         denoised_list = denoise_all(scattered, fields_list, sigmas)
         scores_stacked = torch.cat(all_scores, dim=0)  # (K, n_heads)
@@ -194,9 +169,6 @@ def make_serial_executor(model, spec, device, dtype):
     return executor
 
 
-# ---------------------------------------------------------------------------
-# Sampling loop
-# ---------------------------------------------------------------------------
 
 def run_rollout(model, spec, gather_fn, device, dtype, label):
     """Euler sampling loop. Returns (final_latent_cpu, scores_log, packing_diag)."""
@@ -205,13 +177,11 @@ def run_rollout(model, spec, gather_fn, device, dtype, label):
 
     executor = make_serial_executor(model, spec, device, dtype)
 
-    # Query sigma schedule = entry 0 (base resolution)
     base_res = spec[0][1]
     alpha = resolution_shift(base_res[0], base_res[1])
     query_sigmas = build_sigma_schedule(N_STEPS, sampling_shift=alpha,
                                         device=device, dtype=dtype)
 
-    # Master noise field + aperture init for correlated multi-res initialization
     max_lh = max(rh // 8 for _, (_, rh), _ in spec)
     max_lw = max(rw // 8 for _, (rw, _), _ in spec)
     master = noise_field(max_lh, max_lw, SEED, device, dtype)
@@ -264,9 +234,6 @@ def run_rollout(model, spec, gather_fn, device, dtype, label):
     return x_base.cpu(), scores_log, packing_diag
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 def main() -> int:
     _log(f"K=6 shrimp-banana 6-tuple validation — "
@@ -274,14 +241,8 @@ def main() -> int:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     (OUTPUT_DIR / "latents").mkdir(exist_ok=True)
 
-    # ======================================================================
-    # Phase 1: Text encoder
-    # ======================================================================
     conds_cpu = phase1_encode(DEVICE, DTYPE)
 
-    # ======================================================================
-    # Phase 2: Load model
-    # ======================================================================
     _log("\n" + "=" * 60)
     _log("  PHASE 2: LOAD MODEL")
     _log("=" * 60)
@@ -290,7 +251,7 @@ def main() -> int:
     from futudiffu.attention import set_attention_backend
 
     t0 = time.perf_counter()
-    compiled_model, raw_model = load_zimage_rlaif(
+    model = load_zimage_rlaif(
         FP8_PATH, device=DEVICE, dtype=DTYPE,
         compile_model=True, fuse=True,
     )
@@ -298,11 +259,8 @@ def main() -> int:
     _log(f"  Loaded + compiled in {time.perf_counter() - t0:.1f}s")
     _log(f"  VRAM: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
-    model = compiled_model
+    model = model
 
-    # ======================================================================
-    # Phase 3: Rollouts
-    # ======================================================================
     _log("\n" + "=" * 60)
     _log("  PHASE 3: ROLLOUTS")
     _log("=" * 60)
@@ -312,14 +270,12 @@ def main() -> int:
         gather, gather_residual_gain, cfg1, cfg2,
     )
 
-    # Move conditionings to GPU
     c_base   = conds_cpu[P_BASE].to(DEVICE)
     c_shrimp = conds_cpu[P_SHRIMP].to(DEVICE)
     c_typo   = conds_cpu[P_TYPO].to(DEVICE)
     c_banana = conds_cpu[P_BANANA].to(DEVICE)
     c_neg    = conds_cpu[P_NEG].to(DEVICE)
 
-    # K=6 spec
     spec_k6 = [
         (c, res, scale)
         for (p, res, scale), c in zip(SPEC_DEF, [
@@ -331,23 +287,17 @@ def main() -> int:
         model, spec_k6, gather_k6, DEVICE, DTYPE, "K=6",
     )
 
-    # K=2 standard CFG baseline: pos=base, neg=empty, scale=7.0
-    # gather_residual_gain(gain=6.0) is mathematically equivalent to cfg=7.0 at K=2
     spec_k2 = cfg2(c_base, c_neg, (1024, 1024), 7.0)
     gather_k2 = functools.partial(gather_residual_gain, gain=6.0)
     lat_k2, scores_k2, diag_k2 = run_rollout(
         model, spec_k2, gather_k2, DEVICE, DTYPE, "K=2",
     )
 
-    # K=1 unconditional baseline (no guidance)
     spec_k1 = cfg1(c_base, (1024, 1024))
     lat_k1, scores_k1, diag_k1 = run_rollout(
         model, spec_k1, gather, DEVICE, DTYPE, "K=1",
     )
 
-    # ======================================================================
-    # Phase 4: Persist latents + diagnostics
-    # ======================================================================
     _log("\n" + "=" * 60)
     _log("  PHASE 4: PERSIST")
     _log("=" * 60)
@@ -366,16 +316,11 @@ def main() -> int:
         json.dump({"k6": diag_k6, "k2": diag_k2, "k1": diag_k1}, f, indent=2)
     _log("  packing_diagnostics.json written.")
 
-    # ======================================================================
-    # Phase 5: VAE decode
-    # ======================================================================
     _log("\n" + "=" * 60)
     _log("  PHASE 5: VAE DECODE")
     _log("=" * 60)
 
-    # Free backbone first — 8 GB backbone + 160 MB VAE both fit in 24 GB,
-    # but freeing gives torch a clean slate and avoids fragmentation.
-    del model, compiled_model, raw_model
+    del model, model, model
     gc.collect()
     torch.cuda.empty_cache()
     _log(f"  VRAM after backbone free: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
@@ -407,9 +352,6 @@ def main() -> int:
     gc.collect()
     torch.cuda.empty_cache()
 
-    # ======================================================================
-    # Manifest
-    # ======================================================================
     manifest = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "seed": SEED,
@@ -440,9 +382,6 @@ def main() -> int:
         json.dump(manifest, f, indent=2)
     _log("  manifest.json written.")
 
-    # ======================================================================
-    # Summary
-    # ======================================================================
     _log("\n" + "=" * 60)
     _log("  SUMMARY")
     _log("=" * 60)

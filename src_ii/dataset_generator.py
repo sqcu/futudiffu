@@ -48,27 +48,6 @@ from .sampling_identity import (
 )
 
 
-# ---------------------------------------------------------------------------
-# Graceful interruption
-# ---------------------------------------------------------------------------
-
-_interrupted = False
-
-
-def _install_signal_handler():
-    """Install a SIGINT handler that sets the interrupted flag on first press."""
-    global _interrupted
-
-    def _handler(signum, frame):
-        global _interrupted
-        if _interrupted:
-            print("\nForce quit.")
-            sys.exit(1)
-        _interrupted = True
-        print("\nInterrupt received. Finishing current trajectory then saving...")
-
-    signal.signal(signal.SIGINT, _handler)
-
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -155,6 +134,7 @@ class DatasetGenerator:
         """
         self.config = config
         self.client = client
+        self._interrupted = False
 
         # Compute identity hashes once (they don't change during a run)
         adapter_set_hash = compute_adapter_set_hash(config.active_adapters)
@@ -164,14 +144,24 @@ class DatasetGenerator:
         self._adapter_set_hash = adapter_set_hash
         self._active_adapters_json = serialize_active_adapters(config.active_adapters)
 
+    def _install_signal_handler(self):
+        """Install a SIGINT handler that sets the interrupted flag on first press."""
+        def _handler(signum, frame):
+            if self._interrupted:
+                print("\nForce quit.")
+                sys.exit(1)
+            self._interrupted = True
+            print("\nInterrupt received. Finishing current trajectory then saving...")
+
+        signal.signal(signal.SIGINT, _handler)
+
     def generate_all(self) -> dict[str, Any]:
         """Run the full generation pipeline.
 
         Returns:
             Summary dict with timing, counts, and efficiency stats.
         """
-        global _interrupted
-        _install_signal_handler()
+        self._install_signal_handler()
 
         cfg = self.config
         output_dir = Path(cfg.output_dir)
@@ -279,7 +269,7 @@ class DatasetGenerator:
 
         with DatasetWriter(output_dir) as writer:
             for bin_idx, bin_items in enumerate(bins):
-                if _interrupted:
+                if self._interrupted:
                     break
 
                 if len(bin_items) == 1:
@@ -300,7 +290,7 @@ class DatasetGenerator:
                         by_steps.setdefault(item["n_steps"], []).append(item)
 
                     for n_steps_group, group_items in by_steps.items():
-                        if _interrupted:
+                        if self._interrupted:
                             break
                         generated_count += self._generate_packed(
                             group_items, te_cache, neg_cond, writer, timing,
@@ -325,7 +315,7 @@ class DatasetGenerator:
         # ---------------------------------------------------------------
         # Phase 6: Render sample (skipped if no renders queued)
         # ---------------------------------------------------------------
-        if render_queue and not _interrupted:
+        if render_queue and not self._interrupted:
             render_dir = output_dir / "renders"
             render_dir.mkdir(parents=True, exist_ok=True)
             print(f"\nRendering {len(render_queue)} trajectories...")
@@ -362,7 +352,7 @@ class DatasetGenerator:
         Returns:
             1 if generated, 0 if interrupted.
         """
-        if _interrupted:
+        if self._interrupted:
             return 0
 
         cfg = self.config
@@ -430,7 +420,7 @@ class DatasetGenerator:
         Returns:
             Number of trajectories generated.
         """
-        if _interrupted or not items:
+        if self._interrupted or not items:
             return 0
 
         n_steps = items[0]["n_steps"]

@@ -23,9 +23,6 @@ import torch
 from torch import Tensor
 
 
-_PATCHED = False
-
-
 def patch_sage_for_compile() -> None:
     """Patch sage attention backward functions as custom ops for torch.compile.
 
@@ -33,9 +30,9 @@ def patch_sage_for_compile() -> None:
     with register_fake, then monkey-patches them into the sage_attention module.
 
     Call once after model load, before any compiled forward pass.
+    Idempotent: checks the custom op registry instead of a module-level flag.
     """
-    global _PATCHED
-    if _PATCHED:
+    if hasattr(torch.ops, "futudiffu") and hasattr(torch.ops.futudiffu, "sage_bwd_masked"):
         return
 
     import futudiffu.sage_attention as _sa
@@ -73,5 +70,3 @@ def patch_sage_for_compile() -> None:
         return torch.empty_like(q), torch.empty_like(k), torch.empty_like(v)
 
     _sa.sage_attn_backward = _sage_bwd_op
-
-    _PATCHED = True

@@ -29,7 +29,6 @@ import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
-# -- path setup -------------------------------------------------------
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
@@ -46,13 +45,9 @@ from src_ii.rendering import (
     compute_spatial_autocorrelation,
 )
 
-# =====================================================================
-# Configuration
-# =====================================================================
 
 PROMPT = "An astronaut riding a horse across a desert under a starfield, photorealistic."
 
-# 5 images, each at a different resolution tier
 IMAGE_SPECS = [
     {"width": 1280, "height": 832,  "seed": 42, "label": "full_landscape"},
     {"width": 1024, "height": 1024, "seed": 43, "label": "full_square"},
@@ -67,13 +62,6 @@ SAMPLING_SHIFT = 1.0    # same shift for all => comparable latents
 MULTIPLIER = 1.0
 ATTENTION_BACKEND = "sdpa"
 
-# Thresholds for latent comparison (max_abs_diff).
-# FP8 blockwise quantization + FlexAttention vs SDPA numerical differences
-# produce ~0.0625 max_abs per step, growing with accumulated steps.
-# Serial uses SDPA; packed uses FlexAttention (even for N=1). This is
-# expected behavior, not a bug. Thresholds are set accordingly:
-#   WARN: > 0.1  -- single-step divergence (0.0625) passes; multi-step accumulation warns
-#   ERROR: > 2.5 -- algorithmic divergence (mismatched RoPE, wrong sigma, etc.)
 WARN_THRESHOLD = 0.1     # FP8+FlexAttention per-step noise floor
 ERROR_THRESHOLD = 2.5    # algorithmic divergence beyond FP8+FlexAttention
 
@@ -84,9 +72,6 @@ RPC_TIMEOUT_MS = 300_000         # 5 min per RPC call
 OUTPUT_ROOT = REPO_ROOT / "packed_vs_serial_validation"
 
 
-# =====================================================================
-# Tee logger: prints to stdout AND writes to a logfile simultaneously
-# =====================================================================
 
 class TeeLogger:
     """Dual-output logger: stdout + logfile."""
@@ -109,9 +94,6 @@ class TeeLogger:
         self._file.close()
 
 
-# =====================================================================
-# Helpers
-# =====================================================================
 
 def check_server_zmq(endpoint: str, timeout_ms: int) -> bool:
     """Attempt a ZMQ connection + status RPC with a short timeout.
@@ -127,7 +109,6 @@ def check_server_zmq(endpoint: str, timeout_ms: int) -> bool:
     sock.setsockopt(zmq.LINGER, 0)
     try:
         sock.connect(endpoint)
-        # Send a minimal status request using the protocol format
         from futudiffu.protocol import pack_request, unpack_response
         frames = pack_request("status", {}, {})
         sock.send_multipart(frames)
@@ -163,13 +144,11 @@ def compute_comparison_stats(
     max_abs = diff.abs().max().item()
     mean_abs = diff.abs().mean().item()
 
-    # cosine similarity
     s_norm = s.norm().item()
     p_norm = p.norm().item()
     dot = (s * p).sum().item()
     cos_sim = dot / (s_norm * p_norm + 1e-12)
 
-    # relative L2
     relative_l2 = l2 / (s_norm + 1e-12)
 
     return {
@@ -192,12 +171,8 @@ def classify_verdict(max_abs: float) -> str:
     return "PASS"
 
 
-# =====================================================================
-# Main validation pipeline
-# =====================================================================
 
 def main():
-    # Create output dir early so we can write logs and server_unavailable.txt
     output_dir = make_output_dir()
     log = TeeLogger(output_dir / "validation.log")
 
@@ -208,9 +183,6 @@ def main():
     log.print(f"Output directory: {output_dir}")
     log.print()
 
-    # =================================================================
-    # Phase 0: Server connectivity check (ZMQ with 2s timeout)
-    # =================================================================
     log.print("--- Phase 0: Server connectivity check ---")
     log.print(f"  Endpoint: {SERVER_ENDPOINT}")
     log.print(f"  Timeout: {CONNECTIVITY_TIMEOUT_MS}ms")
@@ -223,7 +195,6 @@ def main():
         log.print(f"Launch server with: .venv/Scripts/python.exe scripts/launch_server.py")
         log.print()
 
-        # Write marker file
         note_path = output_dir / "server_unavailable.txt"
         with open(note_path, "w") as f:
             f.write(f"Server at {SERVER_ENDPOINT} was unreachable at "
@@ -237,9 +208,6 @@ def main():
 
     log.print("  Server is reachable. Proceeding with validation.")
 
-    # =================================================================
-    # Setup client with longer timeout for actual RPCs
-    # =================================================================
     from futudiffu.client import InferenceClient
     client = InferenceClient(SERVER_ENDPOINT, timeout_ms=RPC_TIMEOUT_MS)
 
@@ -250,13 +218,9 @@ def main():
         log.print(f"  ERROR getting server status: {e}")
         log.print(f"  Proceeding anyway (connectivity check passed).")
 
-    # Track timing for everything
     timing = {}
     errors = []
 
-    # =================================================================
-    # Phase 1: Encode prompt (once, shared by all queries)
-    # =================================================================
     log.print()
     log.print("--- Phase 1: Encoding prompt ---")
     log.print(f"  Prompt: {PROMPT}")
@@ -269,15 +233,11 @@ def main():
     log.print(f"  neg_cond: {neg_cond.shape} {neg_cond.dtype}")
     log.print(f"  Encoding took {encode_time:.2f}s")
 
-    # Save conditioning for reproducibility
     torch.save(pos_cond, output_dir / "pos_cond.pt")
     torch.save(neg_cond, output_dir / "neg_cond.pt")
 
     all_save_steps = list(range(N_STEPS))
 
-    # =================================================================
-    # Phase 2: Serial (unpacked) trajectories
-    # =================================================================
     log.print()
     log.print("--- Phase 2: Serial trajectories ---")
     serial_results: list[dict[str, torch.Tensor] | None] = []
@@ -306,7 +266,6 @@ def main():
             serial_timings.append(elapsed)
             serial_results.append(result)
 
-            # Persist all step latents
             img_dir = output_dir / "serial" / f"query_{idx}_{w}x{h}"
             img_dir.mkdir(parents=True, exist_ok=True)
             for key, tensor in result.items():
@@ -328,9 +287,6 @@ def main():
     timing["serial_total"] = sum(serial_timings)
     timing["serial_per_query"] = serial_timings
 
-    # =================================================================
-    # Phase 3: Packed trajectories (N=1 per resolution)
-    # =================================================================
     log.print()
     log.print("--- Phase 3: Packed trajectories (N=1 per resolution) ---")
     packed_results: list[dict[str, torch.Tensor] | None] = []
@@ -360,7 +316,6 @@ def main():
             result = result_list[0]  # N=1, take the only result
             packed_results.append(result)
 
-            # Persist all step latents
             img_dir = output_dir / "packed" / f"query_{idx}_{w}x{h}"
             img_dir.mkdir(parents=True, exist_ok=True)
             for key, tensor in result.items():
@@ -383,9 +338,6 @@ def main():
     timing["packed_total"] = sum(packed_timings)
     timing["packed_per_query"] = packed_timings
 
-    # =================================================================
-    # Phase 4: Latent comparison
-    # =================================================================
     log.print()
     log.print("--- Phase 4: Latent comparison ---")
 
@@ -416,7 +368,6 @@ def main():
             })
             continue
 
-        # Find common tensor keys
         serial_keys = {k for k, v in serial.items() if isinstance(v, torch.Tensor)}
         packed_keys = {k for k, v in packed.items() if isinstance(v, torch.Tensor)}
         common_keys = sorted(serial_keys & packed_keys)
@@ -464,14 +415,10 @@ def main():
         per_image_stats.append(image_report)
         log.print(f"    >> Image verdict: {verdict} (worst max_abs={worst_max_abs:.6f})")
 
-        # Save per-step stats JSON
         stats_path = output_dir / f"latent_stats_{idx}_{w}x{h}.json"
         with open(stats_path, "w") as f:
             json.dump(step_stats, f, indent=2)
 
-    # =================================================================
-    # Phase 5: VAE decode + visual comparison
-    # =================================================================
     log.print()
     log.print("--- Phase 5: VAE decode + render ---")
 
@@ -511,20 +458,16 @@ def main():
             t2 = time.perf_counter()
             log.print(f"{t2-t1:.2f}s")
 
-            # Save rendered PNGs
             serial_path = str(output_dir / f"serial_{idx}_{w}x{h}.png")
             packed_path = str(output_dir / f"packed_{idx}_{w}x{h}.png")
             save_tensor_as_png(serial_img, serial_path)
             save_tensor_as_png(packed_img, packed_path)
 
-            # False-color diff: abs(serial - packed) * 10.0, saved via canonical module
             diff_path = str(output_dir / f"diff_{idx}_{w}x{h}.png")
             save_false_color_diff(serial_img, packed_img, diff_path, scale=10.0)
 
-            # Per-channel pixel diff statistics
             pixel_stats = compute_per_channel_pixel_stats(serial_img, packed_img)
 
-            # Spatial autocorrelation
             abs_diff_np = (serial_img.float() - packed_img.float()).abs()
             abs_diff_np = abs_diff_np.squeeze(0).permute(1, 2, 0).cpu().numpy()
             autocorr = compute_spatial_autocorrelation(abs_diff_np)
@@ -544,7 +487,6 @@ def main():
             }
             diff_stats_all.append(diff_report)
 
-            # Save per-image diff stats JSON
             diff_json_path = output_dir / f"diff_stats_{idx}_{w}x{h}.json"
             with open(diff_json_path, "w") as f:
                 json.dump(diff_report, f, indent=2)
@@ -570,15 +512,11 @@ def main():
                 "verdict": "ERROR", "error": str(e),
             })
 
-    # =================================================================
-    # Phase 6: Summary report
-    # =================================================================
     log.print()
     log.print("=" * 72)
     log.print("REPORT: Packed vs Serial FlexAttention Validation")
     log.print("=" * 72)
 
-    # Overall verdict
     verdicts = [r.get("verdict", "SKIP") for r in per_image_stats]
     if "FAIL" in verdicts:
         overall = "FAIL"
@@ -599,7 +537,6 @@ def main():
     report_lines.append(f"FAIL threshold: max_abs_diff > {ERROR_THRESHOLD}")
     report_lines.append("")
 
-    # -- Latent comparison table --
     report_lines.append("LATENT COMPARISON (final step):")
     report_lines.append(f"{'Img':>4s}  {'Resolution':>12s}  {'Seed':>6s}  "
                         f"{'L2':>10s}  {'max_abs':>10s}  {'cos_sim':>10s}  "
@@ -631,7 +568,6 @@ def main():
     report_lines.append(f"Overall verdict: {overall}")
     report_lines.append("")
 
-    # -- Decoded image diff table --
     report_lines.append("DECODED IMAGE DIFF STATISTICS:")
     report_lines.append(f"{'Img':>4s}  {'Resolution':>12s}  {'mean':>10s}  "
                         f"{'std':>10s}  {'max':>10s}  {'Autocorr verdict'}")
@@ -653,7 +589,6 @@ def main():
         )
     report_lines.append("")
 
-    # -- Timing summary --
     report_lines.append("TIMING SUMMARY:")
     report_lines.append(f"  Prompt encoding: {timing.get('encode_prompt', 0):.2f}s")
     report_lines.append(f"  Serial total:    {timing.get('serial_total', 0):.2f}s")
@@ -665,7 +600,6 @@ def main():
                             f"serial={s_t:.2f}s  packed={p_t:.2f}s")
     report_lines.append("")
 
-    # -- Errors --
     if errors:
         report_lines.append(f"ERRORS ({len(errors)}):")
         for err in errors:
@@ -678,13 +612,11 @@ def main():
     report_text = "\n".join(report_lines)
     log.print(report_text)
 
-    # Save report.txt
     report_path = output_dir / "report.txt"
     with open(report_path, "w") as f:
         f.write(report_text)
     log.print(f"\nReport saved to: {report_path}")
 
-    # Save structured JSON report
     full_report = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "config": {
@@ -713,7 +645,6 @@ def main():
     client.close()
     log.close()
 
-    # Exit code reflects verdict
     if overall == "FAIL":
         sys.exit(2)
     else:

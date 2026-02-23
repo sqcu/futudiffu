@@ -39,7 +39,6 @@ from src_ii.visualization import (
     render_text_token_bar_chart,
 )
 
-# --- Configuration ---
 VAE_PATH = r"F:\dox\ai\comfyui\ComfyUI\models\vae\zimage.safetensors"
 ATTN_DIR = REPO_ROOT / "pinkify_thisnotthat_output" / "attention_maps"
 OUTPUT_DIR = ATTN_DIR / "renders"
@@ -72,18 +71,15 @@ def main():
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     print("Output dir:", OUTPUT_DIR)
 
-    # Check that attention stats exist
     for name in LATENT_NAMES:
         stats_path = ATTN_DIR / ("attention_stats_" + name + ".pt")
         if not stats_path.exists():
             print("ERROR: Missing " + str(stats_path))
             sys.exit(1)
 
-    # --- Load VAE ---
     print("=== Loading VAE ===")
     vae = load_vae(VAE_PATH, device=device, dtype=dtype)
 
-    # --- Decode latents and render attention overlays ---
     print("\n=== Rendering attention maps ===")
 
     decoded_images = {}
@@ -98,16 +94,12 @@ def main():
         latent = torch.load(latent_path, weights_only=True)
         all_stats = torch.load(stats_path, weights_only=True)
 
-        # The attention stats dict has mixed seq_lens: context/noise refiners
-        # (layers 0-3) have seq_len 32-4160, main DiT blocks have the full seq_len.
-        # Use only layers with the dominant seq_len.
         dom_seq_len = get_dominant_seq_len(all_stats)
         stats = filter_stats_by_seq_len(all_stats, dom_seq_len)
         n_layers_used = len(stats)
         n_layers_total = len(all_stats)
         print("  Layers total: " + str(n_layers_total) + " | used (seq_len=" + str(dom_seq_len) + "): " + str(n_layers_used))
 
-        # Renumber to contiguous 0..N-1 for render_attention_map compatibility
         stats_reindexed = {new_i: v for new_i, (_, v) in enumerate(sorted(stats.items()))}
 
         decoded = decode_latent_to_pil(vae, latent, device=device, dtype=dtype)
@@ -125,7 +117,6 @@ def main():
         print("  Spatial: " + str(H_tokens) + "x" + str(W_tokens) + " tokens = " + str(n_img_tokens) + " img tokens")
         print("  img_padded=" + str(n_img_padded) + ", caption tokens=" + str(cap_len))
 
-        # Render attention overlay
         overlay = render_attention_map(
             decoded, stats_reindexed, n_img_tokens, H_tokens, W_tokens, cap_len,
             alpha=0.4, colormap="hot",
@@ -133,7 +124,6 @@ def main():
         overlay.save(str(OUTPUT_DIR / ("overlay_" + name + ".png")))
         print("  Overlay saved: overlay_" + name + ".png")
 
-        # Text token attention bar chart (aggregate over layers, mean over heads)
         first_stats = stats_reindexed[0]
         n_heads = first_stats["n_heads"]
         agg_received = torch.zeros(n_heads, dom_seq_len)
@@ -155,7 +145,6 @@ def main():
 
         summary_images.append((name, overlay))
 
-    # --- Render diff overlays ---
     print("\n=== Rendering attention diff maps ===")
 
     diff_configs = [
@@ -191,7 +180,6 @@ def main():
 
         print("  n_layers=" + str(n_layers) + ", min_seq=" + str(min_seq) + ", cap_len_a=" + str(cap_len_a))
 
-        # Aggregate diff across layers
         agg_diff = torch.zeros(n_heads_diff, min_seq)
         for layer_idx in range(n_layers):
             agg_diff += diff_stats[layer_idx]["received_diff"]
@@ -215,7 +203,6 @@ def main():
         print("  Diff overlay saved: overlay_" + diff_name + ".png")
         diff_overlays.append((title, overlay_diff))
 
-        # Text token diff
         if cap_len_a > 0 and cap_len_a <= min_seq:
             text_diff = agg_diff[:, :cap_len_a].mean(dim=0)
             text_chart = render_text_token_bar_chart(
@@ -225,7 +212,6 @@ def main():
             text_chart.save(str(OUTPUT_DIR / ("text_diff_" + diff_name + ".png")))
             print("  Text diff chart saved")
 
-        # Layer x Head heatmap
         layer_head_img = render_layer_head_heatmap(
             diff_stats, n_layers, n_heads_diff,
             width=800, height=400,
@@ -234,7 +220,6 @@ def main():
         layer_head_img.save(str(OUTPUT_DIR / ("layer_head_" + diff_name + ".png")))
         print("  Layer-head heatmap saved: layer_head_" + diff_name + ".png")
 
-    # --- Summary strips ---
     print("\n=== Creating summary images ===")
     if summary_images:
         strip = render_strip(summary_images, max_width=1600)
@@ -246,7 +231,6 @@ def main():
         diff_strip.save(str(OUTPUT_DIR / "summary_diff_overlays.png"))
         print("  Diff summary saved: summary_diff_overlays.png")
 
-    # --- Composite: decoded side-by-side with overlay ---
     print("\n=== Creating decoded + overlay composites ===")
     for name in LATENT_NAMES:
         base = decoded_images[name]
@@ -254,7 +238,6 @@ def main():
         if overlay_path.exists():
             from PIL import Image
             overlay = Image.open(str(overlay_path))
-            # Resize to same height
             h = base.height
             if overlay.height != h:
                 ratio = h / overlay.height
@@ -272,7 +255,6 @@ def main():
     print("\n=== Rendering complete in " + str(round(elapsed, 1)) + "s ===")
     print("Output: " + str(OUTPUT_DIR))
 
-    # List produced files
     produced = sorted(OUTPUT_DIR.glob("*.png"))
     print("\nProduced " + str(len(produced)) + " PNG files:")
     for p in produced:

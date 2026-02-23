@@ -34,7 +34,6 @@ OUTPUT_DIR = REPO_ROOT / "funfetti_100step_output"
 DATASET_DIR = REPO_ROOT / "multi_res_trajectories"
 JSONL_PATH = OUTPUT_DIR / "training_metrics.jsonl"
 
-# Must match the original training script's configuration exactly
 N_STEPS = 100
 PAIRS_PER_PACK = 2
 GRAD_ACCUM = 2
@@ -59,9 +58,6 @@ def main():
     print("  REGENERATE FUNFETTI CHARTS (06-10)")
     print("=" * 70)
 
-    # ------------------------------------------------------------------
-    # Step 1: Load the existing JSONL data
-    # ------------------------------------------------------------------
     print(f"\n  Loading JSONL from {JSONL_PATH}")
     data = load_jsonl(JSONL_PATH)
     print(f"  Loaded {len(data)} step entries")
@@ -69,16 +65,12 @@ def main():
     if len(data) != N_STEPS:
         print(f"  WARNING: Expected {N_STEPS} entries, got {len(data)}")
 
-    # Check if funfetti data already exists
     has_funfetti = any("funfetti" in d for d in data)
     if has_funfetti:
         print("  Funfetti data already present in JSONL -- will regenerate charts directly")
     else:
         print("  No funfetti data in JSONL -- reconstructing from pair sampler replay")
 
-    # ------------------------------------------------------------------
-    # Step 2: Reconstruct funfetti metadata via sampler replay
-    # ------------------------------------------------------------------
     if not has_funfetti:
         print(f"\n  Loading dataset from {DATASET_DIR}")
 
@@ -95,15 +87,12 @@ def main():
         positions = build_positions_from_v2(reader, traj_ids=traj_ids)
         print(f"  Positions: {len(positions)} across {len(traj_ids)} trajectories")
 
-        # Build a position lookup: (traj_id, step_key) -> (width, height)
         pos_lookup = {}
         for pos in positions:
             pos_lookup[(pos.traj_id, pos.step_key)] = (pos.width, pos.height)
 
-        # Compute FLOPS weights (same as training script)
         flops_weights = compute_flops_sampling_weights_from_positions(positions)
 
-        # Create sampler with same seed as training
         sampler = BTRMPairSampler(
             positions=positions,
             allow_inter_trajectory=True,
@@ -113,7 +102,6 @@ def main():
         )
         print(f"  Pair space: {sampler.pair_space_size:,} possible pairs")
 
-        # Replay the exact sampling pattern from training
         print(f"\n  Replaying {N_STEPS} steps x {GRAD_ACCUM} microbatches "
               f"x {PAIRS_PER_PACK} pairs = {N_STEPS * GRAD_ACCUM * PAIRS_PER_PACK} total pairs")
 
@@ -126,7 +114,6 @@ def main():
                 for k in range(PAIRS_PER_PACK):
                     pair = sampler.sample_pair()
 
-                    # Get resolutions from positions
                     key_a = (pair["traj_a"], pair["step_a"])
                     key_b = (pair["traj_b"], pair["step_b"])
 
@@ -136,7 +123,6 @@ def main():
                     image_resolutions.append((w_a, h_a))
                     image_resolutions.append((w_b, h_b))
 
-                # Run bin packer (same as training loop)
                 packer = BinPackScheduler()
                 pack_items = []
                 for img_idx, (w, h) in enumerate(image_resolutions):
@@ -150,7 +136,6 @@ def main():
 
                 bins = packer.pack(pack_items)
 
-                # Build per-microbatch metadata (same structure as btrm_training.py)
                 micro_meta = {
                     "n_pairs": PAIRS_PER_PACK,
                     "n_images": len(image_resolutions),
@@ -169,7 +154,6 @@ def main():
                 }
                 step_microbatch_meta.append(micro_meta)
 
-            # Aggregate into per-step funfetti dict (same as btrm_training.py lines 984-1003)
             total_pairs = sum(m["n_pairs"] for m in step_microbatch_meta)
             total_ctx = sum(m["total_context_len"] for m in step_microbatch_meta)
             total_nfes = sum(m["n_images"] for m in step_microbatch_meta)
@@ -186,7 +170,6 @@ def main():
                 "microbatches": step_microbatch_meta,
             }
 
-            # Inject into JSONL data
             if step_idx < len(data):
                 data[step_idx]["funfetti"] = funfetti_meta
 
@@ -195,9 +178,6 @@ def main():
         print(f"  Sampler stats after replay: {sampler.stats()}")
         print(f"  Injected funfetti metadata into {min(N_STEPS, len(data))} entries")
 
-    # ------------------------------------------------------------------
-    # Step 3: Verify funfetti data is present
-    # ------------------------------------------------------------------
     n_with_funfetti = sum(1 for d in data if "funfetti" in d)
     print(f"\n  Entries with funfetti data: {n_with_funfetti}/{len(data)}")
 
@@ -205,7 +185,6 @@ def main():
         print("  ERROR: No funfetti data available. Cannot generate charts.")
         return 1
 
-    # Quick sanity check: print resolution distribution
     from collections import Counter
     pixel_counts = Counter()
     for d in data:
@@ -219,29 +198,20 @@ def main():
         ct = pixel_counts[px]
         print(f"    {px:>10,} px: {ct:>4} images ({ct/total_images:.1%})")
 
-    # ------------------------------------------------------------------
-    # Step 4: Create TrainingArtifacts and generate analysis
-    # ------------------------------------------------------------------
     print(f"\n  Generating analysis (all 10 charts)...")
 
     from src_ii.training_artifacts import TrainingArtifacts
 
-    # Create artifacts instance (it will try to open the JSONL file for writing,
-    # so we need to handle the existing file carefully)
     artifacts = TrainingArtifacts(
         output_dir=str(OUTPUT_DIR),
         run_name=RUN_NAME,
         head_names=HEAD_NAMES,
     )
 
-    # Close the metrics file that was opened for writing -- we don't want
-    # to overwrite the existing JSONL
     artifacts.close()
 
-    # Inject the reconstructed data directly into the internal _steps list
     artifacts._steps = data
 
-    # Load run config from run_summary.json for the report
     summary_path = OUTPUT_DIR / "run_summary.json"
     run_config = None
     if summary_path.exists():
@@ -262,9 +232,6 @@ def main():
     report_path = artifacts.generate_analysis(run_config=run_config)
     print(f"  Analysis generated: {report_path}")
 
-    # ------------------------------------------------------------------
-    # Step 5: Verify all 10 charts exist
-    # ------------------------------------------------------------------
     charts_dir = OUTPUT_DIR / "charts"
     expected_charts = [
         "01_loss_curve.png",

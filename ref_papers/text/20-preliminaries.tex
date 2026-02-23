@@ -1,0 +1,45 @@
+\section{Preliminaries}
+
+In this section, we provide a brief background on diffusion models and the RL problem formulation.
+
+\subsection{Diffusion Models}
+\label{sec:diffusion_background}
+
+In this work, we consider conditional diffusion probabilistic models \citep{sohldickstein2015nonequilibrium,ho2020denoising}, which represent a distribution $p(\bx_0 | \bc)$ over a dataset of samples $\bx_0$ and corresponding contexts $\bc$.
+The distribution is modeled as the reverse of a Markovian forward process $q(\bx_t \mid \bx_{t-1})$, which iteratively adds noise to the data.
+Reversing the forward process can be accomplished by training a neural network $\bm{\mu}_\theta(\bx_t, \bc, t)$ with the following objective:
+\begin{align}
+    \ldiff(\theta) &= \expect{(\bx_0, \bc) \sim p(\bx_0, \bc), \; t \sim \mathcal{U}\{0, T\}, \; \bx_t \sim q(\bx_t \mid \bx_0)}{
+        \lVert
+            \tilde{\bm{\mu}}(\bx_0, t) - \bm{\mu}_\theta(\bx_t, \bc, t)
+        \rVert^2
+    }
+    \label{eq:denoising_objective}
+\end{align}
+where $\tilde{\bm{\mu}}$ is the posterior mean of the forward process, a weighted average of $\bx_0$ and $\bx_t$.
+This objective is justified as maximizing a variational lower bound on the log-likelihood of the data \citep{ho2020denoising}.
+
+Sampling from a diffusion model begins with drawing a random $\bx_T \sim \mathcal{N}(\bzero, \bI)$ and following the reverse process $p_\theta(\bx_{t-1} \mid \bx_t, \bc)$ to produce a trajectory $\{\bx_T, \bx_{T-1}, \dots, \bx_0\}$ ending with a sample $\bx_0$.
+The sampling process depends not only on the predictor $\bm{\mu}_\theta$ but also the choice of sampler.
+Most popular samplers~\citep{ho2020denoising,song2021denoising} use an isotropic Gaussian reverse process with a fixed timestep-dependent variance:
+\begin{align}
+    p_\theta(\bx_{t-1} \mid \bx_t, \bc) & = \mathcal{N}(\bx_{t-1} \mid \bm{\mu}_\theta\left(\bx_t, \bc, t\right), \sigma_t^2 \bI).
+    \label{eq:sampler}
+\end{align}
+
+\subsection{Markov Decision Processes and Reinforcement Learning}
+\label{sec:mdp_background}
+A Markov decision process (MDP) is a formalization of sequential decision-making problems.
+An MDP is defined by a tuple $(\mathcal{S}, \mathcal{A}, \rho_0, P, R)$, in which $\mathcal{S}$ is the state space, $\mathcal{A}$ is the action space, $\rho_0$ is the distribution of initial states, $P$ is the transition kernel, and $R$ is the reward function.
+At each timestep $t$, the agent observes a state $\bs_t \in \mathcal{S}$, takes an action $\ba_t \in \mathcal{A}$, receives a reward $R(\bs_t, \ba_t)$, and transitions to a new state $\bs_{t+1} \sim P(\bs_{t+1} \mid \bs_t, \ba_t)$. An agent acts according to a policy $\pi(\ba \mid \bs)$.
+
+As the agent acts in the MDP, it produces trajectories, which are sequences of states and actions $\tau = (\bs_0, \ba_0, \bs_1, \ba_1, \dots, \bs_{T}, \ba_{T})$.
+The reinforcement learning (RL) objective is for the agent to maximize $\mathcal{J}_{\text{RL}}(\pi)$, the expected cumulative reward over trajectories sampled from its policy:
+\begin{equation*}
+    \textstyle
+    \mathcal{J}_\text{RL}(\pi) = \; \expect{
+        \tau \sim p(\tau \mid \pi)
+    }{
+        \; \sum_{t=0}^{T} R(\bs_t, \ba_t) \;
+    }.
+\end{equation*}

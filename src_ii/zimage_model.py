@@ -80,6 +80,7 @@ class ZImageRLAIF(nn.Module):
         pad_tokens_multiple: int | None = 32,
         n_score_heads: int = 2,
         score_cap: float = 10.0,
+        use_sage: bool = True,
         device=None,
         dtype=None,
     ):
@@ -94,6 +95,7 @@ class ZImageRLAIF(nn.Module):
         self.n_heads = n_heads
         self.n_score_heads = n_score_heads
         self.score_cap = score_cap
+        self.use_sage = use_sage
 
         # Gradient checkpointing flag (resolved at compile trace time)
         self.gradient_checkpointing = False
@@ -121,7 +123,8 @@ class ZImageRLAIF(nn.Module):
             JointTransformerBlock(
                 layer_id, dim, n_heads, n_kv_heads, multiple_of,
                 ffn_dim_multiplier, norm_eps, qk_norm,
-                modulation=False, device=device, dtype=dtype,
+                modulation=False, use_sage=use_sage,
+                device=device, dtype=dtype,
             )
             for layer_id in range(n_refiner_layers)
         ])
@@ -131,7 +134,7 @@ class ZImageRLAIF(nn.Module):
                 layer_id, dim, n_heads, n_kv_heads, multiple_of,
                 ffn_dim_multiplier, norm_eps, qk_norm,
                 modulation=True, z_image_modulation=z_image_modulation,
-                device=device, dtype=dtype,
+                use_sage=use_sage, device=device, dtype=dtype,
             )
             for layer_id in range(n_refiner_layers)
         ])
@@ -142,7 +145,8 @@ class ZImageRLAIF(nn.Module):
                 layer_id, dim, n_heads, n_kv_heads, multiple_of,
                 ffn_dim_multiplier, norm_eps, qk_norm,
                 z_image_modulation=z_image_modulation,
-                attn_out_bias=False, device=device, dtype=dtype,
+                attn_out_bias=False, use_sage=use_sage,
+                device=device, dtype=dtype,
             )
             for layer_id in range(n_layers)
         ])
@@ -353,7 +357,7 @@ class ZImageRLAIF(nn.Module):
             if bsz > 1 and cap_freqs_cis.shape[0] == 1:
                 cap_freqs_cis = cap_freqs_cis.expand(bsz, -1, -1, -1, -1, -1)
 
-            cap_block_mask = build_trivial_mask(cap_embedded.shape[1], device)
+            cap_block_mask = build_trivial_mask(cap_embedded.shape[1], device, use_sage=self.use_sage)
             for layer in self.context_refiner:
                 cap_embedded = layer(cap_embedded, None, cap_freqs_cis,
                                      block_mask=cap_block_mask)
@@ -552,7 +556,7 @@ class ZImageRLAIF(nn.Module):
             t_i = 1 - timesteps_list[i]
             adaln_input_i = self.t_embedder(t_i * self.time_scale, dtype=x_i.dtype)
 
-            noise_block_mask = build_trivial_mask(patches.shape[1], device)
+            noise_block_mask = build_trivial_mask(patches.shape[1], device, use_sage=self.use_sage)
             for layer in self.noise_refiner:
                 patches = layer(
                     patches, None, x_freqs_cis,
@@ -738,6 +742,45 @@ class ZImageRLAIF(nn.Module):
             token_to_image=token_to_image,
         )
 
+    # ------------------------------------------------------------------
+    # Compilation
+    # ------------------------------------------------------------------
+
+    def compile_for_execution(self) -> 'ZImageRLAIF':
+        """Compile all transformer blocks in-place.
+
+        Wraps every JointTransformerBlock (main layers, noise_refiner,
+        context_refiner) and the FinalLayer with torch.compile. Each
+        compiled module is independently optimized; calling a compiled
+        module from eager context (e.g. inside @torch.compiler.disable)
+        still invokes the compiled graph.
+
+        NOT compiled:
+          - _preprocess / _postprocess: Python dispatch only (no matmuls).
+            Already @torch.compiler.disable.
+          - prepare_packed_state: Python dispatch that calls compiled
+            context_refiner blocks.
+          - _compute_scores: Python-level iteration over segments.
+          - score_norm, score_proj: trivially small.
+          - t_embedder, cap_embedder, x_embedder, rope_embedder:
+            small embedding ops.
+
+        Returns self (not a wrapper).
+        """
+        def _compile_if_needed(module):
+            if isinstance(module, torch._dynamo.eval_frame.OptimizedModule):
+                return module
+            return torch.compile(module, mode="default")
+
+        for i in range(len(self.layers)):
+            self.layers[i] = _compile_if_needed(self.layers[i])
+        for i in range(len(self.noise_refiner)):
+            self.noise_refiner[i] = _compile_if_needed(self.noise_refiner[i])
+        for i in range(len(self.context_refiner)):
+            self.context_refiner[i] = _compile_if_needed(self.context_refiner[i])
+        self.final_layer = _compile_if_needed(self.final_layer)
+        return self
+
 
 # ------------------------------------------------------------------
 # Model creation and loading
@@ -750,6 +793,7 @@ def create_zimage_rlaif(
     qk_norm: bool = True,
     n_score_heads: int = 2,
     score_cap: float = 10.0,
+    use_sage: bool = True,
 ) -> ZImageRLAIF:
     """Create ZImageRLAIF on the 'meta' device (uninitialized weights).
 
@@ -776,6 +820,7 @@ def create_zimage_rlaif(
         pad_tokens_multiple=32,
         n_score_heads=n_score_heads,
         score_cap=score_cap,
+        use_sage=use_sage,
         device="meta",
         dtype=dtype,
     )
@@ -790,7 +835,8 @@ def load_zimage_rlaif(
     score_cap: float = 10.0,
     fuse: bool = True,
     compile_model: bool = True,
-) -> tuple[nn.Module, ZImageRLAIF]:
+    use_sage: bool = True,
+) -> ZImageRLAIF:
     """Load ZImageRLAIF from FP8 safetensors checkpoint.
 
     Loading sequence:
@@ -801,7 +847,7 @@ def load_zimage_rlaif(
       5. Load remaining weights (strict=False: score_proj/score_norm missing = zero-init stays)
       6. Move to device, eval mode
       7. Fuse model (optional)
-      8. torch.compile (optional)
+      8. compile_for_execution (optional)
 
     Args:
         fp8_safetensors_path: Path to checkpoint.
@@ -811,11 +857,11 @@ def load_zimage_rlaif(
         n_score_heads: Number of BTRM score heads.
         score_cap: Soft tanh cap for score output.
         fuse: Whether to apply model fusions.
-        compile_model: Whether to torch.compile.
+        compile_model: Whether to compile inner layers.
 
     Returns:
-        (compiled_model, raw_model) -- if compile_model is False,
-        both are the same object.
+        The model. When compile_model=True, inner layers are compiled
+        in-place. There is no separate raw_model — one object for all uses.
     """
     import time
     from safetensors.torch import load_file
@@ -843,6 +889,7 @@ def load_zimage_rlaif(
         dtype=dtype, n_layers=n_layers,
         cap_feat_dim=cap_feat_dim, qk_norm=qk_norm,
         n_score_heads=n_score_heads, score_cap=score_cap,
+        use_sage=use_sage,
     )
 
     replace_linear_with_fp8(
@@ -884,15 +931,22 @@ def load_zimage_rlaif(
 
     model.eval()
 
+    # Configure SageAttention if the model uses it
+    if use_sage:
+        try:
+            from futudiffu.sage_attention import configure_sage
+            configure_sage(smooth_k=True, qk_quant="int8", pv_quant="bf16")
+        except ImportError:
+            pass
+
     if fuse:
         fuse_model(model)
 
     elapsed = time.perf_counter() - t0
     print(f"[zimage_model] Loaded in {elapsed:.1f}s "
-          f"(n_layers={n_layers}, score_heads={n_score_heads})")
+          f"(n_layers={n_layers}, score_heads={n_score_heads}, sage={use_sage})")
 
     if compile_model:
-        compiled = torch.compile(model, mode="default")
-        return compiled, model
-    else:
-        return model, model
+        model.compile_for_execution()
+
+    return model

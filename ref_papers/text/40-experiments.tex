@@ -1,0 +1,82 @@
+\vspace{-0.3em}
+\section{Experimental Evaluation}
+\vspace{-0.4em}
+
+
+The purpose of our experiments is to evaluate the effectiveness of RL algorithms for finetuning diffusion models to align with a variety of user-specified objectives.
+After examining the viability of the general approach, we focus on the following questions:
+
+\vspace{-0.3em}
+\begin{enumerate}
+    \item How do variants of \methodours{} compare to \methodrwr{} and to each other?
+    \item Can VLMs allow for optimizing rewards that are difficult to specify manually?
+    \item Do the effects of RL finetuning generalize to prompts not seen during finetuning?
+\end{enumerate}
+
+\subsection{Algorithm Comparisons}
+\label{sec:alg_comparison}
+
+We begin by evaluating all methods on the compressibility, incompressibility, and aesthetic quality tasks, as these tasks isolate the effectiveness of the RL approach from considerations relating to the VLM reward function.
+We use Stable Diffusion v1.4 \citep{rombach2022latent} as the base model for all experiments.
+Compressibility and incompressibility prompts are sampled uniformly from all 398 animals in the ImageNet-1000 \citep{deng2009imagenet} categories.
+Aesthetic quality prompts are sampled uniformly from a smaller set of 45 common animals.
+
+\input{figures/alg_samples}
+
+\input{figures/alg_comparison}
+
+As shown qualitatively in Figure~\ref{fig:alg_samples}, \methodours{} is able to effectively adapt a pretrained model with only the specification of a reward function and without any further data curation.
+The strategies found to optimize each reward are nontrivial; for example, to maximize LAION-predicted aesthetic quality, \methodours{} transforms a model that produces naturalistic images into one that produces artistic drawings.
+To maximize compressibility, \methodours{} removes backgrounds and applies smoothing to what remains.
+To maximize incompressibility, \methodours{} finds artifacts that are difficult for the JPEG compression algorithm to encode, such as high-frequency noise and sharp edges.
+Samples from \methodrwr{} are provided in Appendix~\ref{app:more_samples} for comparison.
+
+We provide a quantitative comparison of all methods in Figure~\ref{fig:alg_comparison}.
+We plot the attained reward as a function of the number of queries to the reward function, as reward evaluation becomes the limiting factor in many practical applications.
+\methodours{} shows a clear advantage over \methodrwr{} on all tasks, demonstrating that formulating the denoising process as a multi-step MDP and estimating the policy gradient directly is more effective than optimizing a reward-weighted variational bound on log-likelihood. Within the \methodours{} class, the importance sampling estimator slightly outperforms the score function estimator, likely due to the increased number of optimization steps. Within the \methodrwr{} class, the performance of weighting schemes is comparable, making the sparse weighting scheme preferable on these tasks due to its simplicity and reduced resource requirements.
+
+
+
+
+
+
+\input{figures/vlm_progression}
+
+\vspace{-5pt}
+\subsection{Automated Prompt Alignment}
+We next evaluate the ability of VLMs, in conjunction with DDPO, to automatically improve the image-prompt alignment of the pretrained model without additional human labels.
+We focus on \methodppo{} for this experiment, as we found it to be the most effective algorithm in Section~\ref{sec:alg_comparison}.
+The prompts for this task all have the form ``\emph{a(n) [animal] [activity] }'', where the animal comes from the same list of 45 common animals used in Section~\ref{sec:alg_comparison} and the activity is chosen from a list of 3 activities: ``\emph{riding a bike}'', ``\emph{playing chess}'', and ``\emph{washing dishes}''. 
+
+The progression of finetuning is depicted in Figure~\ref{fig:vlm_progression}.
+Qualitatively, the samples come to depict the prompts much more faithfully throughout the course of training.
+This trend is also reflected quantitatively, though is less salient as small changes in BERTScore can correspond to large differences in relevance \citep{zhang2020bertscore}.
+It is important to note that some of the prompts in the finetuning set, such as ``\emph{a dolphin riding a bike}'', had zero success rate from the pretrained model;
+if trained in isolation, this prompt would be unlikely to ever improve because there would be no reward signal.
+It was only via transferrable learning across prompts that these difficult prompts could improve.
+
+Nearly all of the samples become more cartoon-like or artistic during finetuning.
+This was not optimized for directly.
+We hypothesize that this may be a function of the pretraining distribution (one would expect depictions of animals doing everyday activities to be more commonly cartoon-like than photorealistic) or of the reward function (perhaps LLaVA has an easier time recognizing the content of simple cartoon-like images).
+
+\input{figures/generalization_before_after}
+
+\subsection{Generalization}
+\label{sec:generalization}
+
+RL finetuning on large language models has been shown to produce interesting generalization properties; for example, instruction finetuning almost entirely in English has been shown to improve capabilities in other languages \citep{ouyang2022instructgpt}.
+It is difficult to reconcile this phenomenon with our current understanding of generalization; it would \emph{a priori} seem more likely for finetuning to have an effect only on the finetuning prompt set or distribution.
+In order to investigate the same phenomenon with diffusion models, Figure~\ref{fig:generalization} shows a set of \methodours{}-finetuned model samples corresponding to prompts that were not seen during finetuning.
+In concordance with instruction-following transfer in language modeling, we find that the effects of finetuning do generalize, even with prompt distributions as narrow as 45 animals and 3 activities.
+We find evidence of generalization to animals outside of the training distribution, to non-animal everyday objects, and in the case of prompt-image alignment, even to novel activities such as ``\emph{taking an exam}''.
+
+
+
+
+
+
+
+
+
+
+

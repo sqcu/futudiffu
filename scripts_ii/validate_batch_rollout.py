@@ -31,7 +31,6 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-# -- path setup -------------------------------------------------------
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
@@ -53,9 +52,6 @@ from src_ii.rendering import (
     compute_spatial_autocorrelation,
 )
 
-# =====================================================================
-# Configuration
-# =====================================================================
 
 FP8_PATH = r"F:\dox\ai\comfyui\ComfyUI\models\diffusion_models\z_image_fp8_blockwise.safetensors"
 TE_PATH = r"F:\dox\ai\comfyui\ComfyUI\models\text_encoders\qwen_3_4b.safetensors"
@@ -65,9 +61,6 @@ PROMPT = (
     'qwen-3-4b, draw me an "enormous laser shark for the sega saturn".'
 )
 
-# K=2 images at different resolutions → different sigma schedules.
-# Canonical: N_STEPS=30, CFG=4.0 (from generate_multi_res_trajectories.py).
-# Resolutions from validate_packed_vs_serial.py test set (tier 4 + medium landscape).
 RESOLUTIONS = [(512, 512), (640, 384)]
 SEEDS = [42, 7]
 N_STEPS = 30
@@ -79,9 +72,6 @@ DTYPE = torch.bfloat16
 OUTPUT_DIR = REPO_ROOT / "batch_rollout_validation"
 
 
-# =====================================================================
-# Helpers
-# =====================================================================
 
 def _log(msg: str) -> None:
     print(msg, flush=True)
@@ -114,9 +104,6 @@ def _single_image_pixel_stats(pil_img) -> dict:
     }
 
 
-# =====================================================================
-# Phase 1: Text Encoder
-# =====================================================================
 
 def phase1_encode(device, dtype) -> tuple[torch.Tensor, torch.Tensor, int]:
     """Load TE, encode prompt + negative, free TE. Returns CPU tensors."""
@@ -139,7 +126,6 @@ def phase1_encode(device, dtype) -> tuple[torch.Tensor, torch.Tensor, int]:
     _log(f"  pos shape: {tuple(pos.shape)}, neg shape: {tuple(neg.shape)}")
     _log(f"  cap_len (tokens): {cap_len}")
 
-    # CPU + free TE
     pos = pos.cpu()
     neg = neg.cpu()
     del te, tokenizer
@@ -153,9 +139,6 @@ def phase1_encode(device, dtype) -> tuple[torch.Tensor, torch.Tensor, int]:
     return pos, neg, cap_len
 
 
-# =====================================================================
-# Phase 2: Backbone + Rollouts
-# =====================================================================
 
 def phase2a_sdpa_determinism(model, pos_list, neg_list, cap_lens, device, dtype):
     """SDPA determinism baseline: proves the Euler loop is bitwise deterministic.
@@ -276,7 +259,7 @@ def phase2_rollouts(pos, neg, cap_len, device, dtype, output_dir):
 
     t0 = time.perf_counter()
 
-    _, model = load_zimage_rlaif(
+    model = load_zimage_rlaif(
         FP8_PATH, device=device, dtype=dtype,
         compile_model=False, fuse=True,
     )
@@ -286,9 +269,6 @@ def phase2_rollouts(pos, neg, cap_len, device, dtype, output_dir):
         {"name": "p_theta", "rank": 4, "alpha": 4.0},
         {"name": "r_theta", "rank": 4, "alpha": 4.0},
     ])
-    # Canonical init_b_std=0.01 per MEMORY.md / training policy.
-    # Adapter effect is tiny at init (by design — training moves B from near-zero).
-    # SDPA determinism still catches any nonzero diff as proof adapter code path fires.
     for wrapper in wrappers.values():
         wrapper.init_adapter_b("p_theta", std=0.01)
 
@@ -296,24 +276,20 @@ def phase2_rollouts(pos, neg, cap_len, device, dtype, output_dir):
     _log(f"  LoRA installed: {summary['n_wrapped_layers']} layers, "
          f"{len(summary['adapters'])} adapters")
 
-    # Build conditionings: same prompt for both images, different resolutions
     pos_gpu, neg_gpu = pos.to(device), neg.to(device)
     pos_list = [pos_gpu, pos_gpu]
     neg_list = [neg_gpu, neg_gpu]
     cap_lens = [cap_len, cap_len]
 
-    # --- Phase 2a: SDPA determinism baseline ---
     sdpa_determinism, trajs_sdpa_baseline = phase2a_sdpa_determinism(
         model, pos_list, neg_list, cap_lens, device, dtype,
     )
 
-    # --- Phase 2b: SDPA adapter routing (deterministic, no SageAttention noise) ---
     sdpa_adapter_effect = phase2b_sdpa_adapter_effect(
         model, pos_list, neg_list, cap_lens,
         trajs_sdpa_baseline, device, dtype,
     )
 
-    # --- Phase 2c: SageAttention noise characterization ---
     _log("\n  --- Phase 2c: SageAttention Noise Characterization ---")
     _log("  Run A: adapter p_theta ON (constant scales), SageAttention")
     scales_a = torch.tensor([[1.0, 0.0], [1.0, 0.0]], device=device)
@@ -328,7 +304,6 @@ def phase2_rollouts(pos, neg, cap_len, device, dtype, output_dir):
     elapsed_a = time.perf_counter() - t1
     _log(f"    {elapsed_a:.2f}s, K={meta_a['K']}, {N_STEPS} steps")
 
-    # --- Run A2: identical params (SageAttention noise characterization) ---
     _log("  Run A2: SageAttention noise characterization (same seeds + scales)")
     t1 = time.perf_counter()
     trajs_a2, _ = batch_rollout(
@@ -339,7 +314,6 @@ def phase2_rollouts(pos, neg, cap_len, device, dtype, output_dir):
     elapsed_a2 = time.perf_counter() - t1
     _log(f"    {elapsed_a2:.2f}s")
 
-    # --- Run B: adapter p_theta disabled for image 0 at step >= mid ---
     mid = N_STEPS // 2
     _log(f"  Run B: adapter disabled for image 0 at step >= {mid}")
 
@@ -358,7 +332,6 @@ def phase2_rollouts(pos, neg, cap_len, device, dtype, output_dir):
     elapsed_b = time.perf_counter() - t1
     _log(f"    {elapsed_b:.2f}s")
 
-    # --- Save latents ---
     latent_dir = output_dir / "latents"
     latent_dir.mkdir(exist_ok=True)
     for k in range(2):
@@ -367,7 +340,6 @@ def phase2_rollouts(pos, neg, cap_len, device, dtype, output_dir):
         torch.save(trajs_b[k]["final"], latent_dir / f"run_b_img{k}.pt")
     _log(f"  Latents saved to {latent_dir}")
 
-    # --- Latent-space metrics ---
     metrics = {
         "resolutions": RESOLUTIONS,
         "seeds": SEEDS,
@@ -389,7 +361,6 @@ def phase2_rollouts(pos, neg, cap_len, device, dtype, output_dir):
         "sage_adapter_effect": {},
     }
 
-    # Sigma schedules
     for k in range(2):
         metrics["sigma_schedules"][f"img{k}"] = {
             "sigmas": trajs_a[k]["sigmas"],
@@ -397,13 +368,11 @@ def phase2_rollouts(pos, neg, cap_len, device, dtype, output_dir):
             "resolution": RESOLUTIONS[k],
         }
 
-    # Scores per step
     for step_i, scores in enumerate(meta_a["scores_per_step"]):
         metrics["scores_per_step"][f"step_{step_i}"] = {
             f"img{k}": scores[k].tolist() for k in range(2)
         }
 
-    # SageAttention noise floor: A vs A2 (identical params, different due to INT8 noise)
     for k in range(2):
         diff = (trajs_a[k]["final"].float() - trajs_a2[k]["final"].float())
         metrics["sage_noise_floor"][f"img{k}"] = {
@@ -414,7 +383,6 @@ def phase2_rollouts(pos, neg, cap_len, device, dtype, output_dir):
             "note": "SageAttention INT8 non-determinism — expected to be nonzero",
         }
 
-    # Adapter effect: A (adapter ON) vs B (adapter disabled mid-trajectory for img0)
     for k in range(2):
         diff = (trajs_a[k]["final"].float() - trajs_b[k]["final"].float())
         cosine = torch.nn.functional.cosine_similarity(
@@ -422,7 +390,6 @@ def phase2_rollouts(pos, neg, cap_len, device, dtype, output_dir):
             trajs_b[k]["final"].flatten().float().unsqueeze(0),
         ).item()
 
-        # Compare adapter effect magnitude to SageAttention noise floor
         noise_l2 = metrics["sage_noise_floor"][f"img{k}"]["l2_norm"]
         effect_l2 = float(diff.norm().item())
         signal_to_noise = effect_l2 / max(noise_l2, 1e-8)
@@ -447,9 +414,6 @@ def phase2_rollouts(pos, neg, cap_len, device, dtype, output_dir):
     return model, trajs_a, trajs_a2, trajs_b, metrics
 
 
-# =====================================================================
-# Phase 3: VAE Decode + Pixel Statistics
-# =====================================================================
 
 def phase3_vae_decode(trajs_a, trajs_a2, trajs_b, metrics, device, dtype, output_dir):
     """Load VAE, decode all latents, save images + pixel-space stats."""
@@ -470,17 +434,14 @@ def phase3_vae_decode(trajs_a, trajs_a2, trajs_b, metrics, device, dtype, output
     for k in range(2):
         w, h = RESOLUTIONS[k]
 
-        # Decode all three runs
         pil_a = decode_latent_to_pil(vae, trajs_a[k]["final"], device=device, dtype=dtype)
         pil_a2 = decode_latent_to_pil(vae, trajs_a2[k]["final"], device=device, dtype=dtype)
         pil_b = decode_latent_to_pil(vae, trajs_b[k]["final"], device=device, dtype=dtype)
 
-        # Save images
         pil_a.save(img_dir / f"run_a_img{k}_{w}x{h}.png")
         pil_a2.save(img_dir / f"run_a2_img{k}_{w}x{h}.png")
         pil_b.save(img_dir / f"run_b_img{k}_{w}x{h}.png")
 
-        # Per-image pixel statistics
         metrics["pixel_stats"][f"run_a_img{k}"] = _single_image_pixel_stats(pil_a)
         metrics["pixel_stats"][f"run_a2_img{k}"] = _single_image_pixel_stats(pil_a2)
         metrics["pixel_stats"][f"run_b_img{k}"] = _single_image_pixel_stats(pil_b)
@@ -490,20 +451,16 @@ def phase3_vae_decode(trajs_a, trajs_a2, trajs_b, metrics, device, dtype, output
              f"std={metrics['pixel_stats'][f'run_a_img{k}']['overall_std']:.1f} "
              f"range={metrics['pixel_stats'][f'run_a_img{k}']['dynamic_range']:.0f}")
 
-        # Pixel-space diff: Run A vs Run B (adapter effect)
-        # Convert PIL to (1, 3, H, W) float [0,1] for compute_per_channel_pixel_stats
         tensor_a = torch.from_numpy(np.array(pil_a)).permute(2, 0, 1).unsqueeze(0).float() / 255.0
         tensor_b = torch.from_numpy(np.array(pil_b)).permute(2, 0, 1).unsqueeze(0).float() / 255.0
 
         pixel_diff_stats = compute_per_channel_pixel_stats(tensor_a, tensor_b)
         metrics["adapter_pixel_diff"][f"img{k}"] = pixel_diff_stats
 
-        # False-color diff image
         diff_np = np.abs(np.array(pil_a).astype(np.float32) - np.array(pil_b).astype(np.float32))
         autocorr = compute_spatial_autocorrelation(diff_np)
         metrics["adapter_pixel_diff"][f"img{k}"]["spatial_autocorrelation"] = autocorr
 
-        # Save false-color diff (10x amplification for visibility)
         save_false_color_diff(
             tensor_a, tensor_b,
             img_dir / f"diff_a_vs_b_img{k}_{w}x{h}.png",
@@ -524,9 +481,6 @@ def phase3_vae_decode(trajs_a, trajs_a2, trajs_b, metrics, device, dtype, output
     return metrics
 
 
-# =====================================================================
-# Main
-# =====================================================================
 
 def main() -> int:
     _log(f"Batch rollout validation — {datetime.now(timezone.utc).isoformat()}")
@@ -536,24 +490,17 @@ def main() -> int:
 
     OUTPUT_DIR.mkdir(exist_ok=True)
 
-    # Phase 1: Text encoder
     pos, neg, cap_len = phase1_encode(DEVICE, DTYPE)
 
-    # Phase 2: Backbone + rollouts
     model, trajs_a, trajs_a2, trajs_b, metrics = phase2_rollouts(
         pos, neg, cap_len, DEVICE, DTYPE, OUTPUT_DIR,
     )
 
-    # Free backbone before VAE (if needed, but VAE is tiny)
-    # Keep model loaded — 8GB backbone + 0.2GB VAE fits in 24GB
 
-    # Phase 3: VAE decode + pixel statistics
     metrics = phase3_vae_decode(trajs_a, trajs_a2, trajs_b, metrics, DEVICE, DTYPE, OUTPUT_DIR)
 
-    # Save final metrics
     _save_json(metrics, OUTPUT_DIR / "metrics.json")
 
-    # --- Summary ---
     _log("\n" + "=" * 60)
     _log("  SUMMARY")
     _log("=" * 60)
@@ -597,7 +544,6 @@ def main() -> int:
 
     _log(f"\n  All outputs saved to: {OUTPUT_DIR}")
 
-    # Free everything
     del model, trajs_a, trajs_a2, trajs_b
     gc.collect()
     torch.cuda.empty_cache()

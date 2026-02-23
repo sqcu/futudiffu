@@ -33,19 +33,16 @@ OUTPUT_DIR = REPO_ROOT / "pinkify_thisnotthat_output"
 def main():
     t0 = time.perf_counter()
 
-    # --- Load per-image literal rule scores ---
     print("Loading literal rule scores...")
     with open(OUTPUT_DIR / "per_image_scores.json") as f:
         per_image_scores = json.load(f)
     n_images = len(per_image_scores)
     print(f"  {n_images} images")
 
-    # --- Load BTRM head scores ---
     print("Loading BTRM head scores...")
     btrm_scores = torch.load(str(OUTPUT_DIR / "pre_persist_scores.pt"), weights_only=True)
     print(f"  Shape: {btrm_scores.shape}")
 
-    # --- Build comparison ---
     print("\nBuilding comparison...")
     per_image_comparison = []
     for i in range(n_images):
@@ -59,7 +56,6 @@ def main():
             "btrm_thisnotthat": btrm_scores[i, 1].item(),
         })
 
-    # --- Compute pairwise agreement ---
     print("Computing pairwise agreement...")
     traj_images: dict[int, list[int]] = {}
     for i, entry in enumerate(per_image_scores):
@@ -132,7 +128,6 @@ def main():
     print(f"  ThisNotThat agreement: {agree_thisnotthat}/{n_pairs} = {thisnotthat_agreement:.1%}")
     print(f"  Both agree:            {agree_both}/{n_pairs} = {both_agreement:.1%}")
 
-    # --- Compute rank correlation (Spearman) using extracted function ---
     print("\nComputing rank correlations...")
     literal_pink = [e["pinkify_score"] for e in per_image_scores]
     literal_tnt = [e["thisnotthat_score"] for e in per_image_scores]
@@ -145,7 +140,6 @@ def main():
     print(f"  Spearman rho (pinkify):     {rho_pinkify:.4f}")
     print(f"  Spearman rho (thisnotthat): {rho_thisnotthat:.4f}")
 
-    # --- Write output ---
     comparison = {
         "summary": {
             "n_images": n_images, "n_pairs": n_pairs,

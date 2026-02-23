@@ -37,9 +37,6 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 import torch
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
 
 FP8_WEIGHTS = r"F:\dox\ai\comfyui\ComfyUI\models\diffusion_models\z_image_fp8_blockwise.safetensors"
 TE_WEIGHTS = r"F:\dox\ai\comfyui\ComfyUI\models\text_encoders\qwen_3_4b.safetensors"
@@ -50,8 +47,6 @@ OUTPUT_DIR = REPO_ROOT / "pipeline_validation"
 RENDER_DIR = OUTPUT_DIR / "renders"
 STATS_DIR = OUTPUT_DIR / "stats"
 
-# Resolution plan: explicit (W, H) spanning 3+ megapixel tiers, all non-square.
-# We use sample_random_resolution for some and fixed for others to ensure diversity.
 from src_ii.resolution_sampling import (
     MEGAPIXEL_ANCHORS,
     ANCHOR_LABELS,
@@ -67,29 +62,23 @@ def _build_resolution_plan() -> list[tuple[int, int, str]]:
     rng = _random.Random(42)
     plan = []
 
-    # Tier 1: ~256^2 (tiny)
     plan.append((96, 64, "256sq_landscape"))    # ~0.006 MP, 3:2 landscape
     plan.append((64, 96, "256sq_portrait"))     # ~0.006 MP, 2:3 portrait
 
-    # Tier 2: ~384^2 (small)
     w, h = sample_random_resolution(147456, rng, aspect_min=0.6, aspect_max=0.8)
     plan.append((w, h, "384sq_portrait"))       # ~0.15 MP portrait
 
-    # Tier 3: ~512^2 (medium)
     w, h = sample_random_resolution(262144, rng, aspect_min=1.3, aspect_max=1.8)
     plan.append((w, h, "512sq_landscape"))      # ~0.26 MP landscape
 
-    # Tier 4: ~704^2 (large)
     w, h = sample_random_resolution(495616, rng, aspect_min=0.55, aspect_max=0.75)
     plan.append((w, h, "704sq_portrait"))       # ~0.50 MP portrait
 
-    # Tier 5: ~1024^2 (megapixel) -- two different aspect ratios
     w, h = sample_random_resolution(1048576, rng, aspect_min=1.4, aspect_max=1.9)
     plan.append((w, h, "1024sq_landscape"))     # ~1.0 MP landscape
     w, h = sample_random_resolution(1048576, rng, aspect_min=0.55, aspect_max=0.75)
     plan.append((w, h, "1024sq_portrait"))      # ~1.0 MP portrait
 
-    # Tier 6: reference resolution (1280x832) -- the standard production resolution
     plan.append((1280, 832, "reference_1280x832"))
 
     return plan
@@ -97,14 +86,11 @@ def _build_resolution_plan() -> list[tuple[int, int, str]]:
 
 RESOLUTION_PLAN = _build_resolution_plan()
 
-# Diffusion parameters
 N_STEPS = 30
 CFG = 4.0
-# Dense step saving: every 5th step + final
 SAVE_STEPS = {0, 5, 10, 15, 20, 25, 29}
 BASE_SEED = 500000
 
-# Prompts: use 8 diverse prompts (one per trajectory)
 from futudiffu.btrm_dataset import PROMPT_TEMPLATES
 
 PROMPTS = PROMPT_TEMPLATES[:8]
@@ -114,9 +100,6 @@ def _log(msg: str) -> None:
     print(msg, flush=True)
 
 
-# ---------------------------------------------------------------------------
-# Phase 1: Text encoder
-# ---------------------------------------------------------------------------
 
 def phase1_encode_prompts(device: torch.device, dtype: torch.dtype) -> dict[str, torch.Tensor]:
     """Load TE, encode prompts, free TE."""
@@ -134,12 +117,10 @@ def phase1_encode_prompts(device: torch.device, dtype: torch.dtype) -> dict[str,
 
     prompt_cache: dict[str, torch.Tensor] = {}
 
-    # Negative prompt
     neg_cond = encode_prompt(te_model, tokenizer, "", device=device)
     prompt_cache[""] = neg_cond.cpu()
     _log(f"  neg_cond shape: {neg_cond.shape}")
 
-    # Positive prompts
     for i, prompt in enumerate(PROMPTS):
         cond = encode_prompt(te_model, tokenizer, prompt, device=device)
         prompt_cache[prompt] = cond.cpu()
@@ -154,9 +135,6 @@ def phase1_encode_prompts(device: torch.device, dtype: torch.dtype) -> dict[str,
     return prompt_cache
 
 
-# ---------------------------------------------------------------------------
-# Phase 2: Diffusion model -- generate trajectories
-# ---------------------------------------------------------------------------
 
 def phase2_generate(
     prompt_cache: dict[str, torch.Tensor],
@@ -168,15 +146,15 @@ def phase2_generate(
     _log("  PHASE 2: DIFFUSION MODEL")
     _log("=" * 60)
 
-    from src_ii.model_loading import load_fp8_diffusion_model
+    from src_ii.zimage_model import load_zimage_rlaif
     from src_ii.rollout import rollout
     from src_ii.sigma_schedule import resolution_shift, build_sigma_schedule_py
 
     t0 = time.perf_counter()
 
-    diff_compiled, diff_model = load_fp8_diffusion_model(
+    diff_model = load_zimage_rlaif(
         FP8_WEIGHTS, device=device, dtype=dtype,
-        compile_model=True, fuse=True,
+        compile_model=True, fuse=True, use_sage=True,
     )
     _log(f"  VRAM after model load: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
@@ -206,7 +184,7 @@ def phase2_generate(
         t_traj = time.perf_counter()
 
         result_tensors, meta = rollout(
-            model=diff_compiled,
+            model=diff_model,
             pos_cond=pos_cond,
             neg_cond=neg_c,
             seed=seed,
@@ -223,7 +201,6 @@ def phase2_generate(
         dt = time.perf_counter() - t_traj
         _log(f"    Done in {dt:.1f}s, saved {len(result_tensors)} tensors")
 
-        # Build sigma schedule (pure Python) for reporting
         sigma_schedule = build_sigma_schedule_py(N_STEPS, sampling_shift=shift)
 
         traj_metadata = {
@@ -243,7 +220,6 @@ def phase2_generate(
             "saved_steps": sorted(SAVE_STEPS),
         }
 
-        # Move tensors to CPU
         cpu_tensors = {k: v.cpu() for k, v in result_tensors.items()}
         del result_tensors
         torch.cuda.empty_cache()
@@ -255,7 +231,7 @@ def phase2_generate(
 
         timing_data[f"{width}x{height}"] = dt
 
-    del diff_compiled, diff_model
+    del diff_model, diff_model
     torch.cuda.empty_cache()
 
     elapsed = time.perf_counter() - t0
@@ -264,9 +240,6 @@ def phase2_generate(
     return trajectories
 
 
-# ---------------------------------------------------------------------------
-# Phase 3: VAE decode -- every saved latent to PNG
-# ---------------------------------------------------------------------------
 
 def phase3_vae_decode(
     trajectories: list[dict],
@@ -302,7 +275,6 @@ def phase3_vae_decode(
             if latent.dim() == 3:
                 latent = latent.unsqueeze(0)
 
-            # Extract step number for filename
             if step_key == "final":
                 step_num = "final"
             else:
@@ -331,9 +303,6 @@ def phase3_vae_decode(
     return render_paths
 
 
-# ---------------------------------------------------------------------------
-# Phase 4: Statistics computation and plotting
-# ---------------------------------------------------------------------------
 
 def _compute_rgb_from_latent_pil(pil_img) -> tuple:
     """Compute mean RGB, variance RGB from PIL image. Returns (mean_r,g,b), (var_r,g,b)."""
@@ -385,14 +354,12 @@ def phase4_statistics(
             _log(f"  Skipping traj {idx}: no renders")
             continue
 
-        # Load the final (reference) image
         if "final" not in traj_renders:
             _log(f"  Skipping traj {idx}: no final render")
             continue
 
         ref_img = Image.open(traj_renders["final"])
 
-        # Determine step ordering
         step_keys = sorted(
             [k for k in traj_renders.keys() if k.startswith("step_")],
             key=lambda k: int(k.split("_")[1]),
@@ -400,7 +367,6 @@ def phase4_statistics(
         if "final" not in step_keys:
             step_keys.append("final")
 
-        # Compute stats for each step
         step_indices = []
         psnr_values = []
         mean_r, mean_g, mean_b = [], [], []
@@ -413,7 +379,6 @@ def phase4_statistics(
 
             img = Image.open(fpath)
 
-            # Step index
             if step_key == "final":
                 step_num = N_STEPS  # After step 29, this is the final clean image
             else:
@@ -421,11 +386,9 @@ def phase4_statistics(
 
             step_indices.append(step_num)
 
-            # PSNR relative to final
             psnr = _psnr_from_pils(img, ref_img)
             psnr_values.append(psnr)
 
-            # Mean and variance of RGB
             mean_rgb, var_rgb = _compute_rgb_from_latent_pil(img)
             mean_r.append(mean_rgb[0])
             mean_g.append(mean_rgb[1])
@@ -434,7 +397,6 @@ def phase4_statistics(
             var_g.append(var_rgb[1])
             var_b.append(var_rgb[2])
 
-        # --- Plot 1: PSNR vs step ---
         chart = PILChart(width=900, height=500)
         chart.set_title(f"Traj {idx}: PSNR vs Step ({w}x{h}, {label})")
         chart.set_labels("Step", "PSNR (dB)")
@@ -451,7 +413,6 @@ def phase4_statistics(
         psnr_path = STATS_DIR / f"traj_{idx:02d}_psnr_{w}x{h}.png"
         chart.save(str(psnr_path))
 
-        # --- Plot 2: Mean RGB vs step ---
         chart = PILChart(width=900, height=500)
         chart.set_title(f"Traj {idx}: Mean RGB vs Step ({w}x{h}, {label})")
         chart.set_labels("Step", "Mean Channel Value")
@@ -465,7 +426,6 @@ def phase4_statistics(
         mean_path = STATS_DIR / f"traj_{idx:02d}_mean_rgb_{w}x{h}.png"
         chart.save(str(mean_path))
 
-        # --- Plot 3: Variance RGB vs step ---
         chart = PILChart(width=900, height=500)
         chart.set_title(f"Traj {idx}: RGB Variance vs Step ({w}x{h}, {label})")
         chart.set_labels("Step", "Channel Variance")
@@ -501,7 +461,6 @@ def phase4_statistics(
         _log(f"  Traj {idx} ({w}x{h}): PSNR range [{min(psnr_values):.1f}, {max(psnr_values):.1f}] dB, "
              f"monotonic={traj_stats['psnr_monotonic']}")
 
-    # Save all stats
     stats_path = STATS_DIR / "all_stats.json"
     with open(str(stats_path), "w") as f:
         json.dump(all_stats, f, indent=2)
@@ -511,9 +470,6 @@ def phase4_statistics(
     return all_stats
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 def main() -> int:
     wall_start = time.perf_counter()
@@ -536,19 +492,14 @@ def main() -> int:
     for w, h, label in RESOLUTION_PLAN:
         _log(f"    {w}x{h} ({label}, {w * h:,} pixels)")
 
-    # Phase 1: Encode prompts
     prompt_cache = phase1_encode_prompts(device, dtype)
 
-    # Phase 2: Generate trajectories
     trajectories = phase2_generate(prompt_cache, device, dtype)
 
-    # Phase 3: VAE decode all saved latents
     render_paths = phase3_vae_decode(trajectories, device, dtype)
 
-    # Phase 4: Statistics + plots (CPU only, can free GPU tensors from trajectories)
     all_stats = phase4_statistics(trajectories, render_paths)
 
-    # Build generation report
     wall_total = time.perf_counter() - wall_start
 
     report = {
@@ -577,7 +528,6 @@ def main() -> int:
             "generation_time_s": meta["generation_time_s"],
         })
 
-    # Statistics summary
     if all_stats:
         psnr_monotonic_count = sum(1 for s in all_stats if s["psnr_monotonic"])
         report["stats_summary"] = {

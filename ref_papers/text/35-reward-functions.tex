@@ -1,0 +1,36 @@
+\section{Reward Functions for Text-to-Image Diffusion}
+\label{sec:reward_functions}
+
+
+In this work, we evaluate our methods on text-to-image diffusion.
+Text-to-image diffusion serves as a valuable test environment for reinforcement learning due to the availability of large pretrained models and the versatility of using diverse and visually interesting reward functions. In this section, we outline our selection of reward functions.
+We study a spectrum of reward functions of varying complexity, ranging from those that are straightforward to specify and evaluate to those that capture the depth of real-world downstream tasks.
+
+\subsection{Compressibility and Incompressibility}
+
+The capabilities of text-to-image diffusion models are limited by the co-occurrences of text and images in their training distribution. For instance, images are rarely captioned with their file size, making it impossible to specify a desired file size via prompting.
+This limitation makes reward functions based on file size a convenient case study: they are simple to compute, but not controllable through the conventional methods of likelihood maximization and prompt engineering.
+
+We fix the resolution of diffusion model samples at 512x512, such that the file size is determined solely by the compressibility of the image. We define two tasks based on file size: compressibility, in which the file size of the image after JPEG compression is minimized, and incompressibility, in which the same measure is maximized.
+
+\subsection{Aesthetic Quality}
+To capture a reward function that would be useful to a human user, we define a task based on perceived aesthetic quality.
+We use the LAION aesthetics predictor \citep{schuhmann2022laion}, which is trained on 176,000 human image ratings.
+The predictor is implemented as a linear model on top of CLIP embeddings \citep{radford2021clip}.
+Annotations range between 1 and 10, with the highest-rated images mostly containing artwork.
+Since the aesthetic quality predictor is trained on human judgments, this task constitutes reinforcement learning from human feedback \citep{ouyang2022instructgpt,christiano2017rlhf,ziegler2019rlhf}. 
+
+
+\input{figures/vlm_diagram.tex}
+\subsection{Automated Prompt Alignment with Vision-Language Models}
+
+A very general-purpose reward function for training a text-to-image model is prompt-image alignment.
+However, specifying a reward that captures generic prompt alignment is difficult, conventionally requiring large-scale human labeling efforts.
+We propose using an existing VLM to replace additional human annotation.
+This design is inspired by recent work on RLAIF \citep{bai2022constitutional}, in which language models are improved using feedback from themselves.
+
+We use LLaVA \citep{liu2023llava}, a state-of-the-art VLM, to describe an image.
+The finetuning reward is the BERTScore \citep{zhang2020bertscore} recall metric, a measure of semantic similarity, using the prompt as the reference sentence and the VLM description as the candidate sentence.
+Samples that more faithfully include all of the details of the prompt receive higher rewards, to the extent that those visual details are legible to the VLM.
+
+In Figure~\ref{fig:vlm_diagram}, we show one simple question: ``\emph{what is happening in this image?}''. While this captures the general task of prompt-image alignment, in principle any question could be used to specify complex or hard-to-define reward functions for a particular use case. One could even employ a language model to automatically generate candidate questions and evaluate responses based on the prompt. This framework provides a flexible interface where the complexity of the reward function is only limited by the capabilities of the vision and language models involved.

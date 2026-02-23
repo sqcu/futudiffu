@@ -33,9 +33,6 @@ sys.path.insert(0, str(REPO_ROOT / "src_ii"))
 import torch
 from safetensors.torch import load_file
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
 
 FP8_PATH = r"F:\dox\ai\comfyui\ComfyUI\models\diffusion_models\z_image_fp8_blockwise.safetensors"
 TE_PATH = r"F:\dox\ai\comfyui\ComfyUI\models\text_encoders\qwen_3_4b.safetensors"
@@ -56,9 +53,6 @@ def main():
     print("  PINKIFY/THISNOTTHAT Persistence Verification")
     print("=" * 60)
 
-    # -----------------------------------------------------------------------
-    # Phase 1: Load pre-persist scores (ground truth)
-    # -----------------------------------------------------------------------
     print("\n[Phase 1] Loading pre-persist scores...")
     with open(str(PRE_PERSIST_SCORES_PATH)) as f:
         pre_persist_scores = json.load(f)
@@ -68,9 +62,6 @@ def main():
               f"pinkify={e['score_pinkify']:.6f}, "
               f"thisnotthat={e['score_thisnotthat']:.6f}")
 
-    # -----------------------------------------------------------------------
-    # Phase 2: Load compound config
-    # -----------------------------------------------------------------------
     print("\n[Phase 2] Loading compound config...")
     config_path = RUN_DIR / "btrm_compound_config.json"
     with open(str(config_path)) as f:
@@ -78,9 +69,6 @@ def main():
     head_names = tuple(config["head_names"])
     print(f"  Config: {config}")
 
-    # -----------------------------------------------------------------------
-    # Phase 3: Encode prompts (text encoder)
-    # -----------------------------------------------------------------------
     print("\n[Phase 3] Loading V2 dataset and encoding prompts...")
     from futudiffu.dataset_v2 import DatasetReader
     from futudiffu.text_encoder import create_tokenizer, load_text_encoder, encode_prompt
@@ -89,7 +77,6 @@ def main():
     traj_ids_all = reader._table.column("traj_id").to_pylist()
     print(f"  V2 dataset: {len(reader)} trajectories")
 
-    # We only need prompts for the 10 test trajectories
     test_traj_ids = [e["traj_id"] for e in pre_persist_scores]
 
     tokenizer = create_tokenizer(TOKENIZER_PATH)
@@ -109,23 +96,17 @@ def main():
     print(f"  Encoded {len(prompt_cache)} unique prompts. "
           f"VRAM: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
-    # -----------------------------------------------------------------------
-    # Phase 4: Load FP8 backbone
-    # -----------------------------------------------------------------------
     print("\n[Phase 4] Loading FP8 backbone (no compile for verification)...")
     from src_ii.zimage_model import load_zimage_rlaif
     from src_ii.btrm_lifecycle import load_btrm, score_serial
     from src_ii.multi_lora import install_multi_lora, get_adapter_params
 
-    _, raw_model = load_zimage_rlaif(
+    raw_model = load_zimage_rlaif(
         FP8_PATH, device=device, dtype=dtype,
         compile_model=False, fuse=True,
     )
     print(f"  VRAM after backbone: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
-    # -----------------------------------------------------------------------
-    # Phase 5: Load compound model from persisted weights
-    # -----------------------------------------------------------------------
     print("\n[Phase 5] Loading BTRM model from persisted weights...")
 
     install_multi_lora(raw_model, [{"name": "rtheta", "rank": 8, "alpha": 16.0}])
@@ -134,9 +115,6 @@ def main():
     raw_model.eval()
     print(f"  Compound model loaded. VRAM: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
-    # -----------------------------------------------------------------------
-    # Phase 6: Compare weight tensors (raw safetensors vs model parameters)
-    # -----------------------------------------------------------------------
     print("\n[Phase 6] Weight tensor comparison...")
     adapter_path = RUN_DIR / "rtheta_adapter.safetensors"
     head_path = RUN_DIR / "btrm_head.safetensors"
@@ -205,9 +183,6 @@ def main():
     n_exact_weights = sum(1 for v in weight_results.values() if v["exact"])
     print(f"  Weight summary: {n_exact_weights}/{n_weight_tensors} tensors exact")
 
-    # -----------------------------------------------------------------------
-    # Phase 7: Re-run forward passes for each test entry
-    # -----------------------------------------------------------------------
     print("\n[Phase 7] Re-running forward passes for test entries...")
     from src_ii.sigma_schedule import build_sigma_schedule, resolution_shift
 
@@ -230,10 +205,8 @@ def main():
 
         meta, accessor = get_meta(traj_id)
 
-        # Load latent
         latent = accessor[step_key].to(device=device, dtype=dtype)
 
-        # Compute sigma for this step (same logic as train_pinkify_differentiable.py)
         n_steps = meta.get("n_steps", 30)
         denoise_val = meta.get("denoise") or 1.0
         recorded_shift = meta.get("sampling_shift")
@@ -257,7 +230,6 @@ def main():
 
         timestep = torch.tensor([sigma_val], device=device, dtype=dtype)
 
-        # Get conditioning
         prompt = meta.get("prompt", "")
         cond_cpu = prompt_cache.get(prompt)
         if cond_cpu is None:
@@ -267,7 +239,6 @@ def main():
 
         num_tokens = cond.shape[1]
 
-        # Score via loaded model (inference path, same as training script)
         with torch.no_grad():
             scores = score_serial(raw_model, latent, timestep, cond, num_tokens,
                                   gradient_checkpointing=False)
@@ -275,7 +246,6 @@ def main():
         post_pinkify = float(scores[0, 0].item())
         post_thisnotthat = float(scores[0, 1].item())
 
-        # Bit-for-bit comparison via float32 bit patterns
         pre_pinkify_t = torch.tensor(pre_pinkify, dtype=torch.float32)
         pre_thisnotthat_t = torch.tensor(pre_thisnotthat, dtype=torch.float32)
         post_pinkify_t = torch.tensor(post_pinkify, dtype=torch.float32)
@@ -322,9 +292,6 @@ def main():
     n_exact_scores = sum(1 for r in score_results if r["entry_exact"])
     print(f"\n  Score summary: {n_exact_scores}/{len(score_results)} entries exact")
 
-    # -----------------------------------------------------------------------
-    # Phase 8: Verdict + persist results
-    # -----------------------------------------------------------------------
     elapsed = time.perf_counter() - t0
     verdict = "PASS" if (all_weights_exact and all_scores_exact) else "FAIL"
 

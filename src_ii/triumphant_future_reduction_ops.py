@@ -62,6 +62,24 @@ def euler_step(x_base, guided, sigma, sigma_next):
     return x_base + d * (sigma_next - sigma)
 
 
+def euler_sde_step(x_base, guided, sigma, sigma_next, eta_t):
+    """Euler step with noise injection. Returns (x_next, mu).
+
+    mu is the deterministic Euler mean. x_next = mu + eta_t * z.
+    If eta_t < 1e-12 or sigma_next == 0 (final step), x_next = mu (no noise).
+
+    The noise converts the deterministic ODE step into a proper Gaussian
+    transition π_θ(x_{t-1} | x_t) = N(μ_θ, η_t² I), required for
+    REINFORCE score function estimation. See ddreinforce.py docstring.
+    """
+    d = (x_base - guided) / sigma
+    mu = x_base + d * (sigma_next - sigma)
+    if eta_t < 1e-12 or float(sigma_next) == 0.0:
+        return mu, mu
+    z = torch.randn_like(mu)
+    return mu + eta_t * z, mu
+
+
 def latent_padded(res_w, res_h, patch_size=2):
     lh, lw = res_h // 8, res_w // 8
     return (lh + ((-lh) % patch_size), lw + ((-lw) % patch_size))

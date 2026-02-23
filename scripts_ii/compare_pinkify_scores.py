@@ -30,14 +30,10 @@ REPO_ROOT = SCRIPT_DIR.parent
 
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "src"))
-# Allow bare 'src_ii.xxx' imports from this script's directory layout
 sys.path.insert(0, str(REPO_ROOT / "src_ii"))
 
 import torch
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
 
 FP8_PATH = r"F:\dox\ai\comfyui\ComfyUI\models\diffusion_models\z_image_fp8_blockwise.safetensors"
 TOKENIZER_PATH = str(REPO_ROOT / "src" / "futudiffu" / "tokenizer")
@@ -49,8 +45,6 @@ _DEFAULT_COMPOUND_MODEL_DIR = REPO_ROOT / "pinkify_thisnotthat_output" / "differ
 
 HEAD_NAMES = ("pinkify", "thisnotthat")
 
-# Use at least 100 "final" images. All 259 trajectories have a "final" step.
-# We score all of them for maximum comparison coverage.
 N_IMAGES = 259
 
 
@@ -93,7 +87,6 @@ def compute_pairwise_agreement(
             lit_diff = literal_scores[i] - literal_scores[j]
             btrm_diff = btrm_scores[i] - btrm_scores[j]
 
-            # Skip tied pairs (both sides)
             if lit_diff == 0.0:
                 continue
 
@@ -158,9 +151,6 @@ def main() -> int:
     print(f"  Output:    {OUTPUT_PATH}")
     print("=" * 60)
 
-    # -----------------------------------------------------------------------
-    # Phase 1: Load literal scores from JSON cache file
-    # -----------------------------------------------------------------------
     print("\n[Phase 1] Loading literal scores from JSON...")
     import json as _json
 
@@ -168,7 +158,6 @@ def main() -> int:
         _raw_cache = _json.load(_f)
     print(f"  Loaded {len(_raw_cache)} cached score entries")
 
-    # Collect all "final" step entries from the cache
     final_entries = []
     for cache_key, scores in _raw_cache.items():
         if cache_key.endswith(":final"):
@@ -190,16 +179,12 @@ def main() -> int:
     if len(final_entries) < 100:
         print(f"  WARNING: Only {len(final_entries)} entries -- expected >= 100")
 
-    # -----------------------------------------------------------------------
-    # Phase 2: Load V2 dataset
-    # -----------------------------------------------------------------------
     print("\n[Phase 2] Loading V2 dataset...")
     from futudiffu.dataset_v2 import DatasetReader
 
     reader = DatasetReader(str(V2_DATASET_DIR))
     print(f"  Dataset: {len(reader)} trajectories")
 
-    # Filter final_entries to only those present in the dataset
     valid_entries = []
     for e in final_entries:
         if e["traj_id"] in reader:
@@ -211,9 +196,6 @@ def main() -> int:
         print(f"  ERROR: Only {len(valid_entries)} valid entries (need >= 100)")
         return 1
 
-    # -----------------------------------------------------------------------
-    # Phase 3: Encode prompts
-    # -----------------------------------------------------------------------
     print("\n[Phase 3] Encoding prompts with text encoder...")
     from futudiffu.text_encoder import create_tokenizer, load_text_encoder, encode_prompt
 
@@ -233,23 +215,18 @@ def main() -> int:
     print(f"  Encoded {len(prompt_cache)} unique prompts. TE freed.")
     print(f"  VRAM after TE free: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
-    # -----------------------------------------------------------------------
-    # Phase 4: Load backbone + BTRMCompoundModel
-    # -----------------------------------------------------------------------
     print("\n[Phase 4] Loading backbone and compound BTRM model...")
     from src_ii.zimage_model import load_zimage_rlaif
     from src_ii.btrm_lifecycle import load_btrm, score_serial
     from src_ii.multi_lora import install_multi_lora
     from src_ii.sigma_schedule import build_sigma_schedule, resolution_shift
 
-    # Load WITHOUT compilation (inference_mode forward is used for scoring)
-    _, raw_model = load_zimage_rlaif(
+    raw_model = load_zimage_rlaif(
         FP8_PATH, device=device, dtype=dtype,
         compile_model=False, fuse=True,
     )
     print(f"  VRAM after backbone: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
-    # Install LoRA wrappers and load trained weights from differentiable_run/
     install_multi_lora(raw_model, [{"name": "rtheta", "rank": 8, "alpha": 16.0}])
     load_btrm(raw_model, "rtheta", str(COMPOUND_MODEL_DIR))
     raw_model.gradient_checkpointing = False
@@ -257,9 +234,6 @@ def main() -> int:
     print(f"  Loaded compound BTRM model from {COMPOUND_MODEL_DIR}")
     print(f"  VRAM after compound model: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
-    # -----------------------------------------------------------------------
-    # Phase 5: Score all valid_entries with BTRM forward pass
-    # -----------------------------------------------------------------------
     print(f"\n[Phase 5] Scoring {len(valid_entries)} images with BTRM model...")
     print("  (using sigma=0 / 'final' step for cleanest signal)")
 
@@ -353,9 +327,6 @@ def main() -> int:
         print(f"  ERROR: Only {len(scored_entries)} scored (need >= 100)")
         return 1
 
-    # -----------------------------------------------------------------------
-    # Phase 6: Compute pairwise agreement and Spearman correlation
-    # -----------------------------------------------------------------------
     print("\n[Phase 6] Computing pairwise agreement and Spearman correlation...")
 
     btrm_pink = [e["btrm_pinkify"] for e in scored_entries]
@@ -363,15 +334,12 @@ def main() -> int:
     lit_pink = [e["literal_pinkify"] for e in scored_entries]
     lit_tnt = [e["literal_thisnotthat"] for e in scored_entries]
 
-    # Pairwise agreement (cross-image pairs, excluding tied literal pairs)
     agree_pink, ntotal_pink, disagree_pink = compute_pairwise_agreement(btrm_pink, lit_pink)
     agree_tnt, ntotal_tnt, disagree_tnt = compute_pairwise_agreement(btrm_tnt, lit_tnt)
 
     pink_agree_pct = agree_pink / max(ntotal_pink, 1)
     tnt_agree_pct = agree_tnt / max(ntotal_tnt, 1)
 
-    # Spearman rank correlation (using src_ii.stats canonical implementation
-    # but also have inline fallback above)
     try:
         from src_ii.stats import spearman_rank_correlation as stats_spearman
         rho_pink = stats_spearman(lit_pink, btrm_pink)
@@ -389,7 +357,6 @@ def main() -> int:
     print(f"  Pinkify rho:     {rho_pink:.4f}")
     print(f"  ThisNotThat rho: {rho_tnt:.4f}")
 
-    # Rubric check
     print(f"\n  === Rubric Check ===")
     pink_pass = pink_agree_pct >= 0.70
     tnt_pass = tnt_agree_pct >= 0.60
@@ -398,12 +365,8 @@ def main() -> int:
     print(f"  [{'PASS' if pink_pass else 'FAIL'}] Pinkify agreement >= 70%: {pink_agree_pct:.1%}")
     print(f"  [{'PASS' if tnt_pass else 'FAIL'}] ThisNotThat agreement >= 60%: {tnt_agree_pct:.1%}")
 
-    # -----------------------------------------------------------------------
-    # Phase 7: Persist results
-    # -----------------------------------------------------------------------
     print(f"\n[Phase 7] Writing results to {OUTPUT_PATH}...")
 
-    # Compute basic score distribution stats
     def _stats(vals: list[float]) -> dict:
         import statistics
         if not vals:
@@ -465,7 +428,6 @@ def main() -> int:
     print(f"  Written: {OUTPUT_PATH}")
     print(f"\n  Wall time: {wall_total:.1f}s ({wall_total / 60:.1f} min)")
 
-    # Cleanup
     reader.close()
 
     return 0

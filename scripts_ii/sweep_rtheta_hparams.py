@@ -39,7 +39,6 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 import torch
 import torch.nn as nn
 
-# --- Configuration ---
 FP8_PATH = r"F:\dox\ai\comfyui\ComfyUI\models\diffusion_models\z_image_fp8_blockwise.safetensors"
 TE_PATH = r"F:\dox\ai\comfyui\ComfyUI\models\text_encoders\qwen_3_4b.safetensors"
 TOKENIZER_PATH = str(REPO_ROOT / "src" / "futudiffu" / "tokenizer")
@@ -55,7 +54,6 @@ N_TRAJECTORIES = 10
 LOGSQUARE_WEIGHT = 0.05
 BATCH_SIZE = 16
 
-# Sweep grids
 PHASE1_LRS = [1e-2, 3e-3, 1e-3, 3e-4, 1e-4]
 PHASE1_EPOCHS = [40, 100, 200, 400]
 
@@ -213,7 +211,6 @@ def extract_hidden_states(
         B, C, H, W = latent.shape
         rope_cache = make_rope_cache(diff_model, H, W, num_tokens, device)
 
-        # TODO: extract_hidden() removed -- need new hidden extraction path
         hidden = diff_model.extract_hidden(
             latent, timestep.unsqueeze(0), conditioning, num_tokens, rope_cache,
         )
@@ -261,7 +258,6 @@ def train_single_config(
 
     layer_indices = set(config.layer_indices) if config.layer_indices else None
 
-    # Set up BTRM training with fresh weights
     optimizer = setup_btrm_training(
         diff_model,
         adapter_name="rtheta",
@@ -284,7 +280,6 @@ def train_single_config(
     )
     training_time = time.perf_counter() - t0
 
-    # Compute metrics
     final = training_curve[-1]
     best_loss = min(e["loss"] for e in training_curve)
     best_pinkify = max(e["accuracy_pinkify"] for e in training_curve)
@@ -304,19 +299,15 @@ def train_single_config(
         training_time_s=training_time,
     )
 
-    # Save outputs
     config_dir = SWEEP_DIR / config.name
     config_dir.mkdir(parents=True, exist_ok=True)
 
-    # Save training curve
     with open(config_dir / "training_curve.json", "w") as f:
         json.dump(training_curve, f, indent=2)
 
-    # Save final metrics
     with open(config_dir / "final_metrics.json", "w") as f:
         json.dump(asdict(result), f, indent=2)
 
-    # Persist adapter + head
     persist_btrm(diff_model, "rtheta", str(config_dir))
 
     return result
@@ -332,36 +323,29 @@ def main():
     print("  HYPERPARAMETER SWEEP: Stronger r_theta BTRM Adapter")
     print("=" * 70)
 
-    # --- Load training data ---
     print("\n=== Loading training data ===")
     labels, per_image_scores, manifest = load_training_data()
     records = manifest["records"]
     training_pairs = build_training_pairs(labels, per_image_scores)
     print(f"  {len(training_pairs)} training pairs from {len(per_image_scores)} images")
 
-    # --- Phase 0: Encode prompts ---
     print("\n=== Phase 0: Encoding prompts ===")
     unique_prompts = encode_all_prompts(records, device, dtype)
 
-    # --- Load diffusion model (once, kept in VRAM throughout) ---
     print("\n=== Loading diffusion model ===")
     from src_ii.zimage_model import load_zimage_rlaif
 
-    _, diff_model = load_zimage_rlaif(
+    diff_model = load_zimage_rlaif(
         FP8_PATH, device=device, dtype=dtype,
         compile_model=False, fuse=True,
     )
 
     all_results: list[SweepResult] = []
 
-    # =====================================================================
-    # PHASE 1: LR x Epochs (rank=8, init_b_std=0.01, all layers)
-    # =====================================================================
     print("\n" + "=" * 70)
     print("  PHASE 1: LR x Epochs sweep (rank=8, init_b_std=0.01, all layers)")
     print("=" * 70)
 
-    # Extract hidden states ONCE for Phase 1 architecture
     print("\n  Extracting hidden states for Phase 1 (rank=8, all layers)...")
     t_extract = time.perf_counter()
     hidden_states_p1, btrm_p1 = extract_hidden_states(
@@ -371,7 +355,6 @@ def main():
     )
     print(f"  Hidden extraction: {time.perf_counter() - t_extract:.1f}s")
 
-    # Clean up extraction compound model (we only needed it for hidden states)
     btrm_p1.cleanup()
     remove_all_adapters(diff_model)
 
@@ -398,10 +381,8 @@ def main():
               f"best_tnt={result.best_acc_thisnotthat:.3f}, "
               f"time={result.training_time_s:.1f}s")
 
-    # Find best Phase 1 config by best thisnotthat accuracy
     phase1_results = [r for r in all_results if r.config_name.startswith("p1_")]
     best_p1 = max(phase1_results, key=lambda r: r.best_acc_thisnotthat)
-    # Extract lr and epochs from best config
     best_p1_config = [c for c in phase1_configs if c.name == best_p1.config_name][0]
     best_lr = best_p1_config.lr
     best_epochs = best_p1_config.n_epochs
@@ -416,14 +397,10 @@ def main():
     gc.collect()
     torch.cuda.empty_cache()
 
-    # =====================================================================
-    # PHASE 2: Rank x init_b_std (best LR/epochs from Phase 1, all layers)
-    # =====================================================================
     print("\n" + "=" * 70)
     print(f"  PHASE 2: Rank x init_b_std sweep (lr={best_lr}, epochs={best_epochs})")
     print("=" * 70)
 
-    # Group by rank: extract hidden states once per rank
     phase2_configs_by_rank: dict[int, list[SweepConfig]] = {}
     for rank in PHASE2_RANKS:
         for init_b_std in PHASE2_INIT_B_STDS:
@@ -440,9 +417,6 @@ def main():
     for rank, configs in phase2_configs_by_rank.items():
         print(f"\n  --- Phase 2: Extracting hidden states for rank={rank} ---")
         t_extract = time.perf_counter()
-        # Use a representative init_b_std for extraction (the adapter affects
-        # hidden states via its init, but the effect is small at init_b_std=0.01)
-        # We use the first config's init_b_std
         hidden_states, btrm_tmp = extract_hidden_states(
             diff_model, per_image_scores, records, unique_prompts,
             rank=rank, init_b_std=configs[0].init_b_std, layer_indices=None,
@@ -468,7 +442,6 @@ def main():
         gc.collect()
         torch.cuda.empty_cache()
 
-    # Find best Phase 2 config
     phase2_results = [r for r in all_results if r.config_name.startswith("p2_")]
     best_p2 = max(phase2_results, key=lambda r: r.best_acc_thisnotthat)
     best_p2_config = [c for configs in phase2_configs_by_rank.values()
@@ -482,9 +455,6 @@ def main():
     print(f"    best_acc_pinkify={best_p2.best_acc_pinkify:.3f}")
     print(f"    final_loss={best_p2.final_loss:.4f}")
 
-    # =====================================================================
-    # PHASE 3: Layer subsets (best LR/epochs/rank/init_b_std)
-    # =====================================================================
     print("\n" + "=" * 70)
     print(f"  PHASE 3: Layer subset sweep (lr={best_lr}, epochs={best_epochs}, "
           f"rank={best_rank}, init_b_std={best_init_b_std})")
@@ -527,21 +497,16 @@ def main():
         gc.collect()
         torch.cuda.empty_cache()
 
-    # Find best Phase 3 config
     phase3_results = [r for r in all_results if r.config_name.startswith("p3_")]
     best_p3 = max(phase3_results, key=lambda r: r.best_acc_thisnotthat)
 
     print(f"\n  Phase 3 winner: {best_p3.config_name}")
     print(f"    best_acc_thisnotthat={best_p3.best_acc_thisnotthat:.3f}")
 
-    # =====================================================================
-    # SUMMARY
-    # =====================================================================
     print("\n" + "=" * 70)
     print("  SWEEP SUMMARY")
     print("=" * 70)
 
-    # Save all results
     summary = {
         "sweep_time_s": time.perf_counter() - t_total,
         "phase1_winner": best_p1.config_name,
@@ -560,7 +525,6 @@ def main():
     with open(SWEEP_DIR / "sweep_summary.json", "w") as f:
         json.dump(summary, f, indent=2)
 
-    # Print table
     print(f"\n{'Config':<30s} {'Loss':>8s} {'BestLoss':>8s} "
           f"{'Pink':>6s} {'BPink':>6s} {'TNT':>6s} {'BTNT':>6s} "
           f"{'Params':>10s} {'Time':>7s}")
@@ -572,26 +536,20 @@ def main():
               f"{r.final_acc_thisnotthat:6.3f} {r.best_acc_thisnotthat:6.3f} "
               f"{r.n_adapter_params:10d} {r.training_time_s:7.1f}s")
 
-    # Top 3 by thisnotthat accuracy
     top3 = sorted(all_results, key=lambda x: -x.best_acc_thisnotthat)[:3]
     print(f"\n  TOP 3 configs (by best thisnotthat accuracy):")
     for i, r in enumerate(top3):
         print(f"    {i+1}. {r.config_name}: best_tnt={r.best_acc_thisnotthat:.3f}, "
               f"best_pink={r.best_acc_pinkify:.3f}, loss={r.final_loss:.4f}")
 
-    # Save top 3 list for attention diff phase
     top3_names = [r.config_name for r in top3]
     with open(SWEEP_DIR / "top3_configs.json", "w") as f:
         json.dump(top3_names, f, indent=2)
 
-    # =====================================================================
-    # ATTENTION DIFF for top 3 (if time permits)
-    # =====================================================================
     print("\n" + "=" * 70)
     print("  ATTENTION DIFF for Top 3 Configs")
     print("=" * 70)
 
-    # Free diffusion model first, then reload for attention diff
     del diff_model
     gc.collect()
     torch.cuda.empty_cache()
@@ -622,7 +580,6 @@ def run_attention_diffs_for_top3(
     import futudiffu.attention as attn_mod
     import futudiffu.diffusion_model as dm_mod
 
-    # The 4 representative latents from the original attention study
     LATENT_SELECTIONS = [
         {"name": "high_pinkify", "traj_idx": 5, "step_key": "step_09"},
         {"name": "low_pinkify", "traj_idx": 3, "step_key": "final"},
@@ -630,7 +587,6 @@ def run_attention_diffs_for_top3(
         {"name": "low_thisnotthat", "traj_idx": 7, "step_key": "final"},
     ]
 
-    # Also load baseline adapter diffs for comparison
     baseline_manifest_path = OUTPUT_DIR / "adapter_attention_diffs" / "run_manifest.json"
     baseline_diffs = None
     if baseline_manifest_path.exists():
@@ -646,13 +602,11 @@ def run_attention_diffs_for_top3(
 
         print(f"\n  --- Attention diff for #{rank_idx+1}: {config_name} ---")
 
-        # Load this config's compound model config
         with open(config_dir / "btrm_compound_config.json") as f:
             compound_config = json.load(f)
 
-        # Reload model fresh
         set_attention_backend("sdpa")
-        _, diff_model = load_zimage_rlaif(
+        diff_model = load_zimage_rlaif(
             FP8_PATH, device=device, dtype=dtype,
             compile_model=False, fuse=True,
         )
@@ -661,18 +615,15 @@ def run_attention_diffs_for_top3(
             p.requires_grad_(False)
         dm_mod.sdpa_attention = attn_mod.sdpa_attention
 
-        # Install LoRA wrappers and load this config's weights
         install_multi_lora(diff_model, [{"name": "rtheta", "rank": 8, "alpha": 16.0}])
         load_btrm(diff_model, "rtheta", str(config_dir))
 
-        # Helper to globally set adapter scale
         def _set_global_adapter_scale(scale: float):
             scale_t = torch.tensor([scale], device=device)
             for m in diff_model.modules():
                 if isinstance(m, MultiLoRALinear):
                     m._adapter_scales = scale_t
 
-        # Install attention capture
         capture = AttentionCapture()
         capture.install()
         dm_mod.sdpa_attention = attn_mod.sdpa_attention
@@ -685,7 +636,6 @@ def run_attention_diffs_for_top3(
             step_key = sel["step_key"]
             prompt = records[traj_idx]["prompt"]
 
-            # Load latent
             traj_dir = REPO_ROOT / "btrm_dataset" / "latents" / f"traj_{traj_idx:06d}"
             latent = torch.load(str(traj_dir / f"{step_key}.pt"), weights_only=True)
             latent = latent.to(device=device, dtype=dtype)
@@ -700,19 +650,16 @@ def run_attention_diffs_for_top3(
             B, C, H, W = latent.shape
             rope_cache = make_rope_cache(diff_model, H, W, num_tokens, device)
 
-            # Forward A: scale=0 (unadapted)
             _set_global_adapter_scale(0.0)
             stats_a = capture.capture_forward(
                 diff_model, latent, timestep, conditioning, num_tokens, rope_cache,
             )
 
-            # Forward B: scale=1 (adapter active)
             _set_global_adapter_scale(1.0)
             stats_b = capture.capture_forward(
                 diff_model, latent, timestep, conditioning, num_tokens, rope_cache,
             )
 
-            # Compute mean absolute diff across main layers
             from collections import Counter
             dom_a = Counter(v["seq_len"] for v in stats_a.values()).most_common(1)[0][0]
             dom_b = Counter(v["seq_len"] for v in stats_b.values()).most_common(1)[0][0]
@@ -740,7 +687,6 @@ def run_attention_diffs_for_top3(
             }
             print(f"    {name}: mean|delta|={mean_abs:.6f}, max|delta|={max_abs_diff:.4f}")
 
-        # Compare to baseline
         comparison = {}
         if baseline_diffs:
             for name in per_latent_stats:
@@ -756,7 +702,6 @@ def run_attention_diffs_for_top3(
                         }
                         print(f"    {name}: {ratio:.1f}x baseline")
 
-        # Save attention diff results
         attn_manifest = {
             "config_name": config_name,
             "per_latent_stats": per_latent_stats,
@@ -768,7 +713,6 @@ def run_attention_diffs_for_top3(
         with open(attn_dir / "attention_diff_manifest.json", "w") as f:
             json.dump(attn_manifest, f, indent=2)
 
-        # Clean up
         _set_global_adapter_scale(1.0)
         capture.remove()
         del diff_model, capture

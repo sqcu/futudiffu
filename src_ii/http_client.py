@@ -648,6 +648,8 @@ class HTTPInferenceClient:
         adapter_name: str,
         advantage: float,
         multiplier: float = 1.0,
+        eta_used: list[float] | None = None,
+        beta: float = 0.04,
     ) -> dict:
         """Accumulate LoRA gradients on the server for a rollout.
 
@@ -661,9 +663,12 @@ class HTTPInferenceClient:
             adapter_name: Which LoRA adapter to differentiate.
             advantage: Advantage weight for this rollout.
             multiplier: Default 1.0.
+            eta_used: Per-step noise scales from SDE generation. Required
+                for correct η_t² denominator in flow-matching log-prob.
+            beta: KL penalty coefficient for DDGRPO (default 0.04).
 
         Returns:
-            Metadata dict with total_log_ratio, n_steps.
+            Metadata dict with total_log_ratio, total_kl, n_steps.
         """
         req_tensors: dict[str, Any] = {
             "sigmas": sigmas,
@@ -674,12 +679,15 @@ class HTTPInferenceClient:
             req_tensors[f"checkpoint_{step_idx}"] = tensor
 
         st_bytes = _tensor_to_st_bytes(req_tensors)
-        params = {
+        params: dict[str, Any] = {
             "adapter_name": adapter_name,
             "sparse_steps": sparse_steps,
             "advantage": advantage,
             "multiplier": multiplier,
+            "beta": beta,
         }
+        if eta_used is not None:
+            params["eta_used"] = eta_used
         files = {
             "params": ("params.json", _json.dumps(params), "application/json"),
             "tensors": ("tensors.st", st_bytes, "application/octet-stream"),

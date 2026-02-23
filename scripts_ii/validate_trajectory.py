@@ -1,6 +1,6 @@
 """Validate src_ii/ rollout against stored reference trajectories.
 
-Loads the FP8 diffusion model (via src_ii.model_loading, NOT model_manager),
+Loads the FP8 diffusion model (via src_ii.zimage_model.load_zimage_rlaif),
 picks a reference trajectory from btrm_dataset/, runs the src_ii rollout
 with the same inputs (seed, prompt conditioning, sigmas, cfg), and writes
 comparison tensors to disk.
@@ -27,11 +27,9 @@ import sys
 import time
 from pathlib import Path, PureWindowsPath
 
-# Resolve the repo root
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
 
-# Add repo root (for src_ii package) and src (for futudiffu package) to Python path
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
@@ -69,12 +67,10 @@ def load_reference_trajectory(traj_dir_wsl: str) -> dict:
     traj_path = Path(traj_dir_wsl)
     tensors = {}
 
-    # Load step files
     for pt_file in sorted(traj_path.glob("step_*.pt")):
         key = pt_file.stem  # e.g. "step_00"
         tensors[key] = torch.load(str(pt_file), weights_only=True)
 
-    # Load final
     final_path = traj_path / "final.pt"
     if final_path.exists():
         tensors["final"] = torch.load(str(final_path), weights_only=True)
@@ -100,8 +96,6 @@ def main():
                         help="Path to tokenizer directory")
     args = parser.parse_args()
 
-    # --- Resolve paths ---
-    # FP8 diffusion model path (must be Windows path for Windows Python)
     if args.fp8_path:
         fp8_path = args.fp8_path
     else:
@@ -118,26 +112,22 @@ def main():
             print("ERROR: Could not find FP8 diffusion model. Use --fp8-path.")
             sys.exit(1)
 
-    # TE path (must be Windows path for Windows Python)
     if args.te_path:
         te_path = args.te_path
     else:
         te_path = r"F:\dox\ai\comfyui\ComfyUI\models\text_encoders\qwen_3_4b.safetensors"
 
-    # Tokenizer path
     if args.tokenizer_path:
         tokenizer_path = args.tokenizer_path
     else:
         tokenizer_path = str(REPO_ROOT / "src" / "futudiffu" / "tokenizer")
 
-    # Output directory
     if args.output_dir:
         output_dir = Path(args.output_dir)
     else:
         output_dir = REPO_ROOT / "validation_output_ii"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # --- Load manifest ---
     manifest_path = REPO_ROOT / "btrm_dataset" / "manifest.json"
     with open(manifest_path) as f:
         manifest = json.load(f)
@@ -155,22 +145,17 @@ def main():
     print(f"  Steps: {record['n_steps']}")
     print(f"  Precision: {record['precision']}")
 
-    # Only support t2i for now (i2i requires loading source images + VAE encoding)
     if record["type"] != "t2i":
         print(f"WARNING: Trajectory type is '{record['type']}', not 't2i'.")
         print("  i2i validation requires VAE encoding of source images.")
         print("  Proceeding anyway, but results may not match if clean_latent differs.")
 
-    # --- Load reference trajectory ---
-    # Compute traj dir from REPO_ROOT (already a valid Windows path) instead
-    # of from manifest, to avoid WSL/Windows path conversion issues.
     traj_dir = REPO_ROOT / "btrm_dataset" / "latents" / f"traj_{args.traj_idx:06d}"
     print(f"  Trajectory dir: {traj_dir}")
 
     ref_tensors = load_reference_trajectory(str(traj_dir))
     print(f"  Reference tensors loaded: {sorted(ref_tensors.keys())}")
 
-    # Determine image dimensions from reference final tensor shape
     ref_final = ref_tensors.get("final")
     if ref_final is None:
         print("ERROR: No final.pt in reference trajectory")
@@ -181,10 +166,6 @@ def main():
     img_width = latent_w * 8
     print(f"  Image size: {img_width}x{img_height} (latent {latent_w}x{latent_h})")
 
-    # --- Phase 1: Encode prompt ---
-    # We need pos_cond and neg_cond. The reference trajectories used the
-    # inference server's encode_prompt RPC. We replicate that here by
-    # loading the text encoder directly.
     print(f"\n--- Phase 1: Encoding prompt ---")
     device = torch.device("cuda")
     dtype = torch.bfloat16
@@ -195,60 +176,48 @@ def main():
     te_model = load_text_encoder(te_path, device=device, dtype=dtype)
     te_compiled = torch.compile(te_model, mode="default")
 
-    # Encode positive prompt using the canonical encode_prompt pipeline:
-    # chat template wrapping + tokenization + layer_idx=-2 hidden state extraction
     pos_cond = encode_prompt(te_compiled, tokenizer, record["prompt"], device=device)
 
-    # Encode negative prompt (empty string) using the same pipeline
     neg_cond = encode_prompt(te_compiled, tokenizer, "", device=device)
 
     print(f"  pos_cond shape: {pos_cond.shape}")
     print(f"  neg_cond shape: {neg_cond.shape}")
 
-    # Save conditioning tensors for reproducibility
     torch.save(pos_cond.cpu(), output_dir / "pos_cond.pt")
     torch.save(neg_cond.cpu(), output_dir / "neg_cond.pt")
 
-    # Free TE to make room for diffusion model
     del te_model, te_compiled
     torch.cuda.empty_cache()
 
-    # --- Phase 2: Load diffusion model ---
     print(f"\n--- Phase 2: Loading diffusion model ---")
-    from src_ii.model_loading import load_fp8_diffusion_model, configure_sage_attention
-    from futudiffu.attention import set_attention_backend
+    from src_ii.zimage_model import load_zimage_rlaif
 
-    # Configure attention backend to match the reference trajectory's precision
     attention_backend = record["precision"]  # "sdpa" or "sage"
     if args.no_sage and attention_backend == "sage":
         print("  WARNING: --no-sage flag set but trajectory used sage precision.")
         print("  Using SDPA instead. Results WILL differ from reference.")
         attention_backend = "sdpa"
 
-    if attention_backend == "sage":
-        configure_sage_attention()
-    set_attention_backend(attention_backend)
+    use_sage = (attention_backend == "sage")
     print(f"  Attention backend: {attention_backend}")
 
-    diff_compiled, diff_model = load_fp8_diffusion_model(
+    diff_model = load_zimage_rlaif(
         fp8_path,
         device=device,
         dtype=dtype,
         compile_model=not args.no_compile,
+        use_sage=use_sage,
     )
 
-    # --- Phase 3: Run rollout ---
     print(f"\n--- Phase 3: Running src_ii rollout ---")
     from src_ii.rollout import rollout
 
-    # Determine which steps to save (match reference)
     ref_step_indices = set()
     for key in ref_tensors:
         if key.startswith("step_"):
             idx = int(key.split("_")[1])
             ref_step_indices.add(idx)
 
-    # Generation defaults from generate_btrm_dataset.py
     cfg = 4.0
     sampling_shift = 1.0
     multiplier = 1.0
@@ -256,7 +225,7 @@ def main():
 
     t0 = time.perf_counter()
     result_tensors, metadata = rollout(
-        model=diff_compiled,
+        model=diff_model,
         pos_cond=pos_cond,
         neg_cond=neg_cond,
         seed=record["seed"],
@@ -275,7 +244,6 @@ def main():
     print(f"  Rollout completed in {elapsed:.1f}s")
     print(f"  Result keys: {sorted(result_tensors.keys())}")
 
-    # --- Phase 4: Compare and write outputs ---
     print(f"\n--- Phase 4: Writing comparison outputs ---")
     traj_output_dir = output_dir / f"traj_{args.traj_idx:06d}"
     traj_output_dir.mkdir(parents=True, exist_ok=True)
@@ -295,8 +263,6 @@ def main():
             comparison_stats[key] = {"status": "missing_in_reproduced"}
             continue
 
-        # Both exist -- compute diff
-        # Move to float32 for accurate comparison
         ref_f32 = ref_t.float()
         repro_f32 = repro_t.float()
         diff = repro_f32 - ref_f32
@@ -319,11 +285,9 @@ def main():
         comparison_stats[key] = stats
         print(f"  {key}: L2={l2_norm:.6f}, max_abs={max_abs:.6f}, rel_L2={relative_l2:.6f}")
 
-        # Save tensors
         torch.save(repro_t, traj_output_dir / f"{key}.pt")
         torch.save(diff.to(torch.bfloat16), traj_output_dir / f"diff_{key}.pt")
 
-    # Save stats
     stats_path = traj_output_dir / "comparison_stats.json"
     with open(stats_path, "w") as f:
         json.dump({

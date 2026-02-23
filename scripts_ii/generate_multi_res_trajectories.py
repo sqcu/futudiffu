@@ -58,11 +58,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 import torch
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
 
-# Model weight paths (Windows paths for the cross-platform venv)
 FP8_WEIGHTS = r"F:\dox\ai\comfyui\ComfyUI\models\diffusion_models\z_image_fp8_blockwise.safetensors"
 TE_WEIGHTS = r"F:\dox\ai\comfyui\ComfyUI\models\text_encoders\qwen_3_4b.safetensors"
 VAE_WEIGHTS = r"F:\dox\ai\comfyui\ComfyUI\models\vae\zimage.safetensors"
@@ -71,9 +67,6 @@ TOKENIZER_PATH = str(REPO_ROOT / "src" / "futudiffu" / "tokenizer")
 OUTPUT_DIR = REPO_ROOT / "multi_res_trajectories"
 RENDER_DIR = OUTPUT_DIR / "renders"
 
-# Resolution generation: algorithmic sampling from megapixel anchors.
-# Each anchor gets TRAJECTORIES_PER_TIER trajectories per backend, with
-# randomly sampled aspect ratios quantized to 32px alignment.
 from src_ii.resolution_sampling import (
     MEGAPIXEL_ANCHORS,
     ANCHOR_LABELS,
@@ -109,49 +102,31 @@ def _build_resolution_plan() -> list[tuple[int, int, int, str]]:
             plan.append((w, h, 1, label))
     return plan
 
-# Build once at import time (deterministic)
 RESOLUTION_TIERS = _build_resolution_plan()
 
-# Diffusion parameters
 N_STEPS = 30
 CFG = 4.0
 N_SAVE = 7  # number of sparse steps to save per trajectory (excluding "final")
 LEGACY_SPARSE_STEPS = {0, 4, 9, 14, 19, 24, 29}  # old step-uniform baseline
 
-# Multi-prompt pool: diverse enough that reward model heads can't just
-# learn noise-level artifacts. Covers text rendering, scene composition,
-# fine detail, stylistic variation, and the project's canonical subjects.
 MULTI_PROMPTS: list[str] = [
-    # 0: Canonical laser shark (golden reference)
     'ahem.\n*ting ting ting ting ting*\nthe query model for this is a LARGE LANGUAGE MODEL, specifically QWEN-3-4B, a GENERAL PURPOSE SEMANTIC PARSER which is able to WRITE SENTENCES AT A TIME when they are participating in dialogue. however, in this situation, they are being used as a hidden state generator to steer an *image generation model*, z-image.\n\nqwen-3-4b, draw me an "enormous laser shark for the sega saturn".',
-    # 1: Ocean scene, warm light
     'qwen-3-4b, draw me a "gigantic laser shark breaching out of the ocean at sunset".',
-    # 2: Text rendering (model weakness)
     'A neon sign reading "OPEN 24 HOURS" above a rain-soaked Tokyo alleyway at night.',
-    # 3: Spatial composition
     'A cat sitting on top of a stack of books next to a window with rain outside, warm interior lighting.',
-    # 4: Photorealism, surreal composition
     'An astronaut riding a horse across a desert under a starfield, photorealistic.',
-    # 5: Fine texture + macro
     'Extreme macro photograph of a butterfly wing showing individual scales, iridescent blue and green.',
-    # 6: Stylized / illustration
     'A cozy medieval tavern interior, firelight, wooden beams, illustrated in the style of a fantasy RPG sourcebook.',
-    # 7: Architecture / geometric
     'Aerial view of a brutalist concrete building surrounded by cherry blossom trees in full bloom.',
-    # 8: Cyberpunk / neon detail
     'qwen-3-4b, draw me a "laser shark swimming through a neon cyberpunk cityscape at night".',
-    # 9: Product photography / studio
     'qwen-3-4b, draw me a "laser shark made of chrome and glass, studio lighting, product photography".',
-    # 10: Text + scene
     'A storefront window with painted gold lettering reading "ANTIQUES & CURIOSITIES" in a foggy English village.',
-    # 11: Robot / futuristic
     'A robot watering potted plants on a balcony overlooking a futuristic city skyline at dawn.',
 ]
 
 N_PROMPTS = len(MULTI_PROMPTS)
 BASE_SEED = 400000  # deterministic seeds, offset from existing dataset
 
-# Attention backends: both SDPA and SageAttention for BTRM discrimination
 ATTENTION_BACKENDS = ["sdpa", "sage"]
 
 
@@ -201,9 +176,6 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-# ---------------------------------------------------------------------------
-# Phase 1: Text encoder -- encode prompts
-# ---------------------------------------------------------------------------
 
 def phase1_encode_prompts(device: torch.device, dtype: torch.dtype) -> dict[str, torch.Tensor]:
     """Load TE, encode all needed prompts, free TE.
@@ -226,7 +198,6 @@ def phase1_encode_prompts(device: torch.device, dtype: torch.dtype) -> dict[str,
     te_model = load_text_encoder(TE_WEIGHTS, device=device, dtype=dtype)
     _log(f"  VRAM after TE load: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
-    # Encode prompts from MULTI_PROMPTS + negative conditioning
     prompt_cache: dict[str, torch.Tensor] = {}
 
     _log(f"  Encoding negative prompt...")
@@ -240,7 +211,6 @@ def phase1_encode_prompts(device: torch.device, dtype: torch.dtype) -> dict[str,
         prompt_cache[prompt] = cond.cpu()
         _log(f"    prompt {i}: shape={cond.shape}, '{prompt[:60]}...'")
 
-    # Free TE
     del te_model, tokenizer
     torch.cuda.empty_cache()
 
@@ -251,9 +221,6 @@ def phase1_encode_prompts(device: torch.device, dtype: torch.dtype) -> dict[str,
     return prompt_cache
 
 
-# ---------------------------------------------------------------------------
-# Phase 2: Diffusion model -- generate trajectories
-# ---------------------------------------------------------------------------
 
 def _build_generation_plan(
     sparse_steps_override: set[int] | None = None,
@@ -347,10 +314,9 @@ def phase2_generate_and_persist(
     _log("  PHASE 2: GENERATE + PERSIST (streaming write-through)")
     _log("=" * 60)
 
-    from src_ii.model_loading import load_fp8_diffusion_model, configure_sage_attention
+    from src_ii.zimage_model import load_zimage_rlaif
     from src_ii.rollout import rollout
     from src_ii.sigma_schedule import resolution_shift
-    from futudiffu.attention import set_attention_backend
     from futudiffu.dataset_v2 import DatasetWriter
     from src_ii.dataset_resumption import (
         compute_remaining_work,
@@ -361,16 +327,13 @@ def phase2_generate_and_persist(
 
     t0 = time.perf_counter()
 
-    # Build the deterministic generation plan
     full_plan = _build_generation_plan(sparse_steps_override)
     total_planned = len(full_plan)
 
-    # Save the plan for auditability and potential external resume tools
     plan_path = OUTPUT_DIR / "generation_plan.json"
     save_generation_plan(full_plan, plan_path)
     _log(f"  Generation plan saved: {plan_path} ({total_planned} trajectories)")
 
-    # Check for existing progress (resumability)
     dataset_dir = OUTPUT_DIR
     remaining, completed, n_total = compute_remaining_work(full_plan, dataset_dir)
     n_skipped = len(completed)
@@ -383,7 +346,6 @@ def phase2_generate_and_persist(
 
     if not remaining:
         _log(f"  All {total_planned} trajectories already exist. Nothing to generate.")
-        # Build trajectory_metadata from the existing dataset for later phases
         trajectory_metadata = _build_metadata_from_plan(full_plan)
         return dataset_dir, trajectory_metadata, 0
 
@@ -395,7 +357,6 @@ def phase2_generate_and_persist(
     else:
         _log(f"  Sparse steps: logSNR-uniform, {N_SAVE} per trajectory (resolution-aware)")
 
-    # Print logSNR-uniform step selections per unique resolution tier for verification
     if sparse_steps_override is None:
         _log(f"\n  --- LogSNR-uniform step indices per resolution ---")
         seen_resolutions: set[tuple[int, int]] = set()
@@ -406,18 +367,17 @@ def phase2_generate_and_persist(
                 shift = resolution_shift(width, height)
                 _log(f"    {tier_label:>8s} {width:>5d}x{height:<5d} shift={shift:.3f}  steps={steps}")
 
-    # Load diffusion model
     _log(f"  Loading FP8 diffusion model (with compile for reduced activation memory)...")
-    diff_compiled, diff_model = load_fp8_diffusion_model(
+    diff_model = load_zimage_rlaif(
         FP8_WEIGHTS,
         device=device,
         dtype=dtype,
         compile_model=True,
         fuse=True,
+        use_sage=True,
     )
     _log(f"  VRAM after model load: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
-    # Build set of remaining identities for fast lookup
     remaining_identities = {trajectory_identity(spec) for spec in remaining}
 
     prompts = MULTI_PROMPTS
@@ -430,8 +390,6 @@ def phase2_generate_and_persist(
     timing_per_res: dict[str, dict] = {}
     trajectory_metadata: list[dict] = []  # metadata-only (no tensors)
 
-    # Open the DatasetWriter for the entire generation loop.
-    # On resume this appends to the existing dataset.
     dataset_dir.mkdir(parents=True, exist_ok=True)
 
     with DatasetWriter(str(dataset_dir)) as writer:
@@ -451,9 +409,7 @@ def phase2_generate_and_persist(
             sparse_steps_list = spec["sparse_steps"]
             tier_label = spec["resolution_tier"]
 
-            # Skip already-completed trajectories
             if identity not in remaining_identities:
-                # Still record metadata for later phases
                 trajectory_metadata.append({
                     "metadata": {
                         "prompt": prompt,
@@ -471,11 +427,7 @@ def phase2_generate_and_persist(
                 })
                 continue
 
-            # Switch attention backend if needed
             if backend != current_backend:
-                set_attention_backend(backend)
-                if backend == "sage":
-                    configure_sage_attention(qk_quant="int8", pv_quant="bf16")
                 current_backend = backend
                 _log(f"      Attention backend: {backend}")
 
@@ -487,7 +439,7 @@ def phase2_generate_and_persist(
             t_traj = time.perf_counter()
 
             result_tensors, meta = rollout(
-                model=diff_compiled,
+                model=diff_model,
                 pos_cond=pos_cond,
                 neg_cond=neg_c,
                 seed=seed,
@@ -504,15 +456,12 @@ def phase2_generate_and_persist(
             dt = time.perf_counter() - t_traj
             gen_count += 1
 
-            # Extract per-step sigma values from rollout metadata.
             step_sigmas = meta.get("step_sigmas", {})
 
-            # Compute per-step logSNR values from sigmas
             step_logsnrs: dict[str, float] = {}
             for step_key, sigma_val in step_sigmas.items():
                 step_logsnrs[step_key] = _sigma_to_logsnr(sigma_val)
 
-            # Build metadata for V2 dataset
             traj_metadata = {
                 "prompt": prompt,
                 "prompt_idx": prompt_idx,
@@ -536,12 +485,10 @@ def phase2_generate_and_persist(
                 "step_selection": spec["step_selection"],
             }
 
-            # Move tensors to CPU and write to dataset immediately
             cpu_tensors = {k: v.cpu() for k, v in result_tensors.items()}
             del result_tensors
             torch.cuda.empty_cache()
 
-            # STREAMING WRITE: persist this trajectory to disk NOW
             traj_id = writer.add_trajectory(
                 tensors=cpu_tensors,
                 metadata=traj_metadata,
@@ -549,26 +496,22 @@ def phase2_generate_and_persist(
             del cpu_tensors  # free CPU RAM immediately
             new_since_flush += 1
 
-            # Flush every 10 newly-written trajectories
             if new_since_flush >= 10:
                 writer.flush()
                 _log(f"    Flushed after {gen_count} new trajectories (traj_id up to {traj_id})")
                 new_since_flush = 0
 
-            # Update step_sigmas sidecar incrementally
             if step_sigmas:
                 update_step_sigmas_sidecar(
                     sidecar_path, traj_id, step_sigmas, step_logsnrs,
                 )
 
-            # Record metadata for later phases
             trajectory_metadata.append({
                 "metadata": traj_metadata,
                 "width": width,
                 "height": height,
             })
 
-            # Track timing per resolution
             res_key = f"{width}x{height}"
             if res_key not in timing_per_res:
                 timing_per_res[res_key] = {"count": 0, "total_s": 0.0}
@@ -578,15 +521,12 @@ def phase2_generate_and_persist(
             _log(f"    [{gen_count}/{len(remaining)}] {width}x{height} {backend} "
                  f"seed={seed} prompt={prompt_idx} ({dt:.1f}s) -> traj_id={traj_id}")
 
-        # Final flush to ensure no orphaned WIP data
         if new_since_flush > 0:
             writer.flush()
             _log(f"    Final flush: {new_since_flush} trajectories")
 
-    # DatasetWriter.__exit__ seals remaining blob and writes final index
 
-    # Free diffusion model (both raw and compiled wrapper)
-    del diff_compiled, diff_model
+    del diff_model, diff_model
     torch.cuda.empty_cache()
 
     elapsed = time.perf_counter() - t0
@@ -629,14 +569,8 @@ def _build_metadata_from_plan(plan: list[dict]) -> list[dict]:
     return metadata
 
 
-# Phase 3 (persist) has been merged into phase2_generate_and_persist.
-# Each trajectory is written to disk immediately after generation.
-# See the "streaming write-through" architecture in phase2_generate_and_persist.
 
 
-# ---------------------------------------------------------------------------
-# Phase 4: VAE decode + render
-# ---------------------------------------------------------------------------
 
 def phase4_render(
     trajectories: list[dict],
@@ -670,7 +604,6 @@ def phase4_render(
             _log(f"    [{i}] No final latent, skipping render")
             continue
 
-        # Ensure (1, C, H, W)
         if final_latent.dim() == 3:
             final_latent = final_latent.unsqueeze(0)
 
@@ -703,9 +636,6 @@ def phase4_render(
     return rendered
 
 
-# ---------------------------------------------------------------------------
-# Phase 4b: VAE decode + render (from persisted dataset, not in-memory)
-# ---------------------------------------------------------------------------
 
 def phase4_render_from_dataset(
     dataset_dir: Path,
@@ -745,7 +675,6 @@ def phase4_render_from_dataset(
     _log(f"  VRAM after VAE load: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
     _log(f"  Intermediate renders: {n_intermediates} cleanest non-final steps per trajectory")
 
-    # Read back from persisted dataset
     reader = DatasetReader(str(dataset_dir))
     n_traj = len(reader)
     _log(f"  Dataset has {n_traj} trajectories")
@@ -756,7 +685,6 @@ def phase4_render_from_dataset(
         meta_db, accessor = reader[i]
         meta = trajectory_metadata[i]["metadata"] if i < len(trajectory_metadata) else meta_db
 
-        # Load final latent from dataset
         avail = accessor.available_steps
         if "final" not in avail:
             _log(f"    [{i}] No final step, skipping render")
@@ -769,7 +697,6 @@ def phase4_render_from_dataset(
         prompt_idx = meta["prompt_idx"]
         step_sigmas = meta.get("step_sigmas", {})
 
-        # --- Render "final" ---
         final_latent = accessor["final"]
         if final_latent.dim() == 3:
             final_latent = final_latent.unsqueeze(0)
@@ -789,19 +716,13 @@ def phase4_render_from_dataset(
 
         del final_latent
 
-        # --- Render near-clean intermediate steps ---
-        # Find non-final step keys that have sigma values, sort by sigma ascending
-        # (lowest sigma = highest logSNR = cleanest).
         nonfinal_steps = [k for k in avail if k != "final" and k in step_sigmas]
         if nonfinal_steps:
-            # Sort by sigma value ascending (cleanest first)
             nonfinal_steps.sort(key=lambda k: step_sigmas[k])
-            # Take the n_intermediates cleanest
             to_render = nonfinal_steps[:n_intermediates]
 
             for step_key in to_render:
                 sigma_val = step_sigmas[step_key]
-                # Extract step number from key like "step_04" -> "04"
                 step_num = step_key.replace("step_", "")
                 int_fname = (
                     f"mr_{w}x{h}_{backend}_p{prompt_idx}_s{seed}"
@@ -841,9 +762,6 @@ def phase4_render_from_dataset(
     return rendered
 
 
-# ---------------------------------------------------------------------------
-# Phase 5b: Verification (from dataset on disk, not in-memory tensors)
-# ---------------------------------------------------------------------------
 
 def phase5_verify_from_dataset(
     trajectory_metadata: list[dict],
@@ -871,7 +789,6 @@ def phase5_verify_from_dataset(
         "all_passed": True,
     }
 
-    # Resolution and backend distribution from metadata
     res_counts = Counter()
     backend_counts = Counter()
     for traj in trajectory_metadata:
@@ -885,7 +802,6 @@ def phase5_verify_from_dataset(
     _log(f"  Resolution distribution: {dict(res_counts)}")
     _log(f"  Backend distribution: {dict(backend_counts)}")
 
-    # Verify latent shapes and validity by reading from dataset
     n_shape_ok = 0
     n_shape_fail = 0
     n_valid_finals = 0
@@ -916,7 +832,6 @@ def phase5_verify_from_dataset(
                 checked_res.add(res_key)
                 _log(f"    traj {traj_id}: {res_key}, steps={avail}")
 
-            # Check final latent validity
             if "final" in avail:
                 final = accessor["final"]
                 t = final.squeeze(0) if final.dim() == 4 else final
@@ -955,7 +870,6 @@ def phase5_verify_from_dataset(
     _log(f"  Latent shape checks: {n_shape_ok} OK, {n_shape_fail} FAIL")
     _log(f"  Final latent validity: {n_valid_finals} valid, {n_invalid_finals} invalid")
 
-    # Verify renders exist on disk
     n_renders_exist = sum(1 for p in rendered if os.path.exists(p))
     report["n_renders_on_disk"] = n_renders_exist
     _log(f"  Renders on disk: {n_renders_exist}/{len(rendered)}")
@@ -966,9 +880,6 @@ def phase5_verify_from_dataset(
     return report
 
 
-# ---------------------------------------------------------------------------
-# Phase 6b: Bin packing analysis (from metadata only)
-# ---------------------------------------------------------------------------
 
 def phase6_packing_analysis_from_metadata(trajectory_metadata: list[dict]) -> dict:
     """Run bin packing analysis on metadata only (no tensors needed).
@@ -1037,9 +948,6 @@ def phase6_packing_analysis_from_metadata(trajectory_metadata: list[dict]) -> di
     return analysis
 
 
-# ---------------------------------------------------------------------------
-# Phase 5: Verification (LEGACY -- kept for reference)
-# ---------------------------------------------------------------------------
 
 def phase5_verify(trajectories: list[dict], dataset_dir: Path, rendered: list[str]) -> dict:
     """Verify generated data integrity.
@@ -1060,7 +968,6 @@ def phase5_verify(trajectories: list[dict], dataset_dir: Path, rendered: list[st
         "all_passed": True,
     }
 
-    # Resolution distribution
     res_counts = Counter()
     backend_counts = Counter()
     for traj in trajectories:
@@ -1074,7 +981,6 @@ def phase5_verify(trajectories: list[dict], dataset_dir: Path, rendered: list[st
     _log(f"  Resolution distribution: {dict(res_counts)}")
     _log(f"  Backend distribution: {dict(backend_counts)}")
 
-    # Verify latent shapes
     expected_shapes = {
         256: (16, 256 // 8, 256 // 8),   # (16, 32, 32)
         512: (16, 512 // 8, 512 // 8),   # (16, 64, 64)
@@ -1090,7 +996,6 @@ def phase5_verify(trajectories: list[dict], dataset_dir: Path, rendered: list[st
         expected = (16, h // 8, w // 8)
 
         for step_key, tensor in traj["tensors"].items():
-            # Squeeze batch dim if present
             t = tensor.squeeze(0) if tensor.dim() == 4 else tensor
             actual = tuple(t.shape)
 
@@ -1112,7 +1017,6 @@ def phase5_verify(trajectories: list[dict], dataset_dir: Path, rendered: list[st
 
     _log(f"  Latent shape checks: {n_shape_ok} OK, {n_shape_fail} FAIL")
 
-    # Verify final latents are not all zeros or NaN
     n_valid_finals = 0
     n_invalid_finals = 0
 
@@ -1122,12 +1026,10 @@ def phase5_verify(trajectories: list[dict], dataset_dir: Path, rendered: list[st
             n_invalid_finals += 1
             continue
 
-        # Check not all zeros
         if final.abs().max().item() < 1e-10:
             n_invalid_finals += 1
             report["all_passed"] = False
             _log(f"    WARNING: traj has all-zero final latent")
-        # Check not NaN
         elif torch.isnan(final).any():
             n_invalid_finals += 1
             report["all_passed"] = False
@@ -1140,12 +1042,10 @@ def phase5_verify(trajectories: list[dict], dataset_dir: Path, rendered: list[st
 
     _log(f"  Final latent validity: {n_valid_finals} valid, {n_invalid_finals} invalid")
 
-    # Verify renders exist on disk
     n_renders_exist = sum(1 for p in rendered if os.path.exists(p))
     report["n_renders_on_disk"] = n_renders_exist
     _log(f"  Renders on disk: {n_renders_exist}/{len(rendered)}")
 
-    # Verify V2 dataset can be read back
     try:
         from futudiffu.dataset_v2 import DatasetReader
         reader = DatasetReader(str(dataset_dir))
@@ -1157,7 +1057,6 @@ def phase5_verify(trajectories: list[dict], dataset_dir: Path, rendered: list[st
             _log(f"    WARNING: expected {len(trajectories)}, got {n_read}")
             report["all_passed"] = False
 
-        # Spot check: read first trajectory of each resolution
         checked_res = set()
         for traj_id in range(n_read):
             meta, accessor = reader[traj_id]
@@ -1180,9 +1079,6 @@ def phase5_verify(trajectories: list[dict], dataset_dir: Path, rendered: list[st
     return report
 
 
-# ---------------------------------------------------------------------------
-# Phase 6: Bin packing analysis
-# ---------------------------------------------------------------------------
 
 def phase6_packing_analysis(trajectories: list[dict]) -> dict:
     """Run bin packing analysis on the generated data to verify non-degeneracy.
@@ -1204,7 +1100,6 @@ def phase6_packing_analysis(trajectories: list[dict]) -> dict:
 
     scheduler = BinPackScheduler()
 
-    # Build items for packing
     items = []
     for traj in trajectories:
         w = traj["width"]
@@ -1225,19 +1120,16 @@ def phase6_packing_analysis(trajectories: list[dict]) -> dict:
     _log(f"  Utilization: {efficiency['utilization']:.1%}")
     _log(f"  Sparse compute ratio: {efficiency['sparse_compute_ratio']:.4f}")
 
-    # Per-bin breakdown
     bin_sizes = Counter(len(b) for b in bins)
     _log(f"  Bin size distribution:")
     for size in sorted(bin_sizes):
         _log(f"    {size} items/bin: {bin_sizes[size]} bins")
 
-    # Show first few bins
     for i, b in enumerate(bins[:min(5, len(bins))]):
         desc = ", ".join(f"{item['resolution']}({item['seq_len']})" for item in b)
         used = sum(item["seq_len"] for item in b)
         _log(f"    bin {i}: [{desc}] = {used}/{REFERENCE_TOTAL_LEN} ({used/REFERENCE_TOTAL_LEN:.0%})")
 
-    # Key metric: bins with multiple items (demonstrates packing value)
     multi_item_bins = sum(1 for b in bins if len(b) > 1)
     _log(f"\n  Multi-item bins (packing exercised): {multi_item_bins}/{len(bins)}")
 
@@ -1255,14 +1147,10 @@ def phase6_packing_analysis(trajectories: list[dict]) -> dict:
     return analysis
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 def main() -> int:
     args = _parse_args()
 
-    # Parse --sparse-steps override if provided
     sparse_steps_override: set[int] | None = None
     if args.sparse_steps is not None:
         sparse_steps_override = set(int(x.strip()) for x in args.sparse_steps.split(","))
@@ -1297,38 +1185,27 @@ def main() -> int:
     else:
         _log(f"  Step selection: logSNR-uniform, {N_SAVE} steps per trajectory")
 
-    # Phase 1: Encode prompts
     prompt_cache = phase1_encode_prompts(device, dtype)
 
-    # Phase 2: Generate + persist (streaming write-through, merged Phases 2+3)
-    # Each trajectory is written to disk immediately after generation.
-    # Step sigmas sidecar is updated incrementally alongside.
-    # Resumability: existing trajectories are detected and skipped.
     dataset_dir, trajectory_metadata, n_generated = phase2_generate_and_persist(
         prompt_cache, device, dtype, sparse_steps_override=sparse_steps_override,
     )
 
     n_trajectories_total = len(trajectory_metadata)
 
-    # Phase 4: VAE decode + render (loads from persisted dataset, not memory)
     rendered = phase4_render_from_dataset(dataset_dir, trajectory_metadata, device, dtype)
 
-    # Phase 5: Verification (uses metadata + dataset on disk)
     verification = phase5_verify_from_dataset(trajectory_metadata, dataset_dir, rendered)
 
-    # Phase 6: Bin packing analysis (uses metadata only, no tensors)
     packing = phase6_packing_analysis_from_metadata(trajectory_metadata)
 
-    # Save generation report
     wall_total = time.perf_counter() - wall_start
-    # Build resolution summary from actual trajectory metadata
     res_tier_summary = Counter()
     for tm in trajectory_metadata:
         w, h = tm["width"], tm["height"]
         tier = tm["metadata"].get("resolution_tier", "unknown")
         res_tier_summary[f"{w}x{h} ({tier})"] += 1
 
-    # Count intermediate renders separately
     intermediates_dir = RENDER_DIR / "intermediates"
     n_intermediate_renders = len(list(intermediates_dir.glob("*.png"))) if intermediates_dir.exists() else 0
     n_final_renders = len(rendered) - n_intermediate_renders

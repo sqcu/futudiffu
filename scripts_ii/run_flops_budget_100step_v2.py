@@ -36,9 +36,6 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 import torch
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
 
 FP8_PATH = r"F:\dox\ai\comfyui\ComfyUI\models\diffusion_models\z_image_fp8_blockwise.safetensors"
 TE_PATH = r"F:\dox\ai\comfyui\ComfyUI\models\text_encoders\qwen_3_4b.safetensors"
@@ -78,9 +75,6 @@ def main():
     print(f"  Output: {OUTPUT_DIR}")
     print("=" * 70)
 
-    # ==================================================================
-    # Verify logSNR defaults before anything else
-    # ==================================================================
     from src_ii.pair_sampler import logsnr_sampling_weight, logsnr_sampling_logit
     import inspect
 
@@ -101,7 +95,6 @@ def main():
     assert threshold_logit == 10.0
     assert decay_logit == 0.5
 
-    # Quick verification: sigma=0 weight should be 1.0
     w_sigma0 = logsnr_sampling_weight(0.0)
     w_sigma_clean = logsnr_sampling_weight(0.034)  # step_29 at 1280x832
     w_sigma_noisy = logsnr_sampling_weight(0.867)  # step_04 at 1280x832
@@ -111,9 +104,6 @@ def main():
     print(f"  [VERIFY] Clean/noisy ratio: {w_sigma_clean/w_sigma_noisy:.2f}x (expected ~4.25x)")
     print(f"  LogSNR defaults VERIFIED.\n")
 
-    # ==================================================================
-    # Phase 1: Load dataset + build pair sampler with FLOPS weights
-    # ==================================================================
     print("=" * 60)
     print("  Phase 1: Loading multi-res V2 dataset")
     print("=" * 60)
@@ -133,14 +123,12 @@ def main():
         print(f"  ERROR: Need at least 10 trajectories, have {n_available}")
         return 1
 
-    # Use all available trajectories
     traj_ids = list(range(n_available))
     print(f"  Using all {len(traj_ids)} trajectories")
 
     positions = build_positions_from_v2(reader, traj_ids=traj_ids)
     print(f"  Positions: {len(positions)} across {len(traj_ids)} trajectories")
 
-    # Resolution distribution
     res_dist = {}
     for pos in positions:
         key = f"{pos.width}x{pos.height}"
@@ -149,7 +137,6 @@ def main():
     for rk in sorted(res_dist.keys()):
         print(f"    {rk}: {res_dist[rk]} positions")
 
-    # Verify sigma=0.0 for final positions
     final_positions = [p for p in positions if p.step_key == "final"]
     n_final_correct = sum(1 for p in final_positions if p.sigma == 0.0)
     print(f"  Final positions: {len(final_positions)} total, "
@@ -158,7 +145,6 @@ def main():
     assert n_final_correct == len(final_positions), \
         f"Final positions must have sigma=0.0, but {len(final_positions) - n_final_correct} do not"
 
-    # Compute FLOPS weights
     flops_weights = compute_flops_sampling_weights_from_positions(positions)
 
     traj_resolutions = {}
@@ -169,7 +155,6 @@ def main():
     print(f"  FLOPS weights summary:")
     print(f"    {json.dumps(flops_summary, indent=4)}")
 
-    # Check non-degeneracy
     unique_weights = set(round(w, 8) for w in flops_weights.values())
     print(f"  Unique FLOPS weight values: {len(unique_weights)} "
           f"(degenerate={len(unique_weights) <= 1})")
@@ -185,7 +170,6 @@ def main():
     print(f"  Populated tiers: {sampler.populated_tiers}")
     print(f"  Tier trajectory counts: {sampler.tier_trajectory_counts}")
 
-    # Quick validation of macrobatch sampling
     test_macro = sampler.sample_macrobatch(
         budget_units=MACROBATCH_BUDGET,
         tier_flops_targets={1048576: 0.33},
@@ -197,9 +181,6 @@ def main():
           f"{test_consumed:.3f} FLOPS consumed, "
           f"{test_cross} cross-resolution")
 
-    # ==================================================================
-    # Phase 2: Encode prompts with text encoder (then free)
-    # ==================================================================
     print("\n" + "=" * 60)
     print("  Phase 2: Encoding prompts")
     print("=" * 60)
@@ -225,9 +206,6 @@ def main():
     vram_after_te_free = torch.cuda.memory_allocated() / 1e9
     print(f"  TE freed. VRAM: {vram_after_te_free:.2f} GB")
 
-    # ==================================================================
-    # Phase 3: Load FP8 backbone + create BTRMCompoundModel
-    # ==================================================================
     print("\n" + "=" * 60)
     print("  Phase 3: Loading backbone + creating BTRM compound model")
     print("=" * 60)
@@ -237,9 +215,7 @@ def main():
     from src_ii.multi_lora import get_adapter_params
     from src_ii.sigma_schedule import build_sigma_schedule, resolution_shift
 
-    # compile_model=False is CORRECT here: whole-model torch.compile is
-    # incompatible with per-block gradient checkpointing.
-    _, raw_model = load_zimage_rlaif(
+    raw_model = load_zimage_rlaif(
         FP8_PATH, device=device, dtype=dtype,
         compile_model=False, fuse=True,
     )
@@ -263,9 +239,6 @@ def main():
     vram_after_btrm = torch.cuda.memory_allocated() / 1e9
     print(f"  VRAM after BTRM: {vram_after_btrm:.2f} GB")
 
-    # ==================================================================
-    # Build load_latent_fn (FIXED: sigma=0.0 for "final" positions)
-    # ==================================================================
     _v2_meta_cache = {}
 
     def _get_v2_meta(traj_id):
@@ -294,9 +267,6 @@ def main():
             n_steps_traj, sampling_shift=shift, device="cpu", dtype=torch.float32,
         )
 
-        # FIXED: "final" position is the fully denoised output -> sigma=0.0
-        # The v1 script used sigmas[-2] here, which is the last step's INPUT
-        # sigma, NOT the final image's sigma.
         if step_key == "final":
             sigma_val = 0.0
         else:
@@ -315,12 +285,10 @@ def main():
 
         return latent, timestep, cond, num_tokens
 
-    # Validate load_latent_fn
     test_key = (traj_ids[0], positions[0].step_key)
     lat, ts, cond, nt = load_latent_fn(test_key)
     print(f"  Test load: latent={lat.shape}, timestep={ts.shape}, cond={cond.shape}")
 
-    # Verify final position sigma
     test_final_key = (traj_ids[0], "final")
     _, ts_final, _, _, _ = load_latent_fn(test_final_key)
     final_sigma = ts_final.item()
@@ -331,9 +299,6 @@ def main():
     del lat, ts, cond, ts_final
     torch.cuda.empty_cache()
 
-    # ==================================================================
-    # Build preference function (deterministic sigma-based)
-    # ==================================================================
     def preference_fn(pair: dict) -> dict:
         """Deterministic preference: cleaner image (lower sigma) wins."""
         prefs = {}
@@ -348,14 +313,8 @@ def main():
                 prefs[pref_key] = 0   # tie
         return prefs
 
-    # ==================================================================
-    # Collect logSNR data for all sampled positions (for Chart 09)
-    # ==================================================================
     sampled_logsnr_values = []  # populated during training via callback
 
-    # ==================================================================
-    # Phase 4: Run 100-step FLOPS-budget training
-    # ==================================================================
     print("\n" + "=" * 60)
     print(f"  Phase 4: FLOPS-budget training ({N_STEPS} steps)")
     print(f"  macrobatch_budget={MACROBATCH_BUDGET}, "
@@ -372,8 +331,6 @@ def main():
         head_names=HEAD_NAMES,
     )
 
-    # Incremental JSONL writer: each step is written to disk immediately.
-    # If the process crashes, all completed steps are recoverable.
     curve_writer = TrainingCurveWriter(OUTPUT_DIR / "training_curve.jsonl")
 
     t_train_start = time.perf_counter()
@@ -396,10 +353,8 @@ def main():
         output_dir=str(OUTPUT_DIR),
         artifacts=artifacts,
         checkpoint_steps=CHECKPOINT_STEPS,
-        # FLOPS-budget specific parameters:
         macrobatch_budget=MACROBATCH_BUDGET,
         macrobatch_cross_resolution=MACROBATCH_CROSS_RES,
-        # Incremental persistence parameters:
         curve_writer=curve_writer,
         val_metrics_save_interval=10,
         summary_path=str(OUTPUT_DIR / "run_summary.json"),
@@ -413,9 +368,6 @@ def main():
     print(f"\n  Training complete: {train_time:.1f}s "
           f"({train_time / N_STEPS:.1f}s/step)")
 
-    # ==================================================================
-    # Phase 5: Generate standard analysis (charts 01-05 + funfetti 06-11)
-    # ==================================================================
     print("\n" + "=" * 60)
     print("  Phase 5: Generating standard analysis + charts")
     print("=" * 60)
@@ -445,13 +397,9 @@ def main():
     report_path = artifacts.generate_analysis(run_config=run_config)
     print(f"  Standard analysis generated: {report_path}")
 
-    # Persist the model
     persist_info = persist_btrm(raw_model, "rtheta", str(OUTPUT_DIR))
     print(f"  Model persisted: {persist_info}")
 
-    # ==================================================================
-    # Phase 5b: Generate v2-specific charts (Charts 05-10 renamed)
-    # ==================================================================
     print("\n" + "=" * 60)
     print("  Phase 5b: Generating v2-specific charts")
     print("=" * 60)
@@ -462,9 +410,6 @@ def main():
     _generate_v2_charts(training_curve, charts_dir, positions, sampler)
     print(f"  v2 charts saved to {charts_dir}")
 
-    # ==================================================================
-    # Phase 6: Exemplar image rendering (VAE decode)
-    # ==================================================================
     print("\n" + "=" * 60)
     print("  Phase 6: Rendering exemplar images")
     print("=" * 60)
@@ -473,16 +418,9 @@ def main():
     try:
         from src_ii.exemplar_renderer import render_exemplars_from_model
 
-        # Pick images across diverse sigma values for exemplar scoring.
-        # Scoring ONLY "final" (sigma=0) images means both heads see the
-        # same "clean image" signal, producing identical rankings.
-        # Including images at different noise levels (different step indices)
-        # lets heads produce divergent rankings -- the pinkify head may
-        # prefer different noisy images than the thisnotthat head.
         sample_keys = []
         seen_keys = set()  # (traj_id, step_key) dedup
 
-        # Layer 1: final positions from diverse trajectories (clean, sigma=0)
         for pos in positions:
             if pos.step_key == "final" and (pos.traj_id, pos.step_key) not in seen_keys:
                 sample_keys.append((pos.traj_id, pos.step_key))
@@ -490,7 +428,6 @@ def main():
             if len(sample_keys) >= 12:
                 break
 
-        # Layer 2: near-clean positions (step_29, low sigma)
         for pos in positions:
             if pos.step_key == "step_29" and (pos.traj_id, pos.step_key) not in seen_keys:
                 sample_keys.append((pos.traj_id, pos.step_key))
@@ -498,7 +435,6 @@ def main():
             if len(sample_keys) >= 18:
                 break
 
-        # Layer 3: moderately noisy positions (step_14, mid sigma)
         for pos in positions:
             if pos.step_key == "step_14" and (pos.traj_id, pos.step_key) not in seen_keys:
                 sample_keys.append((pos.traj_id, pos.step_key))
@@ -506,7 +442,6 @@ def main():
             if len(sample_keys) >= 24:
                 break
 
-        # Layer 4: noisy positions (step_04, high sigma)
         for pos in positions:
             if pos.step_key == "step_04" and (pos.traj_id, pos.step_key) not in seen_keys:
                 sample_keys.append((pos.traj_id, pos.step_key))
@@ -535,22 +470,17 @@ def main():
         import traceback
         traceback.print_exc()
 
-    # ==================================================================
-    # Phase 7: Final summary
-    # ==================================================================
     print("\n" + "=" * 60)
     print("  Phase 7: Summary")
     print("=" * 60)
 
     wall_total = time.perf_counter() - wall_start
 
-    # Compute training statistics
     losses = [e.get("loss", e.get("bt_loss", 0.0)) for e in training_curve]
     grad_norms_pre = [e.get("pre_clip_grad_norm", 0.0) for e in training_curve]
     grad_norms_post = [e.get("grad_norm", 0.0) for e in training_curve]
     step_times = [e.get("time_s", 0.0) for e in training_curve]
 
-    # FLOPS-budget specific: per-step pair counts, bin counts, consumed FLOPS
     n_pairs_per_step = []
     n_bins_per_step = []
     consumed_per_step = []
@@ -562,7 +492,6 @@ def main():
         consumed_per_step.append(fm.get("macrobatch_consumed", 0.0))
         n_cross_res_per_step.append(fm.get("n_cross_resolution_pairs", 0))
 
-    # Resolution tier distribution from training curve
     from src_ii.flops_sampling import _attention_flops_ratio, _MEGAPIXEL_THRESHOLD
     from src_ii.resolution_sampling import assign_budget_tier, ANCHOR_LABELS
 
@@ -578,7 +507,6 @@ def main():
             all_pixel_counts[px] += 1
             if px not in pixel_to_wh:
                 pixel_to_wh[px] = (res["width"], res["height"])
-        # Per-pair tier info
         for ppr in fm.get("per_pair_resolutions", []):
             wa, ha = ppr.get("width_a", 0), ppr.get("height_a", 0)
             wb, hb = ppr.get("width_b", 0), ppr.get("height_b", 0)
@@ -591,7 +519,6 @@ def main():
 
     total_images = sum(all_pixel_counts.values())
 
-    # FLOPS-normalized resolution breakdown
     total_flops_weighted = 0.0
     mega_flops_weighted = 0.0
     for px, ct in all_pixel_counts.items():
@@ -608,8 +535,6 @@ def main():
     mega_flops_pct = (mega_flops_weighted / total_flops_weighted * 100) if total_flops_weighted > 0 else 0
     small_flops_pct = (small_flops_weighted / total_flops_weighted * 100) if total_flops_weighted > 0 else 0
 
-    # Collect logSNR distribution by sampling from the pair sampler.
-    # This directly shows what the corrected logSNR weighting produces.
     print("  Collecting logSNR distribution sample (1000 pairs)...")
     logsnr_sample_pairs = []
     for _ in range(1000):
@@ -629,7 +554,6 @@ def main():
             else:
                 logsnr_sample_values.append(2.0 * math.log((1.0 - sigma) / sigma))
 
-    # Save logSNR distribution data
     logsnr_dist_data = {
         "n_samples": len(logsnr_sample_values),
         "sigma_values": logsnr_sample_sigmas,
@@ -661,18 +585,15 @@ def main():
         "sampler_stats": sampler.stats(),
         "logsnr_defaults": {"threshold": 10.0, "decay_rate": 0.5},
         "final_sigma_fix": True,
-        # Loss statistics
         "initial_loss": losses[0] if losses else None,
         "final_loss": losses[-1] if losses else None,
         "min_loss": min(losses) if losses else None,
         "max_loss": max(losses) if losses else None,
         "mean_loss": sum(losses) / len(losses) if losses else None,
         "std_loss": _std(losses),
-        # Gradient norms
         "mean_grad_norm_pre": sum(grad_norms_pre) / max(len(grad_norms_pre), 1),
         "max_grad_norm_pre": max(grad_norms_pre) if grad_norms_pre else None,
         "mean_grad_norm_post": sum(grad_norms_post) / max(len(grad_norms_post), 1),
-        # FLOPS-budget statistics
         "flops_budget_stats": fb_stats,
         "mean_pairs_per_step": sum(n_pairs_per_step) / max(len(n_pairs_per_step), 1),
         "min_pairs_per_step": min(n_pairs_per_step) if n_pairs_per_step else 0,
@@ -685,25 +606,20 @@ def main():
         "max_consumed_per_step": max(consumed_per_step) if consumed_per_step else 0,
         "total_cross_res_pairs": sum(n_cross_res_per_step),
         "mean_cross_res_per_step": sum(n_cross_res_per_step) / max(len(n_cross_res_per_step), 1),
-        # Resolution statistics
         "total_images_sampled": total_images,
         "mega_flops_pct": mega_flops_pct,
         "small_flops_pct": small_flops_pct,
         "tier_pair_counts": {str(k): v for k, v in sorted(tier_pair_counts.items())},
-        # logSNR distribution
         "logsnr_sigma0_fraction": logsnr_dist_data["sigma_0_fraction"],
         "logsnr_mean": sum(logsnr_sample_values) / len(logsnr_sample_values) if logsnr_sample_values else 0,
-        # Step timing
         "step0_time_s": step_times[0] if step_times else None,
         "mean_steady_state_time_s": sum(step_times[1:]) / max(len(step_times) - 1, 1) if len(step_times) > 1 else None,
-        # Model info
         "exemplars_rendered": exemplars_rendered,
         "n_adapter_params": n_adapter,
         "n_head_params": n_head,
         "end_time": datetime.now(timezone.utc).isoformat(),
     }
 
-    # Per-head accuracy summary
     for name in HEAD_NAMES:
         accs = [e.get(f"accuracy_{name}", 0.0) for e in training_curve]
         if accs:
@@ -711,17 +627,10 @@ def main():
             last_20 = accs[-20:]
             summary[f"last_20_accuracy_{name}"] = sum(last_20) / len(last_20)
 
-    # Overwrite the incremental summary with the detailed end-of-run version.
-    # The training loop wrote partial summaries at checkpoint steps; this
-    # final write includes script-level statistics (sampler stats, resolution
-    # distributions, etc.) that the training loop does not have access to.
     summary_out_path = OUTPUT_DIR / "run_summary.json"
     with open(str(summary_out_path), "w") as f:
         json.dump(summary, f, indent=2, default=str)
 
-    # Save training curve as JSON for backward compatibility.
-    # The canonical incremental version is training_curve.jsonl (written
-    # per-step during training). This JSON dump is a convenience copy.
     curve_path = OUTPUT_DIR / "training_curve.json"
     with open(str(curve_path), "w") as f:
         json.dump(training_curve, f, indent=2, default=str)
@@ -748,7 +657,6 @@ def main():
     print(f"  Exemplars: {'rendered' if exemplars_rendered else 'FAILED'}")
     print(f"  Output: {OUTPUT_DIR}")
 
-    # Cleanup
     reader.close()
     torch.cuda.empty_cache()
 
@@ -759,9 +667,6 @@ def main():
     return 0
 
 
-# ---------------------------------------------------------------------------
-# v2-specific chart generation
-# ---------------------------------------------------------------------------
 
 def _generate_v2_charts(training_curve, charts_dir, positions, sampler):
     """Generate the 10 requested charts with proper axis scales.
@@ -777,21 +682,15 @@ def _generate_v2_charts(training_curve, charts_dir, positions, sampler):
     steps = [e["step"] for e in training_curve]
     losses = [e.get("loss", e.get("bt_loss", 0.0)) for e in training_curve]
 
-    # -- Chart 01 (override): Loss curve with y-axis 0 to 1.0 for per-term loss --
-    # The standard chart auto-scales, which can hide the loss magnitude.
-    # We want y-axis fixed at [0, 1.0] for the per-term normalized loss.
-    # The `loss` field is already normalized (total_bt / active_heads).
     chart = PILChart()
     chart.set_title(f"flops_budget_100step_v2: Loss per-term (y: 0-1)")
     chart.set_labels("Step", "Loss (per-term avg)")
     ema_losses = _ema(losses, alpha=0.1)
     chart.add_scatter(steps, losses, color="#bbddff", label="raw loss", size=2)
     chart.add_line(steps, ema_losses, color="#1155cc", label="EMA(0.1)", line_width=2)
-    # Add horizontal reference at random chance (ln(2) ~ 0.693)
     chart.add_line([0, max(steps)], [0.693, 0.693], color="#cccccc", label="random (ln2)", style="dashed")
     chart.save(str(charts_dir / "01_loss_curve_bounded.png"))
 
-    # -- Chart 02 (override): Per-head accuracy with y-axis 0-100% --
     chart = PILChart()
     chart.set_title("flops_budget_100step_v2: Per-Head Accuracy (%)")
     chart.set_labels("Step", "Accuracy (%)")
@@ -805,7 +704,6 @@ def _generate_v2_charts(training_curve, charts_dir, positions, sampler):
     chart.add_line([0, max(steps)], [50.0, 50.0], color="#cccccc", label="random (50%)", style="dashed")
     chart.save(str(charts_dir / "02_per_head_accuracy_bounded.png"))
 
-    # -- Chart 03 (override): Gradient norms (pre-clip AND post-clip) --
     grad_norms_pre = [e.get("pre_clip_grad_norm", 0.0) for e in training_curve]
     grad_norms_post = [e.get("grad_norm", 0.0) for e in training_curve]
     chart = PILChart()
@@ -817,7 +715,6 @@ def _generate_v2_charts(training_curve, charts_dir, positions, sampler):
     chart.add_line([0, max(steps)], [GRAD_CLIP, GRAD_CLIP], color="#999999", label=f"clip={GRAD_CLIP}", style="dashed")
     chart.save(str(charts_dir / "03_gradient_norms_dual.png"))
 
-    # -- Chart 05: FLOPS consumed per macrobatch --
     consumed_vals = []
     consumed_steps = []
     for e in training_curve:
@@ -836,7 +733,6 @@ def _generate_v2_charts(training_curve, charts_dir, positions, sampler):
                        color="#cc1111", label=f"budget={MACROBATCH_BUDGET}", style="dashed")
         chart.save(str(charts_dir / "05_flops_consumed.png"))
 
-    # -- Chart 06: Pairs per macrobatch --
     pairs_vals = []
     pairs_steps = []
     for e in training_curve:
@@ -853,7 +749,6 @@ def _generate_v2_charts(training_curve, charts_dir, positions, sampler):
         chart.add_line(pairs_steps, _ema(pairs_vals, 0.15), color="#cc7711", label="EMA(0.15)", line_width=2)
         chart.save(str(charts_dir / "06_pairs_per_macrobatch.png"))
 
-    # -- Chart 07: Cross-resolution pair fraction --
     cross_fracs = []
     cross_steps = []
     for e in training_curve:
@@ -872,7 +767,6 @@ def _generate_v2_charts(training_curve, charts_dir, positions, sampler):
         chart.add_line([0, max(cross_steps)], [30.0, 30.0], color="#999999", label="target 30%", style="dashed")
         chart.save(str(charts_dir / "07_cross_res_fraction.png"))
 
-    # -- Chart 08: Resolution tier distribution of sampled pairs --
     tier_pair_counts = Counter()
     for entry in training_curve:
         fm = entry.get("funfetti")
@@ -904,14 +798,11 @@ def _generate_v2_charts(training_curve, charts_dir, positions, sampler):
             chart.add_line(xs, tier_fracs, color="#7722cc", line_width=2)
         chart.save(str(charts_dir / "08_resolution_tier_distribution.png"))
 
-        # Save tier mapping for reference
         tier_map = {str(i): {"label": t, "count": tier_pair_counts[t], "pct": tier_fracs[i]}
                     for i, t in enumerate(sorted_tiers)}
         with open(str(charts_dir.parent / "tier_distribution.json"), "w") as f:
             json.dump(tier_map, f, indent=2)
 
-    # -- Chart 09: logSNR distribution of sampled positions --
-    # Sample 2000 positions from the sampler to get logSNR distribution
     logsnr_values = []
     sigma_values = []
     for _ in range(2000):
@@ -927,7 +818,6 @@ def _generate_v2_charts(training_curve, charts_dir, positions, sampler):
                 logsnr_values.append(2.0 * math.log((1.0 - sigma) / sigma))
 
     if logsnr_values:
-        # Create a histogram using PILChart as a scatter plot of binned counts
         n_bins = 30
         min_val = min(logsnr_values)
         max_val = max(logsnr_values)
@@ -939,7 +829,6 @@ def _generate_v2_charts(training_curve, charts_dir, positions, sampler):
             idx = min(int((v - min_val) / bin_width), n_bins - 1)
             bin_counts[idx] += 1
 
-        # Normalize to density
         total_count = len(logsnr_values)
         bin_density = [c / total_count for c in bin_counts]
 
@@ -948,15 +837,11 @@ def _generate_v2_charts(training_curve, charts_dir, positions, sampler):
         chart.set_labels("logSNR (nats)", "Density")
         chart.add_scatter(bin_centers, bin_density, color="#1155cc", label="logSNR density", size=4)
         chart.add_line(bin_centers, bin_density, color="#1155cc", line_width=2)
-        # Mark sigma=0 (logSNR=+inf, capped at 15)
         sigma0_frac = sum(1 for s in sigma_values if s <= 0) / len(sigma_values)
         chart.add_vline(15.0, color="#cc1111", label=f"sigma=0 ({sigma0_frac:.0%})")
-        # Mark threshold
         chart.add_vline(10.0, color="#999999", label="threshold=10", style="dashed")
         chart.save(str(charts_dir / "09_logsnr_distribution.png"))
 
-    # -- Chart 10: Sampling weight distribution by resolution tier --
-    # Show the logSNR sampling weight for each position, grouped by tier
     from src_ii.pair_sampler import logsnr_sampling_weight
 
     tier_weights_data: dict[str, list[float]] = {}
@@ -979,7 +864,6 @@ def _generate_v2_charts(training_curve, charts_dir, positions, sampler):
             chart.add_line(xs, mean_weights, color="#cc1111", line_width=2)
         chart.save(str(charts_dir / "10_sampling_weight_by_tier.png"))
 
-        # Save tier weight mapping
         tier_weight_map = {str(i): {"label": t, "mean_weight": mean_weights[i],
                                      "n_positions": len(tier_weights_data[t])}
                           for i, t in enumerate(sorted_tier_labels)}
@@ -987,9 +871,6 @@ def _generate_v2_charts(training_curve, charts_dir, positions, sampler):
             json.dump(tier_weight_map, f, indent=2)
 
 
-# ---------------------------------------------------------------------------
-# Helper functions
-# ---------------------------------------------------------------------------
 
 def _std(xs):
     """Standard deviation."""

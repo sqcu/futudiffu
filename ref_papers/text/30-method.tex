@@ -1,0 +1,104 @@
+\section{Reinforcement Learning Training of Diffusion Models}
+\label{sec:algs}
+
+We now describe how RL algorithms can be used to train diffusion models. 
+We present two classes of methods and show that each corresponds to a different mapping of the denoising process to the MDP framework.
+
+\subsection{Problem Statement}
+We assume a pre-existing diffusion model, which may be pretrained or randomly initialized. Assuming a fixed sampler, the diffusion model induces a sample distribution $p_\theta(\bx_0 \mid \bc)$.
+The denoising diffusion RL objective is to maximize a reward signal $r$ defined on the samples and contexts:
+\begin{equation*}
+    \lrl(\theta) = \; \expect{
+        \bc \sim p(\bc),~\bx_0 \sim p_\theta(\bx_0 \mid \bc)
+    }{
+        r(\bx_0, \bc)
+    }
+\end{equation*}
+for some context distribution $p(\bc)$ of our choosing.
+
+
+\subsection{Reward-Weighted Regression}
+\label{sec:rwr}
+To optimize $\lrl$ with minimal changes to standard diffusion model training, we can use the denoising loss $\ldiff$ (Equation~\ref{eq:denoising_objective}), but with training data $\bx_0 \sim p_\theta(\bx_0 \mid \bc)$ and an added weighting that depends on the reward $r(\bx_0, \bc)$.
+\citet{lee2023aligning} describe a single-round version of this procedure for diffusion models, but in general this approach can be performed for multiple rounds of alternating sampling and training, leading to an online RL method.
+We refer to this general class of algorithms as reward-weighted regression (RWR)~\citep{peters2007rwr}.
+
+A standard weighting scheme uses exponentiated rewards to ensure nonnegativity,
+\begin{align*}
+    w_\methodrwr(\bx_0, \bc) = \frac{1}{Z} \exp\big(\beta r(\bx_0, \bc) \big),
+\end{align*}
+where $\beta$ is an inverse temperature and $Z$ is a normalization constant.
+We also consider a simplified weighting scheme that uses binary weights,
+\begin{align*}
+    w_\sparse(\bx_0, \bc) = \mathds{1} \big[ r(\bx_0, \bc) \geq C \big],
+\end{align*}
+where $C$ is a reward threshold determining which samples are used for training.
+In supervised learning terms, this is equivalent to repeated filtered finetuning on training data coming from the model.
+
+Within the RL formalism, the RWR procedure corresponds to the following one-step MDP:
+\begin{align*}
+    \bs \triangleq \bc \hspace{2em}
+    \ba \triangleq \bx_0 \hspace{2em}
+    \pi(\ba \mid \bs) \triangleq p_\theta(\bx_0 \mid \bc) \hspace{2em}
+    \rho_0(\bs) \triangleq p(\bc) \hspace{2em}
+    R(\bs, \ba) \triangleq r(\bx_0, \bc)
+\end{align*}
+with a transition kernel $P$ that immediately leads to an absorbing termination state.
+Therefore, maximizing $\lrl(\theta)$ is equivalent to maximizing the RL objective $\mathcal{J}_\text{RL}(\pi)$ in this MDP.
+
+From RL literature, weighting a log-likelihood objective by $w_\methodrwr$ is known to approximately maximize $\mathcal{J}_{\text{RL}}(\pi)$ subject to a KL divergence constraint on $\pi$ \citep{nair2020accelerating}.
+However, $\ldiff$ (Equation~\ref{eq:denoising_objective}) does not involve an exact log-likelihood --- it is instead derived as a variational bound on $\log p_\theta(\bx_0 \mid \bc)$.
+Therefore, the RWR procedure applied to diffusion model training is not theoretically justified and only optimizes $\lrl$ very approximately.
+
+\subsection{Denoising Diffusion Policy Optimization}
+\label{sec:ddpo}
+
+RWR relies on an approximate log-likelihood because it ignores the sequential nature of the denoising process, only using the final samples $\bx_0$.
+In this section, we show how the denoising process can be reframed as a \emph{multi-step} MDP, allowing us to directly optimize $\lrl$ using policy gradient estimators.
+This follows the derivation in \citet{fan2023sft}, who prove an equivalence between their method and a policy gradient algorithm where the reward is a GAN-like discriminator.
+We present a general framework with an arbitrary reward function, motivated by our desire to optimize arbitrary downstream objectives (Section~\ref{sec:reward_functions}).
+We refer to this class of algorithms as \methodfull{} (\methodours) and present two variants based on specific gradient estimators.
+
+\textbf{Denoising as a multi-step MDP.}~
+We map the iterative denoising procedure to the following MDP:
+\begin{align*}
+    \bs_t &\triangleq (\bc, t, \bx_t) &
+    \pi(\ba_t \mid \bs_t) &\triangleq p_\theta(\bx_{t-1} \mid \bx_t, \bc) &
+    P(\bs_{t+1} \mid \bs_t, \ba_t) &\triangleq \big( \delta_\bc, \delta_{t-1}, \delta_{\bx_{t-1}} \big) \\
+    \ba_t &\triangleq \bx_{t-1} &
+    \rho_0(\bs_0) &\triangleq \big(p(\bc), \delta_T, \mathcal{N}(\bzero, \bI)\big) &
+    R(\bs_t, \ba_t) &\triangleq
+        \begin{cases}
+            r(\bx_0, \bc) & \text{if } t = 0 \\
+            0 & \text{otherwise}
+        \end{cases}
+\end{align*}
+in which $\delta_y$ is the Dirac delta distribution with nonzero density only at $y$.
+Trajectories consist of $T$ timesteps, after which $P$ leads to a termination state.
+The cumulative reward of each trajectory is equal to $r(\bx_0, \bc)$, so maximizing $\lrl(\theta)$ is equivalent to maximizing $\mathcal{J}_\text{RL}(\pi)$ in this MDP.
+
+
+The benefit of this formulation is that if we use a standard sampler with $p_\theta(\bx_{t-1} \mid \bx_t, \bc)$ parameterized as in Equation~\ref{eq:sampler}, the policy $\pi$ becomes an isotropic Gaussian as opposed to the arbitrarily complicated distribution $p_\theta(\bx_0 \mid \bc)$ as it is in the RWR formulation.
+This simplification allows for the evaluation of exact log-likelihoods and their gradients with respect to the diffusion model parameters.
+
+\textbf{Policy gradient estimation.}~
+With access to likelihoods and likelihood gradients, we can make direct Monte Carlo estimates of $\nabla_\theta \lrl$.
+Like RWR, \methodours{} alternates collecting denoising trajectories $\{\bx_T, \bx_{T-1}, \dots, \bx_0\}$ via sampling and updating parameters via gradient descent.
+
+The first variant of \methodours{}, which we call \methodreinforce{}, uses the score function policy gradient estimator, also known as the likelihood ratio method or REINFORCE \citep{williams1992simple,mohamed2020monte}:
+\begin{align}
+    \tag{\methodreinforce}
+    \nabla_\theta \mathcal{J}_\text{DDRL} &= \expect{}{\; \sum_{t=0}^{T} \nabla_\theta \log p_\theta(\bx_{t-1} \mid \bx_t, \bc) \; r(\bx_0, \bc)} \label{eq:score_pg}
+\end{align}
+where the expectation is taken over denoising trajectories generated by the current parameters $\theta$.
+
+However, this estimator only allows for one step of optimization per round of data collection, as the gradient must be computed using data generated by the current parameters.
+To perform multiple steps of optimization, we may use an importance sampling estimator \citep{kakade2002approximately}:
+\begin{align}
+    \tag{\methodppo}
+    \nabla_\theta \mathcal{J}_\text{DDRL} &= \expect{}{\; \sum_{t=0}^{T} \frac{p_\theta (\bx_{t-1} \mid \bx_t, \bc)}{p_{\theta_\text{old}} (\bx_{t-1} \mid \bx_t, \bc)} \; \nabla_\theta \log p_\theta(\bx_{t-1} \mid \bx_t, \bc) \; r(\bx_0, \bc)}
+    \label{eq:is_pg}
+\end{align}
+where the expectation is taken over denoising trajectories generated by the parameters $\theta_\text{old}$.
+This estimator becomes inaccurate if $p_\theta$ deviates too far from $p_{\theta_\text{old}}$, which can be addressed using trust regions \citep{schulman2015trpo} to constrain the size of the update.
+In practice, we implement the trust region via clipping, as in proximal policy optimization \citep{schulman2017ppo}.

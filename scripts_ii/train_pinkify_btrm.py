@@ -37,7 +37,6 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 import torch
 
-# --- Configuration ---
 N_TRAJECTORIES = 10
 FP8_PATH = r"F:\dox\ai\comfyui\ComfyUI\models\diffusion_models\z_image_fp8_blockwise.safetensors"
 TE_PATH = r"F:\dox\ai\comfyui\ComfyUI\models\text_encoders\qwen_3_4b.safetensors"
@@ -45,7 +44,6 @@ TOKENIZER_PATH = str(REPO_ROOT / "src" / "futudiffu" / "tokenizer")
 OUTPUT_DIR = REPO_ROOT / "pinkify_thisnotthat_output"
 LABELS_PATH = OUTPUT_DIR / "preference_labels.json"
 
-# Training hyperparameters
 N_EPOCHS = 40
 LR = 1e-3
 LOGSQUARE_WEIGHT = 0.05
@@ -59,7 +57,6 @@ def main():
     device = torch.device("cuda")
     dtype = torch.bfloat16
 
-    # --- Load preference labels ---
     print("Loading preference labels...")
     with open(LABELS_PATH) as f:
         label_data = json.load(f)
@@ -68,12 +65,10 @@ def main():
     print(f"  {stats['n_pairs']} pairwise labels loaded")
     print(f"  {stats['n_images']} images across {stats['n_trajectories']} trajectories")
 
-    # --- Load per-image scores for indexing ---
     scores_path = OUTPUT_DIR / "per_image_scores.json"
     with open(scores_path) as f:
         per_image_scores = json.load(f)
 
-    # Build an index: (traj_idx, step_key) -> sequential index
     image_index = {}
     for i, entry in enumerate(per_image_scores):
         key = (entry["traj_idx"], entry["step_key"])
@@ -81,13 +76,11 @@ def main():
     n_images = len(per_image_scores)
     print(f"  Image index built: {n_images} entries")
 
-    # --- Load manifest ---
     manifest_path = REPO_ROOT / "btrm_dataset" / "manifest.json"
     with open(manifest_path) as f:
         manifest = json.load(f)
     records = manifest["records"]
 
-    # --- Phase 1: Encode prompts ---
     print("\n=== Phase 1: Encoding prompts ===")
     from futudiffu.text_encoder import create_tokenizer, load_text_encoder, encode_prompt
 
@@ -109,7 +102,6 @@ def main():
     torch.cuda.empty_cache()
     print(f"  TE freed. {len(unique_prompts)} unique prompts encoded.")
 
-    # --- Phase 2: Extract hidden states ---
     print("\n=== Phase 2: Loading diffusion model & extracting hidden states ===")
     from src_ii.zimage_model import load_zimage_rlaif
     from src_ii.btrm_lifecycle import setup_btrm_training, persist_btrm
@@ -117,15 +109,13 @@ def main():
     from src_ii.stats import sigma_for_step
     from futudiffu.sampling import make_rope_cache
 
-    _, raw_model = load_zimage_rlaif(
+    raw_model = load_zimage_rlaif(
         FP8_PATH, device=device, dtype=dtype,
         compile_model=False, fuse=True,
     )
 
-    # Set up BTRM training (installs adapter + score head)
     optimizer = setup_btrm_training(raw_model)
 
-    # Extract hidden states for all images
     hidden_states_cpu = []
     multiplier = 1.0
 
@@ -135,22 +125,18 @@ def main():
         prompt = records[traj_idx]["prompt"]
         conditioning = unique_prompts[prompt].to(device=device, dtype=dtype)
 
-        # Load latent
         traj_dir = REPO_ROOT / "btrm_dataset" / "latents" / f"traj_{traj_idx:06d}"
         pt_path = traj_dir / f"{step_key}.pt"
         latent = torch.load(str(pt_path), weights_only=True).to(device=device, dtype=dtype)
 
-        # Determine sigma using extracted utility
         n_steps = records[traj_idx]["n_steps"]
         sigma_val = sigma_for_step(step_key, n_steps, device=device, dtype=dtype)
         timestep = sigma_val * multiplier
         num_tokens = conditioning.shape[1]
 
-        # Build rope cache
         B, C, H, W = latent.shape
         rope_cache = make_rope_cache(raw_model, H, W, num_tokens, device)
 
-        # TODO: extract_hidden() removed -- need new hidden extraction path
         hidden = raw_model.extract_hidden(
             latent, timestep.unsqueeze(0), conditioning, num_tokens, rope_cache,
         )
@@ -162,16 +148,13 @@ def main():
     print(f"  All {len(hidden_states_cpu)} hidden states extracted")
     print(f"  Hidden shape: {hidden_states_cpu[0].shape}")
 
-    # Free diffusion model
     del raw_model
     torch.cuda.empty_cache()
     print("  Diffusion model freed")
 
-    # --- Phase 3: Train BTRM compound model ---
     print("\n=== Phase 3: Training BTRM compound model (adapter + head) ===")
     from src_ii.btrm_training import train_btrm
 
-    # Build training pairs from preference labels
     training_pairs = []
     for label in labels:
         traj_idx = label["traj_idx"]
@@ -192,9 +175,6 @@ def main():
 
     print(f"  {len(training_pairs)} training pairs")
 
-    # TODO: This train_btrm call uses pre-extracted hidden states.
-    # The model was freed above. This pattern needs rework for ZImageRLAIF
-    # where the score head is integrated into the model.
     training_curve = train_btrm(
         model=raw_model,  # NOTE: raw_model was freed -- this will fail
         training_pairs=training_pairs,
@@ -208,16 +188,12 @@ def main():
         device=device,
     )
 
-    # --- Save pre-persist scores ---
     print("\n=== Saving pre-persist scores ===")
-    # TODO: btrm.head removed -- score head is integrated into ZImageRLAIF.
-    # This pre-persist scoring needs the model to still be alive.
     raw_model.eval()
     pre_persist_scores = []
     with torch.no_grad():
         for i in range(n_images):
             h = hidden_states_cpu[i].to(device=device, dtype=torch.float32)
-            # TODO: need new scoring path for pre-extracted hidden states
             normed = raw_model.score_norm(h.mean(dim=1, keepdim=True))
             raw = raw_model.score_proj(normed)
             score = raw_model.score_cap * torch.tanh(raw / raw_model.score_cap)
@@ -226,18 +202,15 @@ def main():
     torch.save(pre_persist_scores, OUTPUT_DIR / "pre_persist_scores.pt")
     print(f"  Pre-persist scores saved: {pre_persist_scores.shape}")
 
-    # --- Persist trained compound model (adapter + head together) ---
     print("\n=== Persisting trained compound model ===")
     persist_info = persist_btrm(raw_model, "rtheta", str(OUTPUT_DIR))
     print(f"  Persisted: {persist_info}")
 
-    # --- Save training curve ---
     curve_path = OUTPUT_DIR / "training_curve.json"
     with open(curve_path, "w") as f:
         json.dump(training_curve, f, indent=2)
     print(f"  Training curve saved to: {curve_path}")
 
-    # --- Save hidden states for subsequent scripts ---
     torch.save(hidden_states_cpu[0], OUTPUT_DIR / "hidden_sample_0.pt")
     torch.save(hidden_states_cpu[-1], OUTPUT_DIR / "hidden_sample_last.pt")
 
@@ -247,7 +220,6 @@ def main():
     print(f"  Final accuracy: pinkify={training_curve[-1]['accuracy_pinkify']:.3f}, "
           f"thisnotthat={training_curve[-1]['accuracy_thisnotthat']:.3f}")
 
-    # Report adapter training status
     adapter_params = list(get_adapter_params(raw_model, "rtheta").values())
     if adapter_params:
         any_nonzero = any(p.abs().max().item() > 0 for p in adapter_params)

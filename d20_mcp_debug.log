@@ -914,3 +914,171 @@
 [d20] 1771745645.562 dispatch: method=notifications/initialized id=None
 [d20] 1771745645.562 dispatch: method=tools/list id=1
 [d20] 1771745645.562 sent response for id=1
+[d20] 1771820245.946 futudiffu-d20 MCP server starting (pid=61464)
+[d20] 1771820245.946 dispatch: method=initialize id=0
+[d20] 1771820245.946 sent response for id=0
+[d20] 1771820245.950 dispatch: method=notifications/initialized id=None
+[d20] 1771820245.950 dispatch: method=tools/list id=1
+[d20] 1771820245.950 sent response for id=1
+[d20] 1771821199.578 dispatch: method=tools/call id=2
+[d20] 1771821199.579 sent response for id=2
+[d20] 1771824219.433 dispatch: method=tools/call id=3
+[d20] 1771824219.434 sent response for id=3
+[d20] 1771825215.972 dispatch: method=tools/call id=4
+[d20] 1771825215.973 sent response for id=4
+[d20] 1771825868.822 dispatch: method=tools/call id=5
+[d20] 1771825868.823 sent response for id=5
+[d20] 1771826381.486 dispatch: method=tools/call id=6
+[d20] 1771826381.487 sent response for id=6
+[d20] 1771826914.333 dispatch: method=tools/call id=7
+[d20] 1771826914.333 sent response for id=7
+[d20] 1771827217.354 dispatch: method=tools/call id=8
+[d20] 1771827217.354 sent response for id=8
+[d20] 1771827565.716 dispatch: method=tools/call id=9
+[d20] 1771827565.716 sent response for id=9
+[d20] 1771828011.801 dispatch: method=tools/call id=10
+[d20] 1771828011.802 sent response for id=10
+[d20] 1771828534.334 dispatch: method=tools/call id=11
+[d20] 1771828534.334 sent response for id=11
+[d20] 1771828679.315 dispatch: method=tools/call id=12
+[d20] 1771828679.315 sent response for id=12
+[d20] 1771828832.084 dispatch: method=tools/call id=13
+[d20] 1771828832.084 sent response for id=13
+[d20] 1771829333.968 dispatch: method=tools/call id=14
+[d20] 1771829333.968 sent response for id=14
+[d20] 1771829424.860 dispatch: method=tools/call id=15
+[d20] 1771829424.860 sent response for id=15
+[d20] 1771830392.498 dispatch: method=notifications/cancelled id=None
+[d20] 1771830392.498 sent response for id=None
+[d20] 1771830392.498 dispatch: method=notifications/cancelled id=None
+[d20] 1771830392.499 sent response for id=None
+[d20] 1771830407.343 dispatch: method=tools/call id=16
+[d20] 1771830407.343 sent response for id=16
+[d20] 1771830932.292 dispatch: method=tools/call id=17
+[d20] 1771830932.293 sent response for id=17
+[d20] 1771831925.710 dispatch: method=tools/call id=18
+[d20] 1771831925.711 sent response for id=18
+[d20] 1771832497.568 dispatch: method=tools/call id=19
+[d20] 1771832497.568 sent response for id=19
+[d20] 1771833081.857 futudiffu-d20 MCP server starting (pid=20944)
+[d20] 1771833081.857 dispatch: method=initialize id=0
+[d20] 1771833081.857 sent response for id=0
+[d20] 1771833081.861 dispatch: method=notifications/initialized id=None
+[d20] 1771833081.861 dispatch: method=tools/call id=1
+[d20] 1771833081.861 sent response for id=1
+[d20] 1771833380.617 dispatch: method=notifications/cancelled id=None
+[d20] 1771833380.617 sent response for id=None
+[d20] 1771836454.629 futudiffu-d20 MCP server starting (pid=22132)
+[d20] 1771836454.631 dispatch: method=initialize id=0
+[d20] 1771836454.631 sent response for id=0
+[d20] 1771836455.145 dispatch: method=notifications/initialized id=None
+[d20] 1771836455.145 dispatch: method=tools/list id=1
+[d20] 1771836455.145 sent response for id=1
+[d20] 1771836505.043 dispatch: method=tools/call id=2
+[d20] 1771836505.044 sent response for id=2
+[d20] 1771836773.927 dispatch: method=notifications/cancelled id=None
+[d20] 1771836773.928 sent response for id=None
+[d20] 1771837080.848 dispatch: method=tools/call id=3
+[d20] 1771837080.849 sent response for id=3
+[d20] 1771837375.675 dispatch: method=notifications/cancelled id=None
+[d20] 1771837375.676 sent response for id=None
+[d20] 1771837836.711 dispatch: method=tools/call id=4
+[d20] 1771837836.711 sent response for id=4
+[d20] 1771838152.657 dispatch: method=tools/call id=5
+[d20] 1771838152.657 sent response for id=5
+[d20] 1771839925.484 dispatch: method=tools/call id=6
+[d20] 1771839925.484 sent response for id=6
+[d20] 1771839932.897 dispatch: method=notifications/cancelled id=None
+[d20] 1771839932.897 sent response for id=None
+[d20] 1771840117.911 dispatch: method=tools/call id=7
+[d20] 1771840117.912 sent response for id=7
+[d20] 1771840145.910 dispatch: method=tools/call id=8
+[d20] 1771840145.910 sent response for id=8
+[d20] 1771840293.610 dispatch: method=notifications/cancelled id=None
+[d20] 1771840293.610 sent response for id=None
+[d20] 1771840293.610 dispatch: method=notifications/cancelled id=None
+[d20] 1771840293.610 sent response for id=None
+[d20] 1771840428.652 dispatch: method=tools/call id=9
+[d20] 1771840428.652 sent response for id=9
+[d20] 1771840437.844 dispatch: method=tools/call id=10
+[d20] 1771840437.844 sent response for id=10
+[d20] 1771840449.880 dispatch: method=tools/call id=11
+[d20] 1771840449.881 sent response for id=11
+[d20] 1771842655.052 dispatch: method=notifications/cancelled id=None
+[d20] 1771842655.052 sent response for id=None
+[d20] 1771842655.052 dispatch: method=notifications/cancelled id=None
+[d20] 1771842655.053 sent response for id=None
+[d20] 1771842655.053 dispatch: method=notifications/cancelled id=None
+[d20] 1771842655.053 sent response for id=None
+[d20] 1771842702.126 dispatch: method=tools/call id=12
+[d20] 1771842702.126 sent response for id=12
+[d20] 1771842713.315 dispatch: method=notifications/cancelled id=None
+[d20] 1771842713.315 sent response for id=None
+[d20] 1771842805.171 dispatch: method=tools/call id=13
+[d20] 1771842805.171 sent response for id=13
+[d20] 1771842839.343 dispatch: method=tools/call id=14
+[d20] 1771842839.344 sent response for id=14
+[d20] 1771842872.363 dispatch: method=notifications/cancelled id=None
+[d20] 1771842872.363 sent response for id=None
+[d20] 1771842872.363 dispatch: method=notifications/cancelled id=None
+[d20] 1771842872.363 sent response for id=None
+[d20] 1771842942.777 dispatch: method=tools/call id=15
+[d20] 1771842942.777 sent response for id=15
+[d20] 1771843070.710 dispatch: method=tools/call id=16
+[d20] 1771843070.710 sent response for id=16
+[d20] 1771843543.021 dispatch: method=tools/call id=17
+[d20] 1771843543.022 sent response for id=17
+[d20] 1771843559.752 dispatch: method=tools/call id=18
+[d20] 1771843559.752 sent response for id=18
+[d20] 1771843599.026 dispatch: method=notifications/cancelled id=None
+[d20] 1771843599.026 sent response for id=None
+[d20] 1771843599.027 dispatch: method=notifications/cancelled id=None
+[d20] 1771843599.027 sent response for id=None
+[d20] 1771843617.882 dispatch: method=tools/call id=19
+[d20] 1771843617.882 sent response for id=19
+[d20] 1771843657.923 dispatch: method=tools/call id=20
+[d20] 1771843657.923 sent response for id=20
+[d20] 1771843921.395 dispatch: method=tools/call id=21
+[d20] 1771843921.395 sent response for id=21
+[d20] 1771844002.255 dispatch: method=tools/call id=22
+[d20] 1771844002.255 sent response for id=22
+[d20] 1771844301.237 dispatch: method=tools/call id=23
+[d20] 1771844301.238 sent response for id=23
+[d20] 1771844335.592 dispatch: method=tools/call id=24
+[d20] 1771844335.592 sent response for id=24
+[d20] 1771844358.771 dispatch: method=tools/call id=25
+[d20] 1771844358.772 sent response for id=25
+[d20] 1771873549.796 dispatch: method=tools/call id=26
+[d20] 1771873549.797 sent response for id=26
+[d20] 1771873565.916 dispatch: method=tools/call id=27
+[d20] 1771873565.916 sent response for id=27
+[d20] 1771874318.321 dispatch: method=tools/call id=28
+[d20] 1771874318.321 sent response for id=28
+[d20] 1771874736.228 dispatch: method=tools/call id=29
+[d20] 1771874736.228 sent response for id=29
+[d20] 1771884036.883 dispatch: method=tools/call id=30
+[d20] 1771884036.883 sent response for id=30
+[d20] 1771884313.644 dispatch: method=tools/call id=31
+[d20] 1771884313.644 sent response for id=31
+[d20] 1771885097.665 dispatch: method=notifications/cancelled id=None
+[d20] 1771885097.665 sent response for id=None
+[d20] 1771885097.665 dispatch: method=notifications/cancelled id=None
+[d20] 1771885097.665 sent response for id=None
+[d20] 1771885102.800 dispatch: method=tools/call id=32
+[d20] 1771885102.801 sent response for id=32
+[d20] 1771885303.947 dispatch: method=tools/call id=33
+[d20] 1771885303.947 sent response for id=33
+[d20] 1771885388.010 dispatch: method=tools/call id=34
+[d20] 1771885388.010 sent response for id=34
+[d20] 1771885765.687 dispatch: method=notifications/cancelled id=None
+[d20] 1771885765.687 sent response for id=None
+[d20] 1771885765.687 dispatch: method=notifications/cancelled id=None
+[d20] 1771885765.687 sent response for id=None
+[d20] 1771885765.688 dispatch: method=notifications/cancelled id=None
+[d20] 1771885765.688 sent response for id=None
+[d20] 1771885904.491 dispatch: method=tools/call id=35
+[d20] 1771885904.491 sent response for id=35
+[d20] 1771886864.546 dispatch: method=tools/call id=36
+[d20] 1771886864.546 sent response for id=36
+[d20] 1771886881.088 dispatch: method=tools/call id=37
+[d20] 1771886881.088 sent response for id=37

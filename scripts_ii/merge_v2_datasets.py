@@ -24,7 +24,6 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Windows venv path insertion for src imports
 sys.path.insert(0, r"F:\dox\repos\ai\futudiffu\src")
 
 import pyarrow as pa
@@ -34,13 +33,9 @@ from safetensors.torch import save_file
 
 from futudiffu.dataset_v2 import INDEX_SCHEMA, _PARQUET_WRITE_KWARGS
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
 
 REPO_ROOT = Path(r"F:\dox\repos\ai\futudiffu")
 
-# All source directories to merge, in order.
 SOURCE_DIRS = [
     REPO_ROOT / "btrm_dataset_v2_gpu0",
     REPO_ROOT / "btrm_dataset_v2_gpu0_gpu0",
@@ -62,7 +57,6 @@ def _parse_device(dir_name: str) -> str:
         btrm_dataset_v2_gpu1       -> 'gpu1'
         btrm_dataset_v2_gpu1_gpu1  -> 'gpu1'  (naming collision artifact)
     """
-    # Match the first gpuN in the directory name
     m = re.search(r"gpu(\d+)", dir_name)
     if m:
         return f"gpu{m.group(1)}"
@@ -137,9 +131,6 @@ def merge_v2_datasets() -> dict:
     print(f"  Sources:    {len(SOURCE_DIRS)}")
     print()
 
-    # ------------------------------------------------------------------
-    # Step 1: Read all source indices
-    # ------------------------------------------------------------------
     print("Reading source indices...")
     sources: list[tuple[Path, pa.Table, list[Path]]] = []
     for src_dir in SOURCE_DIRS:
@@ -162,13 +153,6 @@ def merge_v2_datasets() -> dict:
     total_traj = sum(len(t) for _, t, _ in sources)
     print(f"\nTotal trajectories to merge: {total_traj}")
 
-    # ------------------------------------------------------------------
-    # Step 2: Extend schema to include provenance columns
-    # ------------------------------------------------------------------
-    # We add three new columns not in the original INDEX_SCHEMA:
-    #   source_dir     (utf8) -- which GPU directory it came from
-    #   run_name       (utf8) -- the training run
-    #   source_device  (utf8) -- "gpu0" or "gpu1"
     provenance_fields = [
         pa.field("source_dir", pa.utf8()),
         pa.field("run_name", pa.utf8()),
@@ -176,9 +160,6 @@ def merge_v2_datasets() -> dict:
     ]
     extended_schema = pa.schema(list(INDEX_SCHEMA) + provenance_fields)
 
-    # ------------------------------------------------------------------
-    # Step 3: Build global ID remapping and annotated rows
-    # ------------------------------------------------------------------
     print("\nBuilding global ID remapping...")
     next_global_id = 0
     per_source_data: list[tuple[Path, dict[int, int], list[dict]]] = []
@@ -195,17 +176,14 @@ def merge_v2_datasets() -> dict:
             new_id = next_global_id
             id_remap[old_id] = new_id
 
-            # Update IDs
             row["traj_id"] = new_id
             row["key_prefix"] = f"{new_id:06d}"
 
-            # Remap parent_traj_id if intra-source
             if row.get("parent_traj_id") is not None:
                 parent_old = row["parent_traj_id"]
                 if parent_old in id_remap:
                     row["parent_traj_id"] = id_remap[parent_old]
 
-            # Add provenance metadata
             row["source_dir"] = src_dir.name
             row["run_name"] = RUN_NAME
             row["source_device"] = device
@@ -218,31 +196,23 @@ def merge_v2_datasets() -> dict:
         print(f"  {src_dir.name}: {len(remapped_rows)} trajs -> "
               f"ids [{min(id_remap.values())}..{max(id_remap.values())}]")
 
-    # ------------------------------------------------------------------
-    # Step 4: Prepare output directory
-    # ------------------------------------------------------------------
     print(f"\nPreparing output directory: {OUTPUT_DIR}")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     output_blobs_dir = OUTPUT_DIR / "blobs"
     output_blobs_dir.mkdir(exist_ok=True)
 
-    # Clean any stale blobs from previous failed merge attempts
     existing_blobs = list(output_blobs_dir.glob("blob_*.safetensors"))
     if existing_blobs:
         print(f"  Cleaning {len(existing_blobs)} stale blob(s) from previous run")
         for p in existing_blobs:
             p.unlink()
 
-    # ------------------------------------------------------------------
-    # Step 5: Copy and re-key blobs with renumbered filenames
-    # ------------------------------------------------------------------
     print("\nRe-keying and writing blobs...")
     output_blob_idx = 0
     traj_to_blob: dict[int, str] = {}
     total_blob_bytes_written = 0
 
     for src_dir, id_remap, remapped_rows in per_source_data:
-        # Find blob files referenced by this source
         blob_files_referenced = sorted(set(r["blob_file"] for r in remapped_rows
                                            if r.get("blob_file")))
         src_blobs_dir = src_dir / "blobs"
@@ -254,14 +224,12 @@ def merge_v2_datasets() -> dict:
                     f"Referenced blob not found: {src_blob_path}"
                 )
 
-            # Read and remap tensor keys
             remapped_tensors = _remap_blob_tensors(src_blob_path, id_remap)
 
             if not remapped_tensors:
                 print(f"  WARNING: {src_dir.name}/{blob_file} produced 0 remapped tensors")
                 continue
 
-            # Write as a new sequentially-numbered blob
             out_blob_name = f"blob_{output_blob_idx:03d}.safetensors"
             out_blob_path = output_blobs_dir / out_blob_name
 
@@ -275,7 +243,6 @@ def merge_v2_datasets() -> dict:
                 "source_blob": blob_file,
             }
 
-            # Write via temp file for atomicity
             temp_path = out_blob_path.with_suffix(".tmp")
             save_file(remapped_tensors, str(temp_path), metadata=blob_meta)
             os.replace(str(temp_path), str(out_blob_path))
@@ -283,7 +250,6 @@ def merge_v2_datasets() -> dict:
             blob_size = out_blob_path.stat().st_size
             total_blob_bytes_written += blob_size
 
-            # Track which new blob each trajectory ended up in
             traj_ids_in_blob = set(int(k.split("/")[0]) for k in remapped_tensors)
             for tid in traj_ids_in_blob:
                 traj_to_blob[tid] = out_blob_name
@@ -294,9 +260,6 @@ def merge_v2_datasets() -> dict:
 
             output_blob_idx += 1
 
-    # ------------------------------------------------------------------
-    # Step 6: Update blob_file references in rows and write merged index
-    # ------------------------------------------------------------------
     print("\nWriting merged index.parquet...")
     merged_rows: list[dict] = []
     missing_blob_refs = 0
@@ -313,12 +276,10 @@ def merge_v2_datasets() -> dict:
                 continue
             merged_rows.append(row)
 
-    # Write the merged parquet
     merged_table = pa.Table.from_pylist(merged_rows, schema=extended_schema)
     output_index_path = OUTPUT_DIR / "index.parquet"
     temp_index = output_index_path.with_suffix(".parquet.tmp")
 
-    # Use the standard write kwargs but update use_dictionary for new cols
     write_kwargs = dict(_PARQUET_WRITE_KWARGS)
     write_kwargs["use_dictionary"] = list(_PARQUET_WRITE_KWARGS["use_dictionary"]) + [
         "source_dir", "run_name", "source_device",
@@ -330,9 +291,6 @@ def merge_v2_datasets() -> dict:
     index_size = output_index_path.stat().st_size
     elapsed = time.time() - start_time
 
-    # ------------------------------------------------------------------
-    # Step 7: Print summary
-    # ------------------------------------------------------------------
     print()
     print("=" * 60)
     print("MERGE COMPLETE")
@@ -352,9 +310,6 @@ def merge_v2_datasets() -> dict:
     print(f"    index.parquet: {output_index_path}")
     print(f"    blobs/:        {output_blobs_dir}")
 
-    # ------------------------------------------------------------------
-    # Build report dict
-    # ------------------------------------------------------------------
     summary = {
         "merge_timestamp": datetime.now(timezone.utc).isoformat(),
         "run_name": RUN_NAME,
@@ -388,7 +343,6 @@ def verify_merged_dataset(summary: dict) -> bool:
     print(f"  index.parquet: {n_rows} rows")
     print(f"  Schema columns: {table.column_names}")
 
-    # Check provenance columns exist
     for col in ["source_dir", "run_name", "source_device"]:
         if col not in table.column_names:
             print(f"  FAIL: missing provenance column '{col}'")
@@ -396,7 +350,6 @@ def verify_merged_dataset(summary: dict) -> bool:
         vals = set(table.column(col).to_pylist())
         print(f"    {col}: {vals}")
 
-    # Check traj_ids are unique and sequential
     traj_ids = table.column("traj_id").to_pylist()
     if len(set(traj_ids)) != len(traj_ids):
         print(f"  FAIL: duplicate traj_ids detected")
@@ -408,7 +361,6 @@ def verify_merged_dataset(summary: dict) -> bool:
     else:
         print(f"  traj_ids: 0..{n_rows-1} (sequential, unique)")
 
-    # Check all referenced blobs exist
     blob_files = set(table.column("blob_file").to_pylist())
     blobs_dir = OUTPUT_DIR / "blobs"
     missing_blobs = []
@@ -420,13 +372,11 @@ def verify_merged_dataset(summary: dict) -> bool:
         return False
     print(f"  All {len(blob_files)} referenced blobs exist")
 
-    # Check total blob sizes
     total_blob_size = sum(
         (blobs_dir / bf).stat().st_size for bf in blob_files
     )
     print(f"  Total blob size on disk: {total_blob_size / 1e6:.1f} MB")
 
-    # Print first 3 rows as sample
     print()
     print("  Sample rows (first 3):")
     for i in range(min(3, n_rows)):
@@ -437,7 +387,6 @@ def verify_merged_dataset(summary: dict) -> bool:
               f"blob={row['blob_file']}, prefix={row['key_prefix']}, "
               f"source={row['source_dir']}, device={row['source_device']}")
 
-    # Print last 3 rows
     print()
     print("  Sample rows (last 3):")
     for i in range(max(0, n_rows - 3), n_rows):
@@ -448,7 +397,6 @@ def verify_merged_dataset(summary: dict) -> bool:
               f"blob={row['blob_file']}, prefix={row['key_prefix']}, "
               f"source={row['source_dir']}, device={row['source_device']}")
 
-    # Spot-check: load one tensor from each blob to verify integrity
     print()
     print("  Spot-checking tensor reads from each blob...")
     for bf in sorted(blob_files):

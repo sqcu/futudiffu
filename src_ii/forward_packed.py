@@ -79,12 +79,13 @@ def prepare_packed_forward(
     img_sizes: list[tuple[int, int]],
     cap_lens: list[int],
     device: torch.device,
+    target_len: int = REFERENCE_TOTAL_LEN,
 ) -> dict[str, Any]:
     """Prepare constant state for packed multi-image forward.
 
     Runs model.prepare_packed_state() then pads everything to
-    REFERENCE_TOTAL_LEN and builds the block mask at that fixed size.
-    Every call produces the same total_len — one compiled graph.
+    target_len and builds the block mask at that fixed size.
+    Every call at the same target_len hits one compiled graph.
     """
     refined_caps, packing_info, packed_rope = model.prepare_packed_state(
         context_list, img_sizes, cap_lens, device,
@@ -92,7 +93,7 @@ def prepare_packed_forward(
 
     # Pad to fixed length BEFORE building block mask
     packing_info, packed_rope = _pad_plan_to_fixed_len(
-        packing_info, packed_rope, REFERENCE_TOTAL_LEN,
+        packing_info, packed_rope, target_len,
     )
 
     block_mask = build_block_mask_from_packing_info(packing_info, device=device)

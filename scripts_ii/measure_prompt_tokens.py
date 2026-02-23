@@ -15,16 +15,12 @@ import statistics
 import sys
 from datetime import datetime, timezone
 
-# ---------------------------------------------------------------------------
-# Paths (Windows for the Python interpreter)
-# ---------------------------------------------------------------------------
 REPO_ROOT_WIN = r"F:\dox\repos\ai\futudiffu"
 REPO_ROOT_WSL = os.path.join(os.path.dirname(__file__), "..")
 TOKENIZER_PATH = os.path.join(REPO_ROOT_WIN, "src", "futudiffu", "tokenizer")
 PARQUET_PATH = os.path.join(REPO_ROOT_WIN, "btrm_dataset_v2", "index.parquet")
 OUTPUT_DIR = os.path.join(REPO_ROOT_WSL, "bin_packing_audit")
 
-# Add src to path for imports
 sys.path.insert(0, os.path.join(REPO_ROOT_WIN, "src"))
 
 CHAT_TEMPLATE = "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
@@ -36,9 +32,6 @@ def pad_to_multiple(n: int, multiple: int) -> int:
 
 
 def main():
-    # -----------------------------------------------------------------------
-    # 1. Read unique prompts from V2 parquet
-    # -----------------------------------------------------------------------
     import pyarrow.parquet as pq
 
     table = pq.read_table(PARQUET_PATH)
@@ -46,9 +39,6 @@ def main():
     unique_prompts = sorted(set(all_prompts))  # sorted for determinism
     print(f"V2 dataset: {table.num_rows} rows, {len(unique_prompts)} unique prompts")
 
-    # -----------------------------------------------------------------------
-    # 2. Tokenize each with the chat template
-    # -----------------------------------------------------------------------
     from transformers import Qwen2Tokenizer
 
     tokenizer = Qwen2Tokenizer.from_pretrained(TOKENIZER_PATH)
@@ -67,9 +57,6 @@ def main():
             "padded_to_32": pad_to_multiple(n_tokens, 32),
         })
 
-    # -----------------------------------------------------------------------
-    # 3. Compute statistics
-    # -----------------------------------------------------------------------
     token_counts_sorted = sorted(token_counts)
     n = len(token_counts_sorted)
 
@@ -100,9 +87,6 @@ def main():
         "p99_padded": pad_to_multiple(stats["p99"], 32),
     }
 
-    # -----------------------------------------------------------------------
-    # 4. Print report
-    # -----------------------------------------------------------------------
     print()
     print("=" * 60)
     print("PROMPT TOKEN LENGTH STATISTICS")
@@ -135,9 +119,6 @@ def main():
         label = r["prompt"][:58]
         print(f"  {label:60s}  {r['raw_token_count']:5d}  {r['padded_to_32']:5d}")
 
-    # -----------------------------------------------------------------------
-    # 5. Distribution histogram (text-based)
-    # -----------------------------------------------------------------------
     print()
     print("Token count distribution (bucket size = 32):")
     bucket_size = 32
@@ -153,9 +134,6 @@ def main():
         bar = "#" * bar_len
         print(f"  [{b:4d}-{b + bucket_size - 1:4d}]: {buckets[b]:3d} {bar}")
 
-    # -----------------------------------------------------------------------
-    # 6. Save to disk
-    # -----------------------------------------------------------------------
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     output_path = os.path.join(OUTPUT_DIR, "prompt_token_stats.json")
 
@@ -174,7 +152,6 @@ def main():
 
     print(f"\nResults saved to: {output_path}")
 
-    # Return p90 for use by bin_packer update
     print(f"\n{'=' * 60}")
     print(f"KEY RESULT: p90 raw token count = {stats['p90']}")
     print(f"KEY RESULT: p90 padded to 32    = {padded_stats['p90_padded']}")

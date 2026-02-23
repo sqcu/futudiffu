@@ -67,40 +67,25 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 import torch
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
 
-# Model weights
 FP8_PATH = r"F:\dox\ai\comfyui\ComfyUI\models\diffusion_models\z_image_fp8_blockwise.safetensors"
 TE_PATH = r"F:\dox\ai\comfyui\ComfyUI\models\text_encoders\qwen_3_4b.safetensors"
 VAE_PATH = r"F:\dox\ai\comfyui\ComfyUI\models\vae\zimage.safetensors"
 TOKENIZER_PATH = str(REPO_ROOT / "src" / "futudiffu" / "tokenizer")
 
-# Reference images for THISNOTTHAT
 THIS_PATH = REPO_ROOT / "i2i_off_policies" / "pizza-ratto.png"
 THAT_PATH = REPO_ROOT / "i2i_off_policies" / "offhand_pleometric.png"
 
-# Dataset
 V2_DATASET_DIR = REPO_ROOT / "btrm_dataset_v2"
 
-# Output (v5 -- 170 steps with cosine LR decay + checkpoints)
 OUTPUT_DIR = REPO_ROOT / "pinkify_thisnotthat_output" / "differentiable_run_v5"
 METRICS_PATH = OUTPUT_DIR / "training_metrics.jsonl"
 PRE_PERSIST_SCORES_PATH = OUTPUT_DIR / "pre_persist_scores.json"
 SUMMARY_PATH = OUTPUT_DIR / "run_summary.json"
 
-# Training hyperparameters
-# v5: 170 steps (stop before Phase 3 instability at ~131, with margin to
-# EMA loss minimum at step 166 from v4 analysis). Cosine LR decay from
-# peak after warmup to 0 at step 170.
 N_STEPS = 170          # optimizer steps (macrobatches) -- reduced from 200
 LR = 3e-4
 GRAD_CLIP = 0.1
-# LOGSQUARE_WEIGHT removed -- logsquare regularizer has been removed from
-# train_btrm_differentiable. Total loss = BT loss only. The ScoreUnembedder's
-# soft_tanh_cap(10.0) already bounds score magnitudes without imposing a
-# target magnitude. See docs/directive_remove_logsquare_regularizer.md.
 WARMUP_STEPS = 10      # same warmup as v3/v4
 GRAD_ACCUM = 1         # 1 microbatch per optimizer step (tight VRAM)
 LR_SCHEDULE = "warmup_cosine"  # cosine decay from peak LR to 0 at N_STEPS
@@ -116,9 +101,6 @@ def main():
     device = torch.device("cuda")
     dtype = torch.bfloat16
 
-    # ===================================================================
-    # Phase 1: Load V2 dataset + VAE + reference images
-    # ===================================================================
     print("=" * 60)
     print("  Phase 1: Loading V2 dataset, VAE, and reference images")
     print("=" * 60)
@@ -140,12 +122,10 @@ def main():
     traj_ids = reader._table.column("traj_id").to_pylist()
     print(f"  V2 dataset: {len(reader)} trajectories")
 
-    # Load VAE -- stays resident throughout training (~160 MB)
     vae = load_vae(VAE_PATH, device=device, dtype=dtype)
     vram_after_vae = torch.cuda.memory_allocated() / 1e9
     print(f"  VAE loaded and resident. VRAM: {vram_after_vae:.2f} GB")
 
-    # Load reference images for THISNOTTHAT -- kept on GPU
     this_ref_pil = Image.open(str(THIS_PATH)).convert("RGB")
     that_ref_pil = Image.open(str(THAT_PATH)).convert("RGB")
     this_ref_t = _pil_to_tensor(this_ref_pil, device)  # (1, 3, H, W) float32 on GPU
@@ -153,20 +133,13 @@ def main():
     print(f"  THIS ref: {THIS_PATH.name} ({this_ref_pil.size})")
     print(f"  THAT ref: {THAT_PATH.name} ({that_ref_pil.size})")
 
-    # ===================================================================
-    # Phase 2: Build pair sampler + on-the-fly preference function
-    # ===================================================================
     print("\n" + "=" * 60)
     print("  Phase 2: Building pair sampler and on-the-fly preference function")
     print("=" * 60)
 
-    # Build positions from V2 dataset (all trajectories)
     positions = build_positions_from_v2(reader, traj_ids=traj_ids)
     print(f"  Positions: {len(positions)} across {len(traj_ids)} trajectories")
 
-    # Compute FLOPS sampling weights for resolution-aware training
-    # (Layer 3: funfetti batching PDF). Even with 96% monoresolution data,
-    # the code path is exercised and degrades gracefully to uniform.
     flops_weights = compute_flops_sampling_weights_from_positions(positions)
     print(f"  FLOPS weights: {len(flops_weights)} trajectories weighted")
 
@@ -179,7 +152,6 @@ def main():
     )
     print(f"  Pair space: {sampler.pair_space_size:,} possible pairs")
 
-    # Cache metadata + accessor per trajectory for fast access
     _meta_cache = {}
 
     def _get_meta(traj_id):
@@ -188,7 +160,6 @@ def main():
             _meta_cache[traj_id] = (meta, accessor)
         return _meta_cache[traj_id]
 
-    # Score counters for observability
     _score_calls = [0]
     _score_time = [0.0]
 
@@ -203,10 +174,8 @@ def main():
         meta, accessor = _get_meta(traj_id)
         latent = accessor[step_key].to(device=device, dtype=dtype)
 
-        # VAE decode to pixel space (returns PIL Image)
         pil_img = decode_latent_to_pil(vae, latent, device=device, dtype=dtype)
 
-        # Convert PIL to GPU tensor for scoring
         import numpy as np
         rgb = pil_img.convert("RGB")
         arr = np.array(rgb, dtype=np.float32) / 255.0  # (H, W, 3)
@@ -215,7 +184,6 @@ def main():
         with torch.no_grad():
             pink_score = pinkify_score_gpu(img_t).item()
 
-            # Resize refs to match image resolution for thisnotthat
             _, H, W = img_t.shape
             this_resized = F.interpolate(
                 this_ref_t.float(), size=(H, W), mode='bilinear', align_corners=False,
@@ -230,7 +198,6 @@ def main():
 
         return {"pinkify": pink_score, "thisnotthat": tnt_score}
 
-    # On-the-fly preference function: no pre-computed cache
     def preference_fn(pair: dict) -> dict:
         """Compute pairwise preferences via on-the-fly GPU scoring.
 
@@ -247,7 +214,6 @@ def main():
             )
         return prefs
 
-    # Validate preference function with a test sample
     test_pair = sampler.sample_pair()
     test_prefs = preference_fn(test_pair)
     print(f"  Test pair: traj_a={test_pair['traj_a']}, step_a={test_pair['step_a']}, "
@@ -256,24 +222,17 @@ def main():
     print(f"  Scoring time: {_score_time[0] * 1000:.1f}ms for {_score_calls[0]} calls "
           f"({_score_time[0] / max(_score_calls[0], 1) * 1000:.1f}ms/call)")
 
-    # ===================================================================
-    # Phase 3: Validate challenge set ranking
-    # ===================================================================
     print("\n" + "=" * 60)
     print("  Phase 3: Validating challenge set ranking")
     print("=" * 60)
 
-    # Challenge set: reference images from i2i_off_policies/PINKIFY_cases/
-    # Expected ranking: A < B < C, D ~ E, {A,B,C} < {D,E} < F
     challenge_dir = REPO_ROOT / "i2i_off_policies" / "PINKIFY_cases"
-    # Try both naming conventions: "A.png" and "PINKER_A.png"
     challenge_labels = ["A", "B", "C", "D", "E", "F"]
     challenge_scores = {}
 
     if challenge_dir.exists():
         import numpy as np
         for label in challenge_labels:
-            # Try both naming conventions
             candidates = [
                 challenge_dir / f"{label}.png",
                 challenge_dir / f"PINKER_{label}.png",
@@ -294,7 +253,6 @@ def main():
                 print(f"    {img_path.name}: pinkify={ps:.6f}")
 
         if len(challenge_scores) == 6:
-            # Verify ranking: A < B < C, D ~ E, {A,B,C} < {D,E} < F
             A, B, C = challenge_scores["A"], challenge_scores["B"], challenge_scores["C"]
             D, E, F_ = challenge_scores["D"], challenge_scores["E"], challenge_scores["F"]
 
@@ -322,9 +280,6 @@ def main():
         print(f"  Challenge dir not found: {challenge_dir}")
         print("  Skipping challenge set validation")
 
-    # ===================================================================
-    # Phase 4: Encode prompts with text encoder
-    # ===================================================================
     print("\n" + "=" * 60)
     print("  Phase 4: Encoding prompts")
     print("=" * 60)
@@ -334,7 +289,6 @@ def main():
     tokenizer = create_tokenizer(TOKENIZER_PATH)
     te_model = load_text_encoder(TE_PATH, device=device, dtype=dtype)
 
-    # Collect unique prompts from all trajectories
     prompt_cache = {}
     for traj_id in traj_ids:
         meta, _ = reader[traj_id]
@@ -352,9 +306,6 @@ def main():
     torch.cuda.empty_cache()
     print(f"  TE freed. VRAM: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
-    # ===================================================================
-    # Phase 5: Load FP8 backbone + create BTRMCompoundModel
-    # ===================================================================
     print("\n" + "=" * 60)
     print("  Phase 5: Loading backbone and creating compound model")
     print("=" * 60)
@@ -364,15 +315,13 @@ def main():
     from src_ii.multi_lora import get_adapter_params
     from src_ii.sigma_schedule import build_sigma_schedule, resolution_shift
 
-    # Load WITHOUT compilation -- training uses gradient-checkpointed forward
-    _, raw_model = load_zimage_rlaif(
+    raw_model = load_zimage_rlaif(
         FP8_PATH, device=device, dtype=dtype,
         compile_model=False, fuse=True,
     )
 
     print(f"  VRAM after backbone load: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
-    # Set up BTRM training (installs adapter + score head + optimizer)
     optimizer = setup_btrm_training(
         raw_model,
         adapter_name="rtheta",
@@ -381,7 +330,6 @@ def main():
         adapter_init_b_std=0.01,
     )
 
-    # Report parameter counts
     adapter_params_dict = get_adapter_params(raw_model, "rtheta")
     n_adapter = sum(p.numel() for p in adapter_params_dict.values())
     n_head = sum(p.numel() for p in raw_model.score_proj.parameters()) + \
@@ -391,12 +339,8 @@ def main():
     print(f"  Total trainable: {n_adapter + n_head:,}")
     print(f"  VRAM after BTRM setup: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
-    # Confirm VAE is still resident
     print(f"  VAE still resident: {next(vae.parameters()).device}")
 
-    # ===================================================================
-    # Phase 6: Build load_latent_fn
-    # ===================================================================
     print("\n" + "=" * 60)
     print("  Phase 6: Preparing latent loader")
     print("=" * 60)
@@ -410,10 +354,8 @@ def main():
         traj_id, step_key = key
         meta, accessor = _get_meta(traj_id)
 
-        # Load latent
         latent = accessor[step_key].to(device=device, dtype=dtype)
 
-        # Compute sigma for this step
         n_steps = meta.get("n_steps", 30)
         denoise_val = meta.get("denoise") or 1.0
         recorded_shift = meta.get("sampling_shift")
@@ -440,7 +382,6 @@ def main():
 
         timestep = torch.tensor([sigma_val], device=device, dtype=dtype)
 
-        # Get conditioning from prompt cache
         prompt = meta.get("prompt", "")
         cond = prompt_cache.get(prompt)
         if cond is None:
@@ -451,7 +392,6 @@ def main():
 
         return latent, timestep, cond, num_tokens
 
-    # Validate load_latent_fn with a test load
     test_key = (traj_ids[0], "step_00")
     lat, ts, cond, nt = load_latent_fn(test_key)
     print(f"  Test load: latent={lat.shape}, timestep={ts.shape}, cond={cond.shape}, "
@@ -459,9 +399,6 @@ def main():
     del lat, ts, cond
     torch.cuda.empty_cache()
 
-    # ===================================================================
-    # Phase 7: Run differentiable training
-    # ===================================================================
     print("\n" + "=" * 60)
     print("  Phase 7: Differentiable BTRM training")
     print("=" * 60)
@@ -478,7 +415,6 @@ def main():
 
     from src_ii.btrm_training import train_btrm_differentiable
 
-    # Open metrics file for streaming writes
     metrics_file = open(str(METRICS_PATH), "w")
 
     adapter_grad_verified = False
@@ -497,7 +433,6 @@ def main():
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
-        # After macrobatch 0 (first step), verify adapter receives gradients
         if step == 0 and not adapter_grad_verified:
             pre_clip = entry.get("pre_clip_grad_norm", 0.0)
             record["adapter_grad_verified"] = pre_clip > 0.0
@@ -509,7 +444,6 @@ def main():
                 print(f"  [WARNING] pre_clip_grad_norm={pre_clip:.6f} -- "
                       f"adapter may not be receiving gradients!")
 
-            # Additional check: inspect actual LoRA param gradients
             n_grads = 0
             n_nonzero = 0
             max_grad = 0.0
@@ -533,7 +467,6 @@ def main():
         metrics_file.write(json.dumps(record, default=str) + "\n")
         metrics_file.flush()
 
-    # Checkpoint function: save adapter + head state to a subdirectory
     def save_checkpoint(step, model):
         ckpt_dir = OUTPUT_DIR / f"checkpoint_step{step:03d}"
         ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -549,7 +482,6 @@ def main():
         preference_fn=preference_fn,
         n_steps=N_STEPS,
         lr=LR,
-        # logsquare_weight not passed -- regularizer removed, BT loss only
         head_names=HEAD_NAMES,
         pref_keys=PREF_KEYS,
         gradient_checkpointing=True,
@@ -571,9 +503,6 @@ def main():
     print(f"  Total scoring: {_score_calls[0]} calls in {_score_time[0]:.1f}s "
           f"({_score_time[0] / max(_score_calls[0], 1) * 1000:.1f}ms/call)")
 
-    # ===================================================================
-    # Phase 8: Pre-persist test scores
-    # ===================================================================
     print("\n" + "=" * 60)
     print("  Phase 8: Scoring test inputs before persist")
     print("=" * 60)
@@ -581,8 +510,6 @@ def main():
     raw_model.gradient_checkpointing = False
     raw_model.eval()
 
-    # Score a sample of images to verify the trained model produces
-    # different outputs than an untrained model
     import random
     rng = random.Random(123)
     test_traj_ids = rng.sample(traj_ids, min(10, len(traj_ids)))
@@ -590,7 +517,6 @@ def main():
 
     for traj_id in test_traj_ids:
         meta, accessor = reader[traj_id]
-        # Use "final" step if available, else first available step
         steps = accessor.available_steps
         step_key = "final" if "final" in steps else steps[0]
 
@@ -617,9 +543,6 @@ def main():
         print(f"    traj {s['traj_id']:3d}/{s['step_key']}: "
               f"pinkify={s['score_pinkify']:.4f}, thisnotthat={s['score_thisnotthat']:.4f}")
 
-    # ===================================================================
-    # Phase 9: Persist compound model
-    # ===================================================================
     print("\n" + "=" * 60)
     print("  Phase 9: Persisting trained compound model")
     print("=" * 60)
@@ -627,12 +550,8 @@ def main():
     persist_info = persist_btrm(raw_model, "rtheta", str(OUTPUT_DIR))
     print(f"  Persisted: {persist_info}")
 
-    # ===================================================================
-    # Summary
-    # ===================================================================
     wall_total = time.perf_counter() - wall_start
 
-    # Report adapter weight statistics
     adapter_params_list = list(get_adapter_params(raw_model, "rtheta").values())
     if adapter_params_list:
         lora_b_stats = []
@@ -706,7 +625,6 @@ def main():
     print(f"  Adapter grad verified step 0: {adapter_grad_verified}")
     print(f"  Output: {OUTPUT_DIR}")
 
-    # Cleanup
     del vae
     reader.close()
     torch.cuda.empty_cache()

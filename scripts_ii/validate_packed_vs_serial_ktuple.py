@@ -33,9 +33,6 @@ if str(REPO_ROOT) not in sys.path:
 import torch
 import torch.nn.functional as F
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
 
 FP8_PATH = r"F:\dox\ai\comfyui\ComfyUI\models\diffusion_models\z_image_fp8_blockwise.safetensors"
 TE_PATH  = r"F:\dox\ai\comfyui\ComfyUI\models\text_encoders\qwen_3_4b.safetensors"
@@ -49,11 +46,8 @@ DTYPE  = torch.bfloat16
 
 OUTPUT_DIR = REPO_ROOT / "validation_renders" / "packed_vs_serial_ktuple"
 
-# Pass criterion: max_abs < 0.2 across all entries and steps.
-# Expected divergence is ~0.06 from block mask quantization.
 MAX_ABS_THRESHOLD = 0.2
 
-# Prompts
 P_BASE   = 'qwen-3-4b, draw me "pink shrimp with crisp typography in a banana field".'
 P_SHRIMP = "pink shrimp, detailed color, clear shape"
 P_TYPO   = "clean typography, sharp letterforms, no blur"
@@ -61,8 +55,6 @@ P_BANANA = "banana, yellow, tropical poem"
 P_NEG    = ""
 UNIQUE_PROMPTS = [P_BASE, P_SHRIMP, P_TYPO, P_BANANA, P_NEG]
 
-# 6-tuple spec: (prompt_key, (W, H))
-# Scales are irrelevant here -- we compare raw denoised outputs, not gathered guidance.
 ENTRY_DEFS = [
     (P_BASE,   (1024, 1024)),  # entry 0: base
     (P_SHRIMP, (1024, 1024)),  # entry 1: shrimp emphasis
@@ -73,17 +65,11 @@ ENTRY_DEFS = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def _log(msg: str) -> None:
     print(msg, flush=True)
 
 
-# ---------------------------------------------------------------------------
-# Phase 1: Text encoder
-# ---------------------------------------------------------------------------
 
 def phase1_encode(device, dtype) -> dict[str, torch.Tensor]:
     """Load TE, encode all unique prompts, free TE. Returns CPU tensors."""
@@ -112,9 +98,6 @@ def phase1_encode(device, dtype) -> dict[str, torch.Tensor]:
     return conds
 
 
-# ---------------------------------------------------------------------------
-# Phase 3 helpers: serial execution
-# ---------------------------------------------------------------------------
 
 def _build_serial_plans(model, entries_gpu, device):
     """Pre-build packing plans for serial execution (one entry per plan).
@@ -158,7 +141,6 @@ def _run_serial_one_step(model, entries_gpu, plans, sigma, device):
                 plan["block_mask"], plan["packed_rope"],
             )
 
-        # denoise: x - field * sigma
         sigma_t = torch.tensor(sigma, device=device, dtype=x.dtype)
         denoised = [d for d in denoise_all([x], fields, [sigma_t])][0]
         denoised_list.append(denoised)
@@ -169,14 +151,11 @@ def _run_serial_one_step(model, entries_gpu, plans, sigma, device):
 
 def _run_packed_one_step(executor, x_base, conds_gpu, sigma, device):
     """Run one forward pass via BatchExecutor. Returns list of (denoised, scores)."""
-    # Build query in BatchExecutor format
     forks = []
     for i, (prompt_key, (rw, rh)) in enumerate(ENTRY_DEFS):
         fork = {"entry_id": f"e{i}"}
-        # If cond differs from base, supply it
         if prompt_key != P_BASE:
             fork["cond"] = conds_gpu[prompt_key]
-        # If resolution differs from base, supply it
         if (rw, rh) != (1024, 1024):
             fork["resolution"] = (rw, rh)
         forks.append(fork)
@@ -193,7 +172,6 @@ def _run_packed_one_step(executor, x_base, conds_gpu, sigma, device):
 
     results = executor.execute([query])
 
-    # Map results back by entry_id order
     result_by_id = {r["entry_id"]: r for r in results}
     denoised_list = []
     scores_list = []
@@ -229,9 +207,6 @@ def _build_serial_entries(x_base, conds_gpu, device):
     return entries
 
 
-# ---------------------------------------------------------------------------
-# Phase 3: Comparison runs
-# ---------------------------------------------------------------------------
 
 def phase3_compare(model, conds_cpu, device, dtype):
     """Run step-by-step and full-trajectory comparisons."""
@@ -245,41 +220,31 @@ def phase3_compare(model, conds_cpu, device, dtype):
         noise_field, aperture, euler_step, latent_padded,
     )
 
-    # Move conds to GPU
     conds_gpu = {k: v.to(device) for k, v in conds_cpu.items()}
 
-    # Build base sigma schedule (1024x1024, no resolution shift for fairness)
-    # Use base resolution sigma for ALL entries in BOTH paths.
     alpha = resolution_shift(1024, 1024)
     sigmas = build_sigma_schedule(N_STEPS, sampling_shift=alpha,
                                   device=device, dtype=dtype)
     _log(f"  Sigma schedule ({N_STEPS} steps): "
          f"[{float(sigmas[0]):.4f} ... {float(sigmas[-1]):.4f}]")
 
-    # Create BatchExecutor
     executor = BatchExecutor(model, device)
 
-    # Log packing plan (run a dummy scatter to see bin assignment)
     _log(f"  Entry definitions:")
     for i, (p, (rw, rh)) in enumerate(ENTRY_DEFS):
         lh, lw = latent_padded(rw, rh)
         _log(f"    e{i}: {rw}x{rh} -> latent {lh}x{lw}, "
              f"prompt='{p[:40]}...'")
 
-    # Initial noise (shared)
     base_h, base_w = 1024 // 8, 1024 // 8  # 128x128
     master = noise_field(base_h, base_w, SEED, device, dtype)
     x_base_init = sigmas[0] * aperture(master, base_h, base_w)
 
-    # ===================================================================
-    # Part A: Step-by-step comparison (synchronized x_base)
-    # ===================================================================
     _log("\n  --- Part A: Step-by-step forward pass comparison ---")
 
     step_divergences = []
     x_base = x_base_init.clone()
 
-    # Pre-build serial plans (constant across steps)
     serial_entries_init = _build_serial_entries(x_base, conds_gpu, device)
     serial_plans = _build_serial_plans(model, serial_entries_init, device)
     _log(f"  Serial plans pre-built: {len(serial_plans)} entries")
@@ -291,7 +256,6 @@ def phase3_compare(model, conds_cpu, device, dtype):
         sigma_i = float(sigmas[step_i])
         sigma_next = float(sigmas[step_i + 1])
 
-        # Serial path: one launch per entry
         serial_entries = _build_serial_entries(x_base, conds_gpu, device)
         denoised_serial, scores_serial = _run_serial_one_step(
             model, serial_entries, serial_plans, sigma_i, device,
@@ -299,7 +263,6 @@ def phase3_compare(model, conds_cpu, device, dtype):
         serial_ms = (time.perf_counter() - step_t0) * 1000
         vram_after_serial = torch.cuda.memory_allocated() / 1e9
 
-        # Packed path: BatchExecutor (bin-packed launches)
         packed_t0 = time.perf_counter()
         denoised_packed, scores_packed = _run_packed_one_step(
             executor, x_base, conds_gpu, sigma_i, device,
@@ -311,14 +274,12 @@ def phase3_compare(model, conds_cpu, device, dtype):
         _log(f"    step {step_i}: serial={serial_ms:.0f}ms packed={packed_ms:.0f}ms "
             f"VRAM={vram_after_packed:.2f}GB")
 
-        # Compare per-entry
         step_record = {"step": step_i, "sigma": sigma_i, "entries": []}
 
         for entry_idx in range(len(ENTRY_DEFS)):
             d_ser = denoised_serial[entry_idx]
             d_pack = denoised_packed[entry_idx]
 
-            # Shapes must match
             assert d_ser.shape == d_pack.shape, (
                 f"Shape mismatch at step {step_i} entry {entry_idx}: "
                 f"serial={d_ser.shape} packed={d_pack.shape}"
@@ -328,7 +289,6 @@ def phase3_compare(model, conds_cpu, device, dtype):
             max_abs = float(diff.abs().max())
             mean_abs = float(diff.abs().mean())
 
-            # Cosine similarity (flatten)
             s_flat = d_ser.flatten().float()
             p_flat = d_pack.flatten().float()
             cos_sim = float(F.cosine_similarity(s_flat.unsqueeze(0),
@@ -347,7 +307,6 @@ def phase3_compare(model, conds_cpu, device, dtype):
 
         step_divergences.append(step_record)
 
-        # Log summary for this step
         max_abs_all = max(e["max_abs"] for e in step_record["entries"])
         mean_abs_all = sum(e["mean_abs"] for e in step_record["entries"]) / len(step_record["entries"])
         min_cos = min(e["cosine_similarity"] for e in step_record["entries"])
@@ -355,8 +314,6 @@ def phase3_compare(model, conds_cpu, device, dtype):
              f"max_abs={max_abs_all:.6f}  mean_abs={mean_abs_all:.6f}  "
              f"min_cos={min_cos:.8f}")
 
-        # Advance x_base using SERIAL denoised outputs (entry 0 = base trajectory)
-        # This keeps both paths synchronized for the next step.
         guided = denoised_serial[0]  # Use entry 0 (base cond, base res) as the trajectory
         x_base = euler_step(x_base, guided,
                             torch.tensor(sigma_i, device=device, dtype=dtype),
@@ -365,9 +322,6 @@ def phase3_compare(model, conds_cpu, device, dtype):
     elapsed_a = time.perf_counter() - t0
     _log(f"  Part A done: {elapsed_a:.1f}s")
 
-    # ===================================================================
-    # Part B: Full trajectory comparison (independent x_base evolution)
-    # ===================================================================
     _log("\n  --- Part B: Full trajectory comparison (independent Euler) ---")
 
     x_serial = x_base_init.clone()
@@ -380,18 +334,15 @@ def phase3_compare(model, conds_cpu, device, dtype):
         sigma_i = float(sigmas[step_i])
         sigma_next = float(sigmas[step_i + 1])
 
-        # Serial path with serial x
         serial_entries = _build_serial_entries(x_serial, conds_gpu, device)
         denoised_serial_b, _ = _run_serial_one_step(
             model, serial_entries, serial_plans, sigma_i, device,
         )
 
-        # Packed path with packed x
         denoised_packed_b, _ = _run_packed_one_step(
             executor, x_packed, conds_gpu, sigma_i, device,
         )
 
-        # Advance each independently using entry 0 (base trajectory)
         x_serial = euler_step(
             x_serial, denoised_serial_b[0],
             torch.tensor(sigma_i, device=device, dtype=dtype),
@@ -403,7 +354,6 @@ def phase3_compare(model, conds_cpu, device, dtype):
             torch.tensor(sigma_next, device=device, dtype=dtype),
         )
 
-        # Compare accumulated trajectory divergence
         traj_diff = (x_serial - x_packed).float()
         traj_max_abs = float(traj_diff.abs().max())
         traj_mean_abs = float(traj_diff.abs().mean())
@@ -426,9 +376,6 @@ def phase3_compare(model, conds_cpu, device, dtype):
     elapsed_b = time.perf_counter() - t1
     _log(f"  Part B done: {elapsed_b:.1f}s")
 
-    # ===================================================================
-    # Extract packing plan info from the executor cache
-    # ===================================================================
     packing_plans = {}
     for key, plan in executor._plan_cache.items():
         bins = plan["bins"]
@@ -454,9 +401,6 @@ def phase3_compare(model, conds_cpu, device, dtype):
     )
 
 
-# ---------------------------------------------------------------------------
-# Phase 4: Persist diagnostics
-# ---------------------------------------------------------------------------
 
 def phase4_persist(step_divs, traj_divs, packing_plans, elapsed):
     """Write JSONL and JSON diagnostics."""
@@ -466,27 +410,23 @@ def phase4_persist(step_divs, traj_divs, packing_plans, elapsed):
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # divergence_per_step.jsonl
     jsonl_path = OUTPUT_DIR / "divergence_per_step.jsonl"
     with open(jsonl_path, "w") as f:
         for record in step_divs:
             f.write(json.dumps(record) + "\n")
     _log(f"  {jsonl_path.name}: {len(step_divs)} records")
 
-    # trajectory_divergence.jsonl
     traj_path = OUTPUT_DIR / "trajectory_divergence.jsonl"
     with open(traj_path, "w") as f:
         for record in traj_divs:
             f.write(json.dumps(record) + "\n")
     _log(f"  {traj_path.name}: {len(traj_divs)} records")
 
-    # packing_plans.json
     plans_path = OUTPUT_DIR / "packing_plans.json"
     with open(plans_path, "w") as f:
         json.dump(packing_plans, f, indent=2)
     _log(f"  {plans_path.name}: {len(packing_plans)} plan(s)")
 
-    # Compute overall statistics
     all_max_abs = []
     for record in step_divs:
         for e in record["entries"]:
@@ -532,9 +472,6 @@ def phase4_persist(step_divs, traj_divs, packing_plans, elapsed):
     return passed, overall_max, traj_final_max, traj_final_cos
 
 
-# ---------------------------------------------------------------------------
-# Phase 5: VAE decode comparison images
-# ---------------------------------------------------------------------------
 
 def phase5_vae_decode(x_serial_cpu, x_packed_cpu, device, dtype):
     """Decode serial and packed final latents, save side-by-side."""
@@ -557,7 +494,6 @@ def phase5_vae_decode(x_serial_cpu, x_packed_cpu, device, dtype):
     _log(f"  final_serial.png: {img_serial.size}")
     _log(f"  final_packed.png: {img_packed.size}")
 
-    # Side-by-side composite
     from PIL import Image
     w, h = img_serial.size
     composite = Image.new("RGB", (w * 2 + 10, h), (40, 40, 40))
@@ -571,9 +507,6 @@ def phase5_vae_decode(x_serial_cpu, x_packed_cpu, device, dtype):
     torch.cuda.empty_cache()
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 def main() -> int:
     _log(f"Packed vs Serial K-tuple validation -- {datetime.now(timezone.utc).isoformat()}")
@@ -584,14 +517,8 @@ def main() -> int:
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # ==================================================================
-    # Phase 1: Text encoder
-    # ==================================================================
     conds_cpu = phase1_encode(DEVICE, DTYPE)
 
-    # ==================================================================
-    # Phase 2: Load model + compile
-    # ==================================================================
     _log("\n" + "=" * 60)
     _log("  PHASE 2: LOAD MODEL")
     _log("=" * 60)
@@ -600,7 +527,7 @@ def main() -> int:
     from src_ii.attention_srcii import patch_sage_for_compile
 
     t0 = time.perf_counter()
-    compiled_model, raw_model = load_zimage_rlaif(
+    model = load_zimage_rlaif(
         FP8_PATH, device=DEVICE, dtype=DTYPE,
         compile_model=True, fuse=True,
     )
@@ -608,11 +535,8 @@ def main() -> int:
     _log(f"  Loaded + compiled in {time.perf_counter() - t0:.1f}s")
     _log(f"  VRAM: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
-    model = compiled_model
+    model = model
 
-    # ==================================================================
-    # Phase 3: Comparison runs
-    # ==================================================================
     (
         step_divs,
         traj_divs,
@@ -622,26 +546,17 @@ def main() -> int:
         elapsed,
     ) = phase3_compare(model, conds_cpu, DEVICE, DTYPE)
 
-    # ==================================================================
-    # Phase 4: Persist diagnostics
-    # ==================================================================
     passed, overall_max, traj_final_max, traj_final_cos = phase4_persist(
         step_divs, traj_divs, packing_plans, elapsed,
     )
 
-    # ==================================================================
-    # Phase 5: VAE decode (free backbone first)
-    # ==================================================================
-    del model, compiled_model, raw_model
+    del model, model, model
     gc.collect()
     torch.cuda.empty_cache()
     _log(f"  VRAM after backbone free: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
     phase5_vae_decode(x_serial_cpu, x_packed_cpu, DEVICE, DTYPE)
 
-    # ==================================================================
-    # Final verdict
-    # ==================================================================
     _log("\n" + "=" * 60)
     _log("  FINAL VERDICT")
     _log("=" * 60)

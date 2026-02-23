@@ -4,10 +4,10 @@ Reimplementation of architecture components from futudiffu.diffusion_model.
 All flag-guarded branching removed: one code path per class, always fused
 kernels, always block-masked attention.
 
-Attention backend (sage vs sdpa/flex) is a module-level global set once
-before torch.compile. torch.compile specializes on its value at trace time;
-the dead branch is eliminated. No recompiles as long as the backend doesn't
-change between calls.
+Attention backend (sage vs sdpa/flex) is a constructor parameter (`use_sage`)
+stored as an instance attribute. torch.compile specializes on its value at
+trace time; the dead branch is eliminated, zero overhead. No module-level
+mutable globals.
 
 Kernel imports from frozen modules (Triton kernels registered as custom ops,
 correct, no bugs):
@@ -60,27 +60,6 @@ from futudiffu.fp8_kernels import (
 )
 from torch.nn.attention.flex_attention import flex_attention
 
-
-# --- Attention backend ---
-# Set once before torch.compile. torch.compile specializes on this value
-# at trace time — the dead branch is eliminated, no graph breaks, no
-# recompiles as long as this doesn't change between forward calls.
-
-_USE_SAGE: bool = True
-
-
-def set_attention_backend(backend: str) -> None:
-    """Set the attention backend for JointAttention.
-
-    Args:
-        backend: "sage" (SageAttention INT8 QK, default) or "sdpa" (FlexAttention).
-            Must be called before torch.compile. Changing after compilation
-            triggers a recompile.
-    """
-    global _USE_SAGE
-    if backend not in ("sage", "sdpa"):
-        raise ValueError(f"Unknown attention backend: {backend!r}")
-    _USE_SAGE = (backend == "sage")
 
 
 # =====================================================================
@@ -409,7 +388,7 @@ def _crash() -> None:
     ctypes.string_at(0)
 
 
-def build_trivial_mask(seq_len: int, device: torch.device):
+def build_trivial_mask(seq_len: int, device: torch.device, use_sage: bool = True):
     """Build an all-ones block mask for a single-image sequence.
 
     Returns the right type for the active backend:
@@ -420,7 +399,7 @@ def build_trivial_mask(seq_len: int, device: torch.device):
     and cheap to construct.
     """
     from src_ii.block_mask import build_block_mask, BLOCK_M, BLOCK_N, _ceildiv
-    if _USE_SAGE:
+    if use_sage:
         return build_block_mask([seq_len], total_len=seq_len, device=device)
     else:
         from torch.nn.attention.flex_attention import create_block_mask
@@ -434,19 +413,21 @@ class JointAttention(nn.Module):
     """Branchless attention. Always fused QKV. Block-masked.
 
     block_mask is REQUIRED. Crash if None.
-    - Sage backend (_USE_SAGE=True): block_mask is uint8 Tensor.
-    - SDPA backend (_USE_SAGE=False): block_mask is FlexAttention BlockMask.
-    Backend is a module-level global set once before torch.compile.
+    - Sage backend (use_sage=True): block_mask is uint8 Tensor.
+    - SDPA backend (use_sage=False): block_mask is FlexAttention BlockMask.
+    Backend is a constructor parameter traced by torch.compile.
     """
 
     def __init__(self, dim: int, n_heads: int, n_kv_heads: int, qk_norm: bool,
-                 out_bias: bool = False, device=None, dtype=None):
+                 out_bias: bool = False, use_sage: bool = True,
+                 device=None, dtype=None):
         super().__init__()
         self.n_kv_heads = n_heads if n_kv_heads is None else n_kv_heads
         self.n_local_heads = n_heads
         self.n_local_kv_heads = self.n_kv_heads
         self.n_rep = self.n_local_heads // self.n_local_kv_heads
         self.head_dim = dim // n_heads
+        self.use_sage = use_sage
 
         self.qkv = nn.Linear(dim, (n_heads + self.n_kv_heads + self.n_kv_heads) * self.head_dim,
                               bias=False, device=device, dtype=dtype)
@@ -478,7 +459,7 @@ class JointAttention(nn.Module):
             self.q_norm.eps,
         )
 
-        if _USE_SAGE:
+        if self.use_sage:
             sm_scale = 1.0 / (self.head_dim ** 0.5)
             out, _lse = sage_attn_masked_op(xq, xk, xv, block_mask, sm_scale)
         else:
@@ -613,13 +594,15 @@ class JointTransformerBlock(nn.Module):
         self, layer_id: int, dim: int, n_heads: int, n_kv_heads: int,
         multiple_of: int, ffn_dim_multiplier: float, norm_eps: float,
         qk_norm: bool, modulation: bool = True, z_image_modulation: bool = False,
-        attn_out_bias: bool = False, device=None, dtype=None,
+        attn_out_bias: bool = False, use_sage: bool = True,
+        device=None, dtype=None,
     ):
         super().__init__()
         self.dim = dim
         self.head_dim = dim // n_heads
         self.attention = JointAttention(dim, n_heads, n_kv_heads, qk_norm,
-                                        out_bias=attn_out_bias, device=device, dtype=dtype)
+                                        out_bias=attn_out_bias, use_sage=use_sage,
+                                        device=device, dtype=dtype)
         self.feed_forward = FeedForward(dim, dim, multiple_of, ffn_dim_multiplier,
                                         device=device, dtype=dtype)
         self.layer_id = layer_id

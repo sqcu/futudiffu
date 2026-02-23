@@ -7,9 +7,10 @@ import torch
 from .sigma_schedule import build_sigma_schedule, const_inverse_noise_scaling, resolution_shift
 from .triumphant_future_reduction_ops import (
     aperture, build_per_image_sigmas, cfg1, cfg2, cfg6,
-    euler_step, gather, gather_residual_gain, latent_padded,
-    noise_field, scatter,
+    euler_sde_step, euler_step, gather, gather_residual_gain,
+    latent_padded, noise_field, scatter,
 )
+from .ddreinforce import compute_eta_schedule
 
 
 def step(executor, x_bases, specs, query_sigmas, step_i,
@@ -140,3 +141,124 @@ def spec_rollout(executor, spec, cap_lens, seed, n_steps, device, dtype,
         query_sigmas[0][-1:], x_bases[0]).detach().cpu()
     return traj, {"n_steps": n_steps, "spec_len": len(spec),
                   "scores_per_step": scores_all}
+
+
+# ---------------------------------------------------------------------------
+# SDE variants: step_sde, solve_sde, batch_rollout_sde
+# ---------------------------------------------------------------------------
+
+def step_sde(executor, x_bases, specs, query_sigmas, step_i, eta_t,
+             adapter_scales=None, gather_fn=None):
+    """One Euler SDE step. Returns (x_next, scores, guided_list, mu_list).
+
+    Identical to step() except uses euler_sde_step and returns the
+    deterministic means mu_list alongside the stochastic x_next.
+    """
+    denoised_per_query, scores = executor(x_bases, specs, step_i, adapter_scales)
+
+    reduce = gather if gather_fn is None else gather_fn
+    x_next, guided_list, mu_list = [], [], []
+    for k, (denoised_list, spec) in enumerate(zip(denoised_per_query, specs)):
+        g = reduce(denoised_list, spec)
+        sigma_k = query_sigmas[k][step_i]
+        sigma_next_k = query_sigmas[k][step_i + 1]
+        x_k, mu_k = euler_sde_step(x_bases[k], g, sigma_k, sigma_next_k, eta_t)
+        x_next.append(x_k)
+        mu_list.append(mu_k)
+        guided_list.append(g)
+    return x_next, scores, guided_list, mu_list
+
+
+def solve_sde(executor, x_bases, specs, query_sigmas, n_steps, eta_schedule,
+              adapter_scales=None, gather_fn=None, save_fn=None):
+    """Euler SDE loop. Returns (x_final, scores_all, mu_all, eta_used).
+
+    mu_all: list of n_steps lists, each containing K tensors (CPU).
+        mu_all[t][k] is the deterministic mean at step t for query k.
+    eta_used: n_steps floats (actual noise injected; 0.0 for final step).
+    """
+    scores_all = []
+    mu_all = []
+    eta_used = []
+    with torch.no_grad():
+        for i in range(n_steps):
+            x_pre = x_bases
+            scales = adapter_scales(i) if callable(adapter_scales) else adapter_scales
+
+            is_final = (i == n_steps - 1)
+            eta_t = 0.0 if is_final else eta_schedule[i]
+
+            x_bases, scores, guided, mu_list = step_sde(
+                executor, x_bases, specs, query_sigmas, i, eta_t,
+                adapter_scales=scales, gather_fn=gather_fn)
+            scores_all.append(scores.detach().cpu() if scores is not None else None)
+            mu_all.append([mu.detach().cpu() for mu in mu_list])
+            eta_used.append(eta_t)
+
+            if save_fn is not None:
+                save_fn(i, x_pre, guided)
+
+    return x_bases, scores_all, mu_all, eta_used
+
+
+def batch_rollout_sde(executor, pos_conds, neg_conds, cap_lens, seeds,
+                      resolutions, n_steps, cfg, device, dtype,
+                      eta_scale=0.1, adapter_scales=None, save_steps=None,
+                      multiplier=1.0, gather_fn=None):
+    """Build specs, init noise, run solve_sde, package trajectories.
+
+    Returns (trajectories, metadata) where each trajectory dict has:
+      "final", "seed", "resolution", "sigmas",
+      "mu_trajectory": [n_steps Tensors], "eta_used": [n_steps floats],
+      + "step_NN" entries from save_steps.
+    """
+    K = len(pos_conds)
+    specs = [cfg2(p, n, r, cfg) if cfg != 1.0 else cfg1(p, r)
+             for p, n, r in zip(pos_conds, neg_conds, resolutions)]
+
+    query_sigmas = [
+        build_sigma_schedule(n_steps, sampling_shift=resolution_shift(w, h) * multiplier,
+                             device=device, dtype=dtype)
+        for w, h in resolutions]
+
+    # Compute eta schedule from base query sigmas (use first query as reference)
+    eta_schedule = compute_eta_schedule(query_sigmas[0], eta_scale=eta_scale)
+
+    x_bases = []
+    for k in range(K):
+        w, h = resolutions[k]
+        gen = torch.Generator(device=device).manual_seed(seeds[k])
+        x_bases.append(query_sigmas[k][0] *
+                       torch.randn(1, 16, h // 8, w // 8, dtype=dtype,
+                                   device=device, generator=gen))
+
+    trajectories = [{} for _ in range(K)]
+
+    def save_fn(i, x_pres, guided_list):
+        if save_steps and i in save_steps:
+            for k in range(K):
+                trajectories[k][f"step_{i:02d}"] = {
+                    "x": x_pres[k].detach().cpu(),
+                    "guided_denoised": guided_list[k].detach().cpu(),
+                    "sigma": float(query_sigmas[k][i])}
+
+    x_bases, scores_all, mu_all, eta_used = solve_sde(
+        executor, x_bases, specs, query_sigmas, n_steps, eta_schedule,
+        adapter_scales=adapter_scales,
+        gather_fn=gather_fn,
+        save_fn=save_fn if save_steps else None)
+
+    for k in range(K):
+        x_k = const_inverse_noise_scaling(query_sigmas[k][-1:], x_bases[k])
+        trajectories[k].update({
+            "final": x_k.detach().cpu(),
+            "seed": seeds[k],
+            "resolution": resolutions[k],
+            "sigmas": [float(s) for s in query_sigmas[k]],
+            "mu_trajectory": [mu_all[t][k] for t in range(n_steps)],
+            "eta_used": eta_used,
+        })
+
+    return trajectories, {"n_steps": n_steps, "K": K, "cfg": cfg,
+                          "eta_scale": eta_scale,
+                          "scores_per_step": scores_all}

@@ -39,14 +39,11 @@ def main():
     t0 = time.perf_counter()
     device = torch.device("cuda")
 
-    # --- Load pre-persist scores ---
     print("Loading pre-persist scores...")
     pre_persist_scores = torch.load(str(OUTPUT_DIR / "pre_persist_scores.pt"), weights_only=True)
     print(f"  Shape: {pre_persist_scores.shape}")
     print(f"  dtype: {pre_persist_scores.dtype}")
 
-    # --- Load head config ---
-    # Try compound config first, fall back to legacy head_config
     config_path = OUTPUT_DIR / "btrm_compound_config.json"
     if not config_path.exists():
         config_path = OUTPUT_DIR / "head_config.json"
@@ -54,7 +51,6 @@ def main():
         head_config = json.load(f)
     print(f"  Config: {head_config}")
 
-    # --- Load persisted head ---
     print("\nLoading persisted head...")
     head = ScoreUnembedder(
         hidden_dim=head_config["hidden_dim"],
@@ -62,7 +58,6 @@ def main():
         logit_cap=head_config["logit_cap"],
     )
 
-    # Try compound head path first, fall back to legacy
     head_path = OUTPUT_DIR / "btrm_head.safetensors"
     if not head_path.exists():
         head_path = OUTPUT_DIR / "trained_head.safetensors"
@@ -72,7 +67,6 @@ def main():
     head.eval()
     print(f"  Head loaded from {head_path}")
 
-    # --- Score sample hidden states using head.forward() (not manual inline) ---
     print("\nScoring sample hidden states...")
     sample_0 = torch.load(str(OUTPUT_DIR / "hidden_sample_0.pt"), weights_only=True)
     sample_last = torch.load(str(OUTPUT_DIR / "hidden_sample_last.pt"), weights_only=True)
@@ -107,7 +101,6 @@ def main():
     print(f"    Diff:         {diff_last.tolist()}")
     print(f"    Bit-for-bit:  {exact_last}")
 
-    # Verify weight equality
     print("\n  Checking weight equality...")
     pre_weights = load_file(str(head_path))
     loaded_weights = {k: v for k, v in head.state_dict().items()}
@@ -128,7 +121,6 @@ def main():
                 all_weights_exact = False
             print(f"    {key}: exact={exact}, max_diff={max_diff:.2e}")
 
-    # Check adapter persistence if available
     adapter_path = OUTPUT_DIR / "rtheta_adapter.safetensors"
     adapter_exists = adapter_path.exists()
     if adapter_exists:
@@ -139,7 +131,6 @@ def main():
     else:
         print(f"\n  No adapter file found at {adapter_path}")
 
-    # --- Write verification results ---
     verification = {
         "sample_0": {
             "pre_persist": pre_score_0.cpu().tolist(),

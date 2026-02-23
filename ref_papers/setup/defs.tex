@@ -1,0 +1,85 @@
+\definecolor{darkblue}{rgb}{0,0.08,0.45}
+\definecolor{cred}{HTML}{D62728}
+\definecolor{cblue}{HTML}{1F77B4}
+\definecolor{cgreen}{HTML}{79AB76}
+\definecolor{cgrey}{rgb}{0.6,0.6,0.6}
+
+\newcommand{\todo}[1]{{\color{cblue}{\textsc{todo}: #1}}}
+\newcommand{\todoshort}[0]{\textbf{\todo{todo}}}
+
+\newcommand{\kcomment}[1]{{\color{cred}{\textsc{KB:} #1}}}
+
+\newcommand{\st}{\mathbf{s}_t}
+\newcommand{\stp}{\mathbf{s}_{t+1}}
+\newcommand{\stpp}{\mathbf{s}_{t+2}}
+\newcommand{\at}{\mathbf{a}_t}
+\newcommand{\rt}{\mathbf{r}_t}
+\newcommand{\atp}{\mathbf{a}_{t+1}}
+\newcommand{\atpp}{\mathbf{a}_{t+2}}
+\newcommand{\se}{\mathbf{s}_{e}}
+\newcommand{\bs}{\mathbf{s}}
+\newcommand{\ba}{\mathbf{a}}
+\newcommand{\bz}{\mathbf{z}}
+\newcommand{\bx}{\mathbf{x}}
+\newcommand{\bc}{\mathbf{c}}
+\newcommand{\bzero}{\mathbf{0}}
+\newcommand{\bI}{\mathbf{I}}
+\newcommand{\sepos}{\mathbf{s}_e^+}
+\newcommand{\seneg}{\mathbf{s}_e^-}
+
+
+\newcommand{\expect}[2]{\mathbb{E}_{#1} \left[ #2 \right] }
+
+\newcommand{\jsd}[2]{D_\text{JSD}({#1} \parallel {#2})}
+\newcommand{\kld}[2]{D_\text{KL}({#1} \parallel {#2})}
+\newcommand{\fdiv}[2]{D_f({#1} \mid\mid {#2})}
+
+\newcommand{\boydmax}[1]{\operatorname*{maximize}\limits_{#1}}
+\newcommand{\argmax}[1]{\operatorname*{argmax}\limits_{#1}}
+\newcommand{\grad}{\nabla}
+
+\newcommand{\indicator}[1]{\mathbbm{1}\left[#1\right]}
+
+\newtheorem{thm}{Theorem}
+\newtheorem{prop}{Proposition}
+\newtheorem{lem}{Lemma}
+
+\newcommand{\dd}[1]{\mathrm{d}#1}
+
+\newcommand\blfootnote[1]{%
+  \begingroup
+  \renewcommand\thefootnote{}\footnote{#1}%
+  \addtocounter{footnote}{-1}%
+  \endgroup
+}
+
+\newcommand{\te}[1]{\texttt{#1}}
+
+\newcommand{\task}[1]{\texttt{\textsc{#1}}}
+\newcommand{\jpegtask}{\texttt{compress}}
+\newcommand{\negjpegtask}{\texttt{decompress}}
+\newcommand{\aesthetictask}{\texttt{aesthetic}}
+\newcommand{\mirrortask}{\texttt{symmetry}}
+
+\newcommand{\lrl}{\mathcal{J}_{\text{DDRL}}}
+\newcommand{\ldiff}{\mathcal{L}_{\text{DDPM}}}
+\newcommand{\lmdp}{\mathcal{MDP}_{\text{MDP}}}
+
+\DeclareMathOperator*{\argmin}{arg\,min}
+
+\newcommand{\methodfull}{denoising diffusion policy optimization}
+
+
+\newcommand{\methodours}{\text{DDPO}}
+\newcommand{\methodreinforce}{$\text{DDPO}_\text{SF}$}
+\newcommand{\methodppo}{$\text{DDPO}_\text{IS}$}
+\newcommand{\methodrwr}{\text{RWR}}
+\newcommand{\methodff}{$\text{RWR}_\text{sparse}$}
+\newcommand{\sparse}{\text{sparse}}
+
+\graphicspath{{images/}}
+
+\definecolor{bike}{HTML}{ee854a}
+\definecolor{chess}{HTML}{4878d0}
+\definecolor{dishes}{HTML}{6acc64}
+

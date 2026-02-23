@@ -38,9 +38,6 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 import torch
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
 
 FP8_PATH = r"F:\dox\ai\comfyui\ComfyUI\models\diffusion_models\z_image_fp8_blockwise.safetensors"
 TE_PATH = r"F:\dox\ai\comfyui\ComfyUI\models\text_encoders\qwen_3_4b.safetensors"
@@ -70,9 +67,6 @@ EVAL_INTERVAL = 10  # Evaluate all heads every N steps
 RUN_NAME = "reward_function_validated_training_tnt_v2"
 
 
-# ---------------------------------------------------------------------------
-# Encode challenge images to latents (PINKIFY and TNT combined)
-# ---------------------------------------------------------------------------
 
 def encode_pinkify_challenge_latents(
     challenge_dir: Path,
@@ -163,9 +157,6 @@ def encode_tnt_challenge_latents(
     return cache
 
 
-# ---------------------------------------------------------------------------
-# BTRM scoring on cached latents (per-head)
-# ---------------------------------------------------------------------------
 
 def score_cached_latents(
     model,
@@ -234,9 +225,6 @@ def score_all_heads_cached(
     return results
 
 
-# ---------------------------------------------------------------------------
-# Validation log helpers
-# ---------------------------------------------------------------------------
 
 def append_validation_log(log_path: Path, entry: dict) -> None:
     """Append one evaluation entry to a validation log (JSONL)."""
@@ -244,9 +232,6 @@ def append_validation_log(log_path: Path, entry: dict) -> None:
         f.write(json.dumps(entry, default=str) + "\n")
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 def main():
     wall_start = time.perf_counter()
@@ -265,9 +250,6 @@ def main():
     print(f"  Output: {OUTPUT_DIR}")
     print("=" * 70)
 
-    # ==================================================================
-    # Phase 0: Pre-flight checks
-    # ==================================================================
     if not PINKIFY_CHALLENGE_DIR.exists():
         print(f"\n  FATAL: PINKIFY challenge directory not found: {PINKIFY_CHALLENGE_DIR}")
         return 1
@@ -280,9 +262,6 @@ def main():
         print(f"\n  FATAL: Multi-res dataset not found: {DATASET_DIR}")
         return 1
 
-    # ==================================================================
-    # Phase 1: Load dataset + build pair sampler
-    # ==================================================================
     print("\n" + "=" * 60)
     print("  Phase 1: Loading multi-res V2 dataset")
     print("=" * 60)
@@ -323,9 +302,6 @@ def main():
     print(f"  Pair space: {sampler.pair_space_size:,} possible pairs")
     print(f"  Clean fraction: {CLEAN_FRACTION}")
 
-    # ==================================================================
-    # Phase 2: Encode prompts with text encoder (then free)
-    # ==================================================================
     print("\n" + "=" * 60)
     print("  Phase 2: Encoding prompts")
     print("=" * 60)
@@ -350,10 +326,6 @@ def main():
     torch.cuda.empty_cache()
     print(f"  TE freed. VRAM: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
-    # ==================================================================
-    # Phase 3: Load VAE (kept for entire training -- used for preference
-    #          labels via reward manifest AND for challenge encoding)
-    # ==================================================================
     print("\n" + "=" * 60)
     print("  Phase 3: Loading VAE (persistent for reward function scoring)")
     print("=" * 60)
@@ -363,9 +335,6 @@ def main():
     vae = load_vae(VAE_PATH, device=device, dtype=dtype)
     print(f"  VAE loaded. VRAM: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
-    # ==================================================================
-    # Phase 3b: Encode challenge images to latents for eval (with VAE)
-    # ==================================================================
     print("\n  Encoding PINKIFY challenge images to latents...")
     pinkify_latent_cache = encode_pinkify_challenge_latents(
         PINKIFY_CHALLENGE_DIR, vae, device, dtype,
@@ -378,8 +347,6 @@ def main():
     )
     print(f"  Cached {len(tnt_latent_cache)} TNT challenge latents")
 
-    # Build a COMBINED latent cache for cross-head decorrelation
-    # (union of both validation sets, with prefixed labels to avoid collisions)
     combined_latent_cache = {}
     for label, data in pinkify_latent_cache.items():
         combined_latent_cache[f"PINK_{label}"] = data
@@ -387,9 +354,6 @@ def main():
         combined_latent_cache[f"TNT_{label}"] = data
     print(f"  Combined cache for cross-head: {len(combined_latent_cache)} images")
 
-    # ==================================================================
-    # Phase 3c: Ground truth validation (pixel-space)
-    # ==================================================================
     print("\n" + "=" * 60)
     print("  Phase 3c: Ground truth scores (pixel-space)")
     print("=" * 60)
@@ -397,7 +361,6 @@ def main():
     from src_ii.pinkify_validation import validate_pinkify_ranking
     from src_ii.tnt_validation import validate_tnt_ranking
 
-    # PINKIFY ground truth
     pinkify_gt = validate_pinkify_ranking(
         challenge_dir=str(PINKIFY_CHALLENGE_DIR), device=device,
     )
@@ -407,7 +370,6 @@ def main():
         status = "PASS" if check["passed"] else "FAIL"
         print(f"    [{status}] {check['name']}: {check['detail']}")
 
-    # TNT ground truth
     tnt_gt = validate_tnt_ranking(
         challenge_dir=str(TNT_CHALLENGE_DIR), device=device,
     )
@@ -417,44 +379,35 @@ def main():
         status = "PASS" if check["passed"] else "FAIL"
         print(f"    [{status}] {check['name']}: {check['detail']}")
 
-    # Save ground truth
     gt_path = OUTPUT_DIR / "ground_truth.json"
     with open(str(gt_path), "w") as f:
         json.dump({"pinkify": pinkify_gt, "tnt": tnt_gt}, f, indent=2)
     print(f"\n  Ground truth saved to {gt_path}")
 
-    # Ground truth cross-head decorrelation (pixel-space scores)
     from src_ii.cross_head_decorrelation import measure_cross_head_from_pixel_scores
 
-    # Compute pinkify and TNT scores for all images in the combined set
     gt_head_scores = {"pinkify": {}, "thisnotthat": {}}
     for label in pinkify_gt["scores"]:
         gt_head_scores["pinkify"][f"PINK_{label}"] = pinkify_gt["scores"][label]
     for label in tnt_gt["scores"]:
         gt_head_scores["thisnotthat"][f"TNT_{label}"] = tnt_gt["scores"][label]
 
-    # For cross-head measurement, we need scores from BOTH heads on the SAME images.
-    # Score PINKIFY images with TNT ground truth, and TNT images with PINKIFY ground truth.
     from src_ii.reward_functions import pinkify_score_gpu, thisnotthat_score_gpu, _pil_to_tensor
     from PIL import Image
     import numpy as np
     import torch.nn.functional as F
 
-    # Load TNT references for scoring
     this_pil = Image.open(str(TNT_CHALLENGE_DIR / "pizza-ratto.png")).convert("RGB")
     that_pil = Image.open(str(TNT_CHALLENGE_DIR / "offhand_pleometric.png")).convert("RGB")
     this_ref_tensor = _pil_to_tensor(this_pil, device)
     that_ref_tensor = _pil_to_tensor(that_pil, device)
 
-    # Build a bound TNT score function (captures references)
     def tnt_score_bound(img_t: torch.Tensor) -> torch.Tensor:
         """TNT score with THIS/THAT references pre-bound."""
         return thisnotthat_score_gpu(img_t, this_ref_tensor, that_ref_tensor)
 
-    # Score PINKIFY images with TNT and vice versa, building a shared score table
     gt_cross_scores = {"pinkify": {}, "thisnotthat": {}}
 
-    # Score all PINKIFY challenge images
     from src_ii.pinkify_validation import _load_challenge_images as _load_pinkify_images
     pinkify_pixel_images = _load_pinkify_images(PINKIFY_CHALLENGE_DIR, device=device)
     with torch.no_grad():
@@ -463,7 +416,6 @@ def main():
             gt_cross_scores["pinkify"][key] = float(pinkify_score_gpu(img_t).item())
             gt_cross_scores["thisnotthat"][key] = float(tnt_score_bound(img_t).item())
 
-    # Score all TNT challenge images
     from src_ii.tnt_validation import _load_tnt_challenge_images
     tnt_pixel_images = _load_tnt_challenge_images(TNT_CHALLENGE_DIR, device=device)
     with torch.no_grad():
@@ -483,9 +435,6 @@ def main():
     with open(str(gt_cross_path), "w") as f:
         json.dump(gt_cross, f, indent=2, default=str)
 
-    # ==================================================================
-    # Phase 4: Load FP8 backbone + create BTRMCompoundModel
-    # ==================================================================
     print("\n" + "=" * 60)
     print("  Phase 4: Loading backbone + creating BTRM compound model")
     print("=" * 60)
@@ -495,9 +444,7 @@ def main():
     from src_ii.multi_lora import get_adapter_params
     from src_ii.sigma_schedule import build_sigma_schedule, resolution_shift
 
-    # compile_model=False is CORRECT here: whole-model torch.compile is
-    # incompatible with per-block gradient checkpointing.
-    _, raw_model = load_zimage_rlaif(
+    raw_model = load_zimage_rlaif(
         FP8_PATH, device=device, dtype=dtype,
         compile_model=False, fuse=True,
     )
@@ -518,9 +465,6 @@ def main():
     print(f"  Head params: {n_head:,}")
     print(f"  Total trainable: {n_adapter + n_head:,}")
 
-    # ==================================================================
-    # Phase 4b: Initial evaluation (before training)
-    # ==================================================================
     print("\n" + "=" * 60)
     print("  Phase 4b: Initial evaluation (before training)")
     print("=" * 60)
@@ -529,7 +473,6 @@ def main():
     from src_ii.tnt_validation import _check_tnt_ranking as check_tnt_ranking
     from src_ii.cross_head_decorrelation import measure_cross_head_decorrelation
 
-    # Init validation log files
     pinkify_log_path = OUTPUT_DIR / "pinkify_validation_log.jsonl"
     tnt_log_path = OUTPUT_DIR / "tnt_validation_log.jsonl"
     cross_head_log_path = OUTPUT_DIR / "cross_head_decorrelation_log.jsonl"
@@ -538,7 +481,6 @@ def main():
         if p.exists():
             p.unlink()
 
-    # Score with initial (untrained) model
     pinkify_scores = score_cached_latents(
         raw_model, pinkify_latent_cache, "pinkify", HEAD_NAMES, device,
     )
@@ -589,9 +531,6 @@ def main():
     print(f"  Initial TNT: {initial_eval['tnt']['n_passed']}/{len(tnt_checks)} constraints")
     print(f"  Initial cross-head: {cross_head_result['summary']}")
 
-    # ==================================================================
-    # Build load_latent_fn
-    # ==================================================================
     _v2_meta_cache = {}
 
     def _get_v2_meta(traj_id):
@@ -638,9 +577,6 @@ def main():
 
         return latent, timestep, cond, num_tokens
 
-    # ==================================================================
-    # Build reward manifest (THE KEY CHANGE)
-    # ==================================================================
     print("\n" + "=" * 60)
     print("  Building reward manifest")
     print("=" * 60)
@@ -656,9 +592,6 @@ def main():
     print(f"  Preference labels: derived from reward function scores")
     print(f"  NOT sigma-based. Each head gets INDEPENDENT preferences.")
 
-    # ==================================================================
-    # Phase 5: Training loop with validation callback
-    # ==================================================================
     print("\n" + "=" * 60)
     print(f"  Phase 5: Training ({N_STEPS} steps) + reward-function validation")
     print(f"  macrobatch_budget={MACROBATCH_BUDGET}, clean_fraction={CLEAN_FRACTION}")
@@ -669,14 +602,8 @@ def main():
     from src_ii.training_artifacts import TrainingArtifacts
     from src_ii.incremental_save import TrainingCurveWriter
 
-    # Disable donated buffer optimization: compiled backward with
-    # retain_graph=True (needed for cross-bin pair processing) is
-    # incompatible with donated buffers in torch 2.10+.
     torch._functorch.config.donated_buffer = False
 
-    # Disable CUDA graph trees: gradient checkpointing replays the
-    # compiled forward, which overwrites CUDA graph output tensors
-    # that are still referenced by the first forward's computation graph.
     torch._inductor.config.triton.cudagraph_trees = False
 
     artifacts = TrainingArtifacts(
@@ -687,7 +614,6 @@ def main():
 
     curve_writer = TrainingCurveWriter(OUTPUT_DIR / "training_curve.jsonl")
 
-    # Validation callback: runs PINKIFY, TNT, and cross-head at each eval step
     eval_count = 0
 
     def validation_callback(step: int, entry: dict) -> None:
@@ -703,7 +629,6 @@ def main():
 
         t_eval_start = time.perf_counter()
 
-        # PINKIFY validation
         pinkify_scores_val = score_cached_latents(
             raw_model, pinkify_latent_cache, "pinkify", HEAD_NAMES, device,
         )
@@ -721,7 +646,6 @@ def main():
             "training_accuracy_pinkify": entry.get("accuracy_pinkify", 0.0),
         })
 
-        # TNT validation
         tnt_scores_val = score_cached_latents(
             raw_model, tnt_latent_cache, "thisnotthat", HEAD_NAMES, device,
         )
@@ -739,7 +663,6 @@ def main():
             "training_accuracy_thisnotthat": entry.get("accuracy_thisnotthat", 0.0),
         })
 
-        # Cross-head decorrelation
         cross_result = measure_cross_head_decorrelation(
             raw_model, combined_latent_cache,
             head_names=HEAD_NAMES, device=device,
@@ -762,7 +685,6 @@ def main():
               f"cross-rho: {rho_str} | "
               f"{eval_time:.1f}s")
 
-        # Re-enable training mode
         raw_model.gradient_checkpointing = True
         raw_model.train()
 
@@ -772,7 +694,6 @@ def main():
         model=raw_model,
         pair_sampler=sampler,
         load_latent_fn=load_latent_fn,
-        # preference_fn is NOT needed -- reward_manifest replaces it
         n_steps=N_STEPS,
         lr=LR,
         head_names=HEAD_NAMES,
@@ -801,9 +722,6 @@ def main():
     print(f"\n  Training complete: {train_time:.1f}s "
           f"({train_time / N_STEPS:.1f}s/step)")
 
-    # ==================================================================
-    # Phase 6: Final analysis
-    # ==================================================================
     print("\n" + "=" * 60)
     print("  Phase 6: Final analysis")
     print("=" * 60)
@@ -833,9 +751,6 @@ def main():
     persist_info = persist_btrm(raw_model, "rtheta", str(OUTPUT_DIR))
     print(f"  Model persisted: {persist_info}")
 
-    # ==================================================================
-    # Phase 6b: Load and summarize all validation logs
-    # ==================================================================
 
     def load_jsonl(path):
         entries = []
@@ -853,7 +768,6 @@ def main():
     tnt_entries = load_jsonl(tnt_log_path)
     cross_entries = load_jsonl(cross_head_log_path)
 
-    # Build comprehensive validation summary
     validation_summary = {
         "ground_truth": {
             "pinkify": pinkify_gt,
@@ -887,7 +801,6 @@ def main():
         ],
     }
 
-    # Find first step where all constraints pass (per head)
     first_pinkify_all_pass = None
     for e in pinkify_entries:
         if e.get("passed"):
@@ -903,7 +816,6 @@ def main():
     validation_summary["first_pinkify_all_pass"] = first_pinkify_all_pass
     validation_summary["first_tnt_all_pass"] = first_tnt_all_pass
 
-    # Final cross-head rho
     final_cross_rho = cross_entries[-1]["cross_rho"] if cross_entries else {}
     validation_summary["final_cross_rho"] = final_cross_rho
 
@@ -911,9 +823,6 @@ def main():
     with open(str(val_summary_path), "w") as f:
         json.dump(validation_summary, f, indent=2, default=str)
 
-    # ==================================================================
-    # Phase 7: Run summary
-    # ==================================================================
     print("\n" + "=" * 60)
     print("  Phase 7: Summary")
     print("=" * 60)
@@ -983,7 +892,6 @@ def main():
     print(f"  Clean fraction (measured): {sampler.get_clean_fraction():.1%}")
     print(f"  Output: {OUTPUT_DIR}")
 
-    # Cleanup: free VAE last
     del vae
     reader.close()
     torch.cuda.empty_cache()
