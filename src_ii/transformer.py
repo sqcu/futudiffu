@@ -13,7 +13,7 @@ Kernel imports from frozen modules (Triton kernels registered as custom ops,
 correct, no bugs):
   - futudiffu.fused_kernels: fused_rms_norm_modulate, fused_rms_norm_gate_residual,
     fused_qkv_postprocess
-  - futudiffu.sage_attention: sage_attn_masked_op
+  - src_ii.attention_srcii: sage_attn_masked_op (compile-friendly backward)
   - futudiffu.fp8: FP8Linear, dequantize_fp8_blockwise
   - futudiffu.fp8_kernels: fp8_silu_gate_quant_op, fp8_gemm_blockwise_op,
     fp8_gemm_v1t_op, _DTYPE_TO_CODE_K
@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import torch._dynamo
 torch._dynamo.config.suppress_errors = False
+torch._dynamo.config.cache_size_limit = 64  # 4 linear dims × 2 requires_grad × headroom
 
 import torch._inductor.config
 torch._inductor.config.triton.persistent_reductions = False  # torch 2.10.0 sympy Infinity bug
@@ -50,7 +51,7 @@ from futudiffu.fused_kernels import (
     fused_rms_norm_gate_residual,
     fused_qkv_postprocess,
 )
-from futudiffu.sage_attention import sage_attn_masked_op
+from src_ii.attention_srcii import sage_attn_masked_op
 from futudiffu.fp8 import FP8Linear, dequantize_fp8_blockwise
 from futudiffu.fp8_kernels import (
     fp8_silu_gate_quant_op,

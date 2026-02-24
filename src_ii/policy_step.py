@@ -7,10 +7,13 @@ the executor handles packing and adapter routing, the gather function
 handles reduction, and this module only sees the guided output.
 
 Per the DDPO paper (Black et al. 2023), the per-step loss is pure
-REINFORCE with no KL regularization and uniform step weighting:
+REINFORCE with no KL regularization and uniform step weighting.
 
-    loss_t = -(advantage * log_prob_mean)
-    loss_t.backward()
+The outer loop is step-first. For each step, trajectories are processed
+in micro-batches of `microbatch_size`, with a backward() after each
+micro-batch. Gradients accumulate additively into LoRA params — this is
+mathematically identical to processing all trajectories at once, but
+bounds GPU memory to 1 bin's activations per backward call.
 
 Drift between policy and reference is tracked as MSE between guided
 outputs (diagnostic only, not a loss term). LoRA rank provides an
@@ -24,7 +27,6 @@ Import constraints:
   - torch
   - src_ii.ddreinforce (step_log_prob)
   - src_ii.triumphant_future_reduction_ops (gather -- default gather_fn)
-  - src_ii.multi_lora (get_adapter_params -- for optimizer init only)
   - No futudiffu imports
 """
 
@@ -41,127 +43,233 @@ logger = logging.getLogger("futudiffu.policy_step")
 
 
 # ---------------------------------------------------------------------------
+# Sign agreement tracking
+# ---------------------------------------------------------------------------
+
+class SignAgreementTracker:
+    """Online measurement of gradient coherence across optimizer steps.
+
+    Compares the sign of (post_step - pre_step) parameter diffs between
+    successive iterations. High sign agreement (>90%) means the optimizer
+    is consistently pushing parameters in the same direction despite
+    per-iteration reward noise.
+
+    Memory cost: one int8 tensor (~29 KB for rank-8 LoRA across 240 groups)
+    plus a transient bf16 clone during pre_step (~58 KB). Negligible.
+    """
+
+    def __init__(self, optimizer: torch.optim.Optimizer):
+        self.optimizer = optimizer
+        self._prev_diff_signs: torch.Tensor | None = None
+        self._prev_diff_norm: float | None = None
+        self._pre_snapshot: list[torch.Tensor] | None = None
+        self._iteration: int = 0
+
+    def _all_params(self) -> list[torch.nn.Parameter]:
+        return [p for g in self.optimizer.param_groups for p in g["params"]]
+
+    def _snapshot(self) -> list[torch.Tensor]:
+        return [p.data.clone() for p in self._all_params()]
+
+    def pre_step(self):
+        """Call BEFORE optimizer.step(). Captures current param values."""
+        self._pre_snapshot = self._snapshot()
+
+    def post_step(self) -> dict | None:
+        """Call AFTER optimizer.step(). Returns sign agreement metrics or None
+        if this is the first iteration (no previous diff to compare)."""
+        params = self._all_params()
+        diffs = [p.data - snap for p, snap in zip(params, self._pre_snapshot)]
+        diff_flat = torch.cat([d.flatten() for d in diffs])
+        diff_signs = diff_flat.sign().to(torch.int8)
+        diff_norm = float(diff_flat.norm())
+        zero_frac = float((diff_flat == 0).float().mean())
+
+        result = None
+        if self._prev_diff_signs is not None:
+            agree = float((diff_signs == self._prev_diff_signs).float().mean())
+            result = {
+                "sign_agreement": agree,
+                "zero_frac": zero_frac,
+                "diff_norm": diff_norm,
+                "prev_diff_norm": self._prev_diff_norm,
+                "iteration": self._iteration,
+            }
+
+        self._prev_diff_signs = diff_signs
+        self._prev_diff_norm = diff_norm
+        self._pre_snapshot = None
+        self._iteration += 1
+        return result
+
+
+# ---------------------------------------------------------------------------
 # Gradient accumulation
 # ---------------------------------------------------------------------------
 
 def accumulate_reinforce_gradients(
     executor,
-    spec,
-    query_sigmas: torch.Tensor,
-    trajectory: dict,
-    sparse_steps: list[int],
-    advantage: float,
+    specs: list,
+    query_sigmas: list[torch.Tensor],
+    trajectories: list[dict],
+    gradient_steps: list[int],
+    advantages: list[float],
     adapter_scales=None,
     ref_adapter_scales=None,
     gather_fn=None,
+    microbatch_size: int = 1,
 ) -> dict:
-    """Accumulate REINFORCE gradients for one trajectory.
+    """Accumulate REINFORCE gradients for N trajectories, step-first.
 
-    For each sparse step:
-      1. Call executor with policy adapter scales (with grad)
-      2. Gather guided output via gather_fn (same as inference)
-      3. Compute mu_theta from Euler formula (same as euler_step)
-      4. Call executor with reference adapter scales (no grad)
-      5. Gather guided_ref, compute mu_ref for drift tracking
-      6. lp_theta = step_log_prob(x_next, mu_theta, eta_t)
-      7. loss_t = -(advantage * lp_theta.mean())
-      8. loss_t.backward() (accumulates into LoRA params)
+    Outer loop = step indices. For each step, active trajectories are
+    chunked into micro-batches of `microbatch_size`. Each micro-batch
+    gets one executor call, one loss computation, one backward(). Gradients
+    accumulate additively into LoRA params across micro-batches.
 
-    The executor is the SAME callable used for rollout generation. It
-    handles all packing, CFG forking, sigma shifting, and adapter routing.
-    The gather_fn is the SAME reduction function used during inference.
-    This function does not know what reduction is used.
+    microbatch_size=1: 1 trajectory (2 cfg2 entries) per backward. Lowest
+    memory (~12 GB peak on 4090). One bin per call.
 
-    All sparse steps receive equal weight (no logSNR reweighting).
-    No KL regularization (per DDPO paper, Section 3 and Appendix C).
+    microbatch_size=N: all trajectories at once. Fastest (fewest forward
+    passes), but O(bins) activation memory held simultaneously. Only viable
+    when total bins × ~6 GB/bin fits in VRAM.
 
     Args:
         executor: Callable with .query_sigmas attribute. Called as
-            executor([x_t], [spec], step_i, adapter_scales) ->
-            (denoised_per_query, scores). Must preserve gradient graph
-            (no .detach() on denoised outputs).
-        spec: The k-tuple spec for this trajectory (e.g. from cfg2()).
-            Same spec used during rollout generation.
-        query_sigmas: (n_steps+1,) sigma schedule for this trajectory.
-            Same schedule used during rollout generation.
-        trajectory: Dict with checkpoint_N entries (1,16,H,W latents)
+            executor(x_bases, specs, step_i, adapter_scales) ->
+            (denoised_per_query, scores). Must preserve gradient graph.
+        specs: N k-tuple specs (one per trajectory, e.g. from cfg2()).
+        query_sigmas: N (n_steps+1,) sigma schedules.
+        trajectories: N dicts with checkpoint_i entries (1,16,H,W latents)
             and eta_used (list of per-step noise scales).
-        sparse_steps: Step indices to compute gradients for.
-        advantage: Scalar advantage for this trajectory.
-        adapter_scales: Adapter scales for the policy forward (with
-            the policy adapter active). Constructed by the caller.
+        gradient_steps: Step indices to differentiate (shared superset;
+            per-step filtering skips trajectories missing checkpoints).
+        advantages: N advantage scalars.
+        adapter_scales: Adapter scales for the policy forward.
         ref_adapter_scales: Adapter scales for the reference forward
-            (policy adapter zeroed out). If None, skips reference
-            forward and drift tracking.
-        gather_fn: Reduction function. Defaults to gather() from
-            triumphant_future_reduction_ops (standard linear CFG).
+            (no_grad). If None, skips drift tracking.
+        gather_fn: Reduction function. Defaults to gather().
+        microbatch_size: Trajectories per executor call. Controls memory
+            vs throughput tradeoff.
 
     Returns:
-        Dict with total_log_prob, total_drift_mse, n_steps.
+        Dict with total_log_prob, total_drift_mse, n_steps,
+        per_step (list of per-step diagnostics).
     """
     reduce = gather if gather_fn is None else gather_fn
-    eta_used = trajectory.get("eta_used")
-    device = query_sigmas.device
+    device = query_sigmas[0].device
+    N = len(trajectories)
 
     total_log_prob = 0.0
     total_drift_mse = 0.0
     n_computed = 0
+    per_step_diag: list[dict] = []
 
-    for step_idx in sparse_steps:
-        sigma_t = query_sigmas[step_idx]
-        sigma_next = query_sigmas[step_idx + 1]
-        dt = sigma_next - sigma_t
+    for step_idx in gradient_steps:
+        # --- Filter active trajectories for this step ---
+        active: list[tuple[int, float]] = []  # (traj_index, eta_t)
+        for i in range(N):
+            traj = trajectories[i]
+            if f"checkpoint_{step_idx}" not in traj:
+                continue
+            if f"checkpoint_{step_idx + 1}" not in traj:
+                continue
 
-        if eta_used is not None and step_idx < len(eta_used):
-            eta_t = eta_used[step_idx]
-        else:
-            eta_t = float(abs(sigma_next - sigma_t)) * 0.1
+            eta_used = traj.get("eta_used")
+            if eta_used is not None and step_idx < len(eta_used):
+                eta_t = eta_used[step_idx]
+            else:
+                eta_t = float(abs(query_sigmas[i][step_idx + 1]
+                                  - query_sigmas[i][step_idx])) * 0.1
 
-        if eta_t < 1e-6:
+            if eta_t < 1e-6:
+                per_step_diag.append({
+                    "step_idx": step_idx, "trajectory": i, "skipped": True,
+                    "sigma_t": float(query_sigmas[i][step_idx]), "eta_t": eta_t,
+                })
+                continue
+
+            active.append((i, eta_t))
+
+        if not active:
             continue
 
-        x_t = trajectory[f"checkpoint_{step_idx}"].to(device)
+        # --- Process in micro-batches ---
+        for mb_start in range(0, len(active), microbatch_size):
+            mb_active = active[mb_start:mb_start + microbatch_size]
+            mb_indices = [a[0] for a in mb_active]
 
-        # Policy forward: adapter active, with gradients.
-        # Set query_sigmas on executor so it reads the correct sigma.
-        executor.query_sigmas = [query_sigmas]
-        denoised_per_query, _scores = executor([x_t], [spec], step_idx, adapter_scales)
-        guided_theta = reduce(denoised_per_query[0], spec)
+            x_ts = [trajectories[i][f"checkpoint_{step_idx}"].to(device)
+                    for i in mb_indices]
+            mb_specs = [specs[i] for i in mb_indices]
+            mb_sigmas = [query_sigmas[i] for i in mb_indices]
 
-        d_theta = (x_t - guided_theta) / sigma_t
-        mu_theta = x_t + d_theta * dt
+            # --- ONE executor call per micro-batch ---
+            executor.query_sigmas = mb_sigmas
+            denoised_per_query, _scores = executor(
+                x_ts, mb_specs, step_idx, adapter_scales)
 
-        # Reference forward: adapter zeroed, no gradients.
-        if ref_adapter_scales is not None:
-            with torch.no_grad():
-                denoised_ref, _ = executor([x_t], [spec], step_idx, ref_adapter_scales)
-                guided_ref = reduce(denoised_ref[0], spec)
-                d_ref = (x_t - guided_ref) / sigma_t
-                mu_ref = x_t + d_ref * dt
+            # --- Euler chain → micro-batch loss ---
+            mb_loss = torch.tensor(0.0, device=device)
+            mb_guided_detached: list[torch.Tensor] = []
+            mb_lp_values: list[float] = []
 
-        # x_next from recorded trajectory
-        next_key = f"checkpoint_{step_idx + 1}"
-        if next_key in trajectory:
-            x_next = trajectory[next_key].to(device)
-        else:
-            x_next = mu_theta.detach()
+            for q, (active_i, eta_t) in enumerate(mb_active):
+                sigma_t = query_sigmas[active_i][step_idx]
+                sigma_next = query_sigmas[active_i][step_idx + 1]
+                dt = sigma_next - sigma_t
 
-        lp_theta = step_log_prob(x_next.detach(), mu_theta, eta_t)
+                guided_theta = reduce(denoised_per_query[q], mb_specs[q])
 
-        step_loss = -advantage * lp_theta.mean()
-        step_loss.backward()
+                if guided_theta.grad_fn is None:
+                    logger.error(
+                        "grad_fn is None on guided_theta at step %d traj %d",
+                        step_idx, active_i,
+                    )
 
-        with torch.no_grad():
+                d_theta = (x_ts[q] - guided_theta) / sigma_t
+                mu_theta = x_ts[q] + d_theta * dt
+
+                x_next = trajectories[active_i][f"checkpoint_{step_idx + 1}"].to(device)
+                lp = step_log_prob(x_next.detach(), mu_theta, eta_t)
+
+                mb_loss = mb_loss - advantages[active_i] * lp.mean()
+                mb_guided_detached.append(guided_theta.detach())
+                mb_lp_values.append(float(lp.mean().detach()))
+
+            # --- backward per micro-batch: graph freed after each ---
+            mb_loss.backward()
+
+            # --- Reference forward for drift (no_grad) ---
             if ref_adapter_scales is not None:
-                drift_mse = (guided_theta.detach() - guided_ref).pow(2).mean()
-                total_drift_mse += float(drift_mse)
-        total_log_prob += float(lp_theta.mean().detach())
-        n_computed += 1
+                with torch.no_grad():
+                    executor.query_sigmas = mb_sigmas
+                    denoised_ref, _ = executor(
+                        x_ts, mb_specs, step_idx, ref_adapter_scales)
+                    for q, active_i in enumerate(mb_indices):
+                        guided_ref = reduce(denoised_ref[q], mb_specs[q])
+                        drift_mse = (mb_guided_detached[q] - guided_ref).pow(2).mean()
+                        total_drift_mse += float(drift_mse)
+
+            # --- Per-query diagnostics ---
+            for q, (active_i, eta_t) in enumerate(mb_active):
+                total_log_prob += mb_lp_values[q]
+                n_computed += 1
+                per_step_diag.append({
+                    "step_idx": step_idx,
+                    "trajectory": active_i,
+                    "skipped": False,
+                    "sigma_t": float(query_sigmas[active_i][step_idx]),
+                    "eta_t": eta_t,
+                    "inv_eta_sq": 1.0 / (eta_t * eta_t),
+                    "log_prob": mb_lp_values[q],
+                    "n_active": len(active),
+                })
 
     return {
         "total_log_prob": total_log_prob,
         "total_drift_mse": total_drift_mse,
         "n_steps": n_computed,
+        "per_step": per_step_diag,
     }
 
 
@@ -170,65 +278,55 @@ def accumulate_reinforce_gradients(
 # ---------------------------------------------------------------------------
 
 def policy_optimizer_step(
-    model,
-    policy_optimizers: dict,
-    device: torch.device,
-    dtype: torch.dtype,
-    params: dict,
-    policy_schedulers: dict | None = None,
+    optimizer: torch.optim.Optimizer,
+    max_grad_norm: float = 1.0,
+    scheduler=None,
+    sign_tracker: SignAgreementTracker | None = None,
 ) -> dict:
-    """Clip gradients, step optimizer, zero grads.
+    """Clip gradients and step optimizer.
 
-    Lazy-inits optimizer per adapter_name on first call.
+    The caller owns zero_grad (before accumulation) and optimizer creation
+    (at setup time). This function is clip + step only.
 
     Args:
-        model: The diffusion model with MultiLoRALinear modules.
-        policy_optimizers: Mutable dict of {adapter_name: optimizer}.
-        device: GPU device.
-        dtype: Compute dtype.
-        params: Dict with adapter_name, max_grad_norm, lr.
-        policy_schedulers: Optional dict of {adapter_name: scheduler}.
+        optimizer: The policy optimizer (created at setup, not here).
+        max_grad_norm: Gradient clipping threshold.
+        scheduler: Optional LR scheduler to step after optimizer.
+        sign_tracker: Optional SignAgreementTracker. If provided, snapshots
+            params before step and computes sign agreement after.
 
     Returns:
-        Dict with grad_norm, n_params, lr.
+        Dict with grad_norm, n_params, n_params_with_grad, lr,
+        and optionally sign_agreement (dict or None).
     """
-    from src_ii.multi_lora import get_adapter_params
-
-    adapter_name = params["adapter_name"]
-    max_grad_norm = params.get("max_grad_norm", 1.0)
-    lr = params.get("lr", 1e-4)
-
-    # Lazy-init optimizer
-    if adapter_name not in policy_optimizers:
-        adapter_param_dict = get_adapter_params(model, adapter_name)
-        adapter_params = list(adapter_param_dict.values())
-        if not adapter_params:
-            return {"grad_norm": 0.0, "n_params": 0, "lr": lr,
-                    "error": f"no params found for adapter {adapter_name}"}
-        policy_optimizers[adapter_name] = torch.optim.AdamW(
-            adapter_params, lr=lr)
-
-    optimizer = policy_optimizers[adapter_name]
-
-    # Collect params with gradients for clipping
     param_list = [p for group in optimizer.param_groups for p in group["params"]
                   if p.grad is not None]
 
     if not param_list:
-        return {"grad_norm": 0.0, "n_params": 0, "lr": lr}
+        return {"grad_norm": 0.0, "n_params": 0,
+                "n_params_with_grad": 0,
+                "lr": optimizer.param_groups[0]["lr"]}
 
     grad_norm = float(torch.nn.utils.clip_grad_norm_(param_list, max_grad_norm))
+
+    if sign_tracker is not None:
+        sign_tracker.pre_step()
+
     optimizer.step()
 
-    if policy_schedulers and adapter_name in policy_schedulers:
-        policy_schedulers[adapter_name].step()
+    sign_result = None
+    if sign_tracker is not None:
+        sign_result = sign_tracker.post_step()
 
-    optimizer.zero_grad()
+    if scheduler is not None:
+        scheduler.step()
 
-    current_lr = optimizer.param_groups[0]["lr"]
-
-    return {
+    result = {
         "grad_norm": grad_norm,
         "n_params": sum(p.numel() for p in param_list),
-        "lr": current_lr,
+        "n_params_with_grad": len(param_list),
+        "lr": optimizer.param_groups[0]["lr"],
     }
+    if sign_result is not None:
+        result["sign_agreement"] = sign_result
+    return result

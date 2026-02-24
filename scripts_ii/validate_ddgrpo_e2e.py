@@ -362,6 +362,7 @@ def accumulate_and_step(
     total_log_prob = 0.0
     total_drift_mse = 0.0
     n_grad_steps = 0
+    all_per_step: list[dict] = []
 
     for k, traj in enumerate(trajectories):
         adv_k = float(advantages[k])
@@ -396,6 +397,7 @@ def accumulate_and_step(
         total_log_prob += result["total_log_prob"]
         total_drift_mse += result["total_drift_mse"]
         n_grad_steps += result["n_steps"]
+        all_per_step.extend(result.get("per_step", []))
 
     model.gradient_checkpointing = old_gc
 
@@ -412,6 +414,9 @@ def accumulate_and_step(
         "total_drift_mse": total_drift_mse,
         "n_grad_steps": n_grad_steps,
         "grad_norm": opt_result.get("grad_norm", 0.0),
+        "n_params_with_grad": opt_result.get("n_params_with_grad", 0),
+        "module_grad_norms": opt_result.get("module_grad_norms"),
+        "per_step_diag": all_per_step,
         "lr": opt_result.get("lr", lr),
     }
 
@@ -584,6 +589,7 @@ def main():
             "iteration": iteration,
             "prompt_idx": prompt_idx,
             "resolution": list(resolution),
+            "seeds": seeds,
             "mean_reward": float(rewards.mean()),
             "std_reward": float(rewards.std()),
             "rewards": rewards.tolist(),
@@ -593,6 +599,9 @@ def main():
             "total_drift_mse": grad_result["total_drift_mse"],
             "n_grad_steps": grad_result["n_grad_steps"],
             "grad_norm": grad_result["grad_norm"],
+            "n_params_with_grad": grad_result.get("n_params_with_grad", 0),
+            "module_grad_norms": grad_result.get("module_grad_norms"),
+            "per_step_diag": grad_result.get("per_step_diag"),
             "elapsed_s": elapsed,
         }
         metrics_writer.write_step(metrics)
