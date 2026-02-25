@@ -130,6 +130,10 @@ validation_renders/**/*.npy
 !validation_renders/rtheta_policy_demo/
 !validation_renders/rtheta_policy_demo/**
 
+# policy intervention comparison renders (force-tracked)
+!validation_renders/policy_intervention_v2_v2b/
+!validation_renders/policy_intervention_v2_v2b/**
+
 # ============================================================
 # Heattest render trajectory subdirectories (PNG debugging)
 # The tracked manifest/summary files stay.

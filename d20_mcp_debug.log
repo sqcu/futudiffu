@@ -1200,3 +1200,59 @@
 [d20] 1771966602.696 sent response for id=4
 [d20] 1771968623.344 dispatch: method=tools/call id=5
 [d20] 1771968623.344 sent response for id=5
+[d20] 1771975490.221 dispatch: method=tools/call id=6
+[d20] 1771975490.222 sent response for id=6
+[d20] 1771975663.494 dispatch: method=tools/call id=7
+[d20] 1771975663.494 sent response for id=7
+[d20] 1771975910.884 dispatch: method=tools/call id=8
+[d20] 1771975910.884 sent response for id=8
+[d20] 1771979631.422 dispatch: method=tools/call id=9
+[d20] 1771979631.423 sent response for id=9
+[d20] 1771979662.655 dispatch: method=tools/call id=10
+[d20] 1771979662.655 sent response for id=10
+[d20] 1771981650.733 dispatch: method=tools/call id=11
+[d20] 1771981650.733 sent response for id=11
+[d20] 1771981949.909 dispatch: method=tools/call id=12
+[d20] 1771981949.910 sent response for id=12
+[d20] 1771983170.222 dispatch: method=tools/call id=13
+[d20] 1771983170.222 sent response for id=13
+[d20] 1771983214.922 dispatch: method=tools/call id=14
+[d20] 1771983214.922 sent response for id=14
+[d20] 1771983518.168 dispatch: method=tools/call id=15
+[d20] 1771983518.168 sent response for id=15
+[d20] 1771986394.383 dispatch: method=notifications/cancelled id=None
+[d20] 1771986394.384 sent response for id=None
+[d20] 1771986394.384 dispatch: method=notifications/cancelled id=None
+[d20] 1771986394.384 sent response for id=None
+[d20] 1771986394.385 dispatch: method=notifications/cancelled id=None
+[d20] 1771986394.385 sent response for id=None
+[d20] 1771986409.105 dispatch: method=tools/call id=16
+[d20] 1771986409.106 sent response for id=16
+[d20] 1771987222.683 dispatch: method=notifications/cancelled id=None
+[d20] 1771987222.683 sent response for id=None
+[d20] 1771987426.852 dispatch: method=tools/call id=17
+[d20] 1771987426.852 sent response for id=17
+[d20] 1771987550.322 dispatch: method=tools/call id=18
+[d20] 1771987550.322 sent response for id=18
+[d20] 1771987570.012 dispatch: method=tools/call id=19
+[d20] 1771987570.012 sent response for id=19
+[d20] 1771987571.505 dispatch: method=tools/call id=20
+[d20] 1771987571.505 sent response for id=20
+[d20] 1771987596.240 dispatch: method=tools/call id=21
+[d20] 1771987596.240 sent response for id=21
+[d20] 1771987645.940 dispatch: method=tools/call id=22
+[d20] 1771987645.940 sent response for id=22
+[d20] 1771987733.800 dispatch: method=tools/call id=23
+[d20] 1771987733.801 sent response for id=23
+[d20] 1771987742.209 dispatch: method=tools/call id=24
+[d20] 1771987742.209 sent response for id=24
+[d20] 1771987893.818 dispatch: method=tools/call id=25
+[d20] 1771987893.818 sent response for id=25
+[d20] 1771987935.808 dispatch: method=tools/call id=26
+[d20] 1771987935.808 sent response for id=26
+[d20] 1771988247.544 dispatch: method=tools/call id=27
+[d20] 1771988247.544 sent response for id=27
+[d20] 1771988726.828 dispatch: method=tools/call id=28
+[d20] 1771988726.828 sent response for id=28
+[d20] 1771992879.744 dispatch: method=tools/call id=29
+[d20] 1771992879.744 sent response for id=29

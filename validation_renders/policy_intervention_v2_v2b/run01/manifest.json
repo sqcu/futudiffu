@@ -1,0 +1,49 @@
+{
+  "timestamp": "2026-02-25T03:46:50.291585+00:00",
+  "run_name": "run01",
+  "prompts": {
+    "portrait": "a portrait of a woman with flowers in her hair",
+    "cityscape": "a futuristic city skyline at night",
+    "garden": "a japanese garden with cherry blossoms",
+    "cabin": "a cozy cabin in the woods during winter"
+  },
+  "seeds": [
+    42,
+    137,
+    256,
+    999
+  ],
+  "resolutions": [
+    "320x320",
+    "512x512",
+    "832x640",
+    "1280x832"
+  ],
+  "configs": {
+    "ref": [
+      1,
+      0,
+      0
+    ],
+    "v2": [
+      1,
+      1,
+      0
+    ],
+    "v2b": [
+      1,
+      0,
+      1
+    ]
+  },
+  "n_steps": 20,
+  "head_names": [
+    "pinkify",
+    "thisnotthat"
+  ],
+  "btrm_dir": "F:\\dox\\repos\\ai\\futudiffu\\training_output\\reward_function_run_tnt_v2",
+  "v2_ckpt": "F:\\dox\\repos\\ai\\futudiffu\\training_output\\ddgrpo_v2\\policy_adapter_final.safetensors",
+  "v2b_ckpt": "F:\\dox\\repos\\ai\\futudiffu\\training_output\\ddgrpo_v2b\\policy_adapter_final.safetensors",
+  "total_trajectories": 192,
+  "total_elapsed_s": 2142.0703271999955
+}

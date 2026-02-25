@@ -26,7 +26,7 @@ this repository covers several important gaps in 'midtraining' and 'posttraining
 - two demonstration BTRM heads demonstrating PINKIFY/THISNOTTHAT rankings 
 - total liberation from comfyui; we're all free now, you never need to drag the nodes/noodles around ever again.
 - todo: stepcount and activation quantization distillation reward models as alternative to reward weighted odds maximization distillation
-- todo: DRGPO for denoising diffusion (porting in progress)
+- DRGPO for denoising diffusion (porting in progress)
 - todo: total replacement of buggy shim code first pass codebase
 - todo: SSDIT text encoder quantization aware distillation training
 - todo: vlm-as-judge RLVR support (super advanced feature: requires cross integration w/ primeintellect environments to *train* judge VLMs)
@@ -45,6 +45,14 @@ This is a compact demonstration that reward models implemented as low rank adapt
 ![Portrait composite -- reference vs r_theta intervention, 30-step trajectory with BTRM scores](validation_renders/rtheta_policy_demo/portrait_composite.png)
 
 ![Shrimp field composite -- reference vs r_theta intervention, 30-step trajectory with BTRM scores](validation_renders/rtheta_policy_demo/shrimp_field_composite.png)
+
+## policy intervention validation
+
+`scripts_ii/validate_policy_intervention.py` is a resumable, incremental-persistence script that compares DDGRPO-trained policy adapters against a BTRM-only reference across prompts, seeds, and resolutions.
+
+![Garden 512x512 -- ref / v2 / v2b policy comparison with BTRM score trajectories](validation_renders/policy_intervention_v2_v2b/run01/garden/512x512/composite.png)
+
+![Cabin 1280x832 -- ref / v2 / v2b policy comparison with BTRM score trajectories](validation_renders/policy_intervention_v2_v2b/run01/cabin/1280x832/composite.png)
 
 ### why?
 
