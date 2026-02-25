@@ -72,7 +72,7 @@ def build_block_mask(
     # Build per-token document_id: token_idx -> image_index
     # This is a 1D tensor of length total_len, constructed without
     # Python-level per-token iteration.
-    doc_ids = torch.empty(total_len, dtype=torch.int32, device=device)
+    doc_ids = torch.zeros(total_len, dtype=torch.int32, device=device)
     offset = 0
     for img_idx, seg_len in enumerate(segment_lengths):
         doc_ids[offset:offset + seg_len] = img_idx

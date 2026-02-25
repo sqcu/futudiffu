@@ -382,16 +382,13 @@ def load_sss_model(
     model.load_state_dict(remaining, strict=False, assign=True)
     del skinny_sd, remaining
 
-    # Materialize score head from meta device (not in checkpoint)
-    for name in ("score_proj", "score_norm"):
-        submod = getattr(model, name, None)
-        if submod is not None:
-            for pname, param in submod.named_parameters():
-                if param.device.type == "meta":
-                    materialized = torch.empty(
-                        param.shape, device=device, dtype=param.dtype,
-                    )
-                    setattr(submod, pname, nn.Parameter(materialized, requires_grad=param.requires_grad))
+    # Materialize score_proj from meta device (not in checkpoint)
+    for pname, param in model.score_proj.named_parameters():
+        if param.device.type == "meta":
+            materialized = torch.zeros(
+                param.shape, device=device, dtype=param.dtype,
+            )
+            setattr(model.score_proj, pname, nn.Parameter(materialized, requires_grad=param.requires_grad))
 
     model = model.to(device)
 

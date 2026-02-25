@@ -188,6 +188,11 @@ def score_packed(
     each bin as a packed forward, and returns tagged scores. This function
     collects scores in submission order.
 
+    BTRM training: adapter_scales is intentionally NOT passed. The backward
+    flows only through score_norm + score_proj (the score head), not through
+    the full backbone. LoRA adapters are trained during policy optimization,
+    not during BTRM reward model training.
+
     Args:
         model: ZImageRLAIF model (compiled or raw).
         images: List of (latent, timestep, conditioning, num_tokens) tuples.

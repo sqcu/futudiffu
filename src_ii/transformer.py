@@ -307,7 +307,7 @@ class RMSNormModule(nn.Module):
         self.eps = eps
         self.elementwise_affine = elementwise_affine
         if elementwise_affine:
-            self.weight = nn.Parameter(torch.empty(dim, device=device, dtype=dtype))
+            self.weight = nn.Parameter(torch.ones(dim, device=device, dtype=dtype))
         else:
             self.register_parameter("weight", None)
 

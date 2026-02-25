@@ -45,18 +45,18 @@ VAE_PATH = r"F:\dox\ai\comfyui\ComfyUI\models\vae\zimage.safetensors"
 TOKENIZER_PATH = str(REPO_ROOT / "src" / "futudiffu" / "tokenizer")
 
 DATASET_DIR = REPO_ROOT / "multi_res_trajectories"
-OUTPUT_DIR = REPO_ROOT / "training_output" / "reward_function_run_tnt_v2"
+OUTPUT_DIR = REPO_ROOT / "training_output" / "reward_function_run_head_test"
 PINKIFY_CHALLENGE_DIR = REPO_ROOT / "i2i_off_policies" / "PINKIFY_cases"
 TNT_CHALLENGE_DIR = REPO_ROOT / "i2i_off_policies"
 
-N_STEPS = 150
+N_STEPS = 100
 MACROBATCH_BUDGET = 3.0
 MACROBATCH_CROSS_RES = True
 LR = 3e-4
 GRAD_CLIP = 0.1
 WARMUP_STEPS = 5
 LR_SCHEDULE = "warmup_cosine"
-CHECKPOINT_STEPS = [25, 50, 75, 100, 125]
+CHECKPOINT_STEPS = [25, 50, 75]
 CLEAN_FRACTION = 0.8
 
 HEAD_NAMES = ("pinkify", "thisnotthat")
@@ -575,7 +575,7 @@ def main():
 
         num_tokens = cond.shape[1]
 
-        return latent, timestep, cond, num_tokens
+        return latent, timestep, cond, num_tokens, None
 
     print("\n" + "=" * 60)
     print("  Building reward manifest")

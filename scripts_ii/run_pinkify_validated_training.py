@@ -21,7 +21,6 @@ Execution:
 from __future__ import annotations
 
 import json
-import math
 import sys
 import time
 from datetime import datetime, timezone
@@ -36,10 +35,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 import torch
 
 
-FP8_PATH = r"F:\dox\ai\comfyui\ComfyUI\models\diffusion_models\z_image_fp8_blockwise.safetensors"
-TE_PATH = r"F:\dox\ai\comfyui\ComfyUI\models\text_encoders\qwen_3_4b.safetensors"
-VAE_PATH = r"F:\dox\ai\comfyui\ComfyUI\models\vae\zimage.safetensors"
-TOKENIZER_PATH = str(REPO_ROOT / "src" / "futudiffu" / "tokenizer")
+from src_ii.model_paths import FP8_PATH, TE_PATH, VAE_PATH, TOKENIZER_PATH
 
 DATASET_DIR = REPO_ROOT / "multi_res_trajectories"
 OUTPUT_DIR = REPO_ROOT / "training_output" / "pinkify_validation_run"
@@ -219,66 +215,32 @@ def main():
     print("  Phase 1: Loading multi-res V2 dataset")
     print("=" * 60)
 
-    from futudiffu.dataset_v2 import DatasetReader
-    from src_ii.pair_sampler import BTRMPairSampler, build_positions_from_v2
-    from src_ii.flops_sampling import compute_flops_sampling_weights_from_positions
+    from src_ii.training_setup import build_dataset_positions
 
-    reader = DatasetReader(str(DATASET_DIR))
-    n_available = len(reader)
-    print(f"  Dataset: {n_available} trajectories")
+    reader, positions, sampler, traj_ids = build_dataset_positions(
+        DATASET_DIR, clean_fraction=CLEAN_FRACTION,
+    )
 
-    if n_available < 10:
-        print(f"  ERROR: Need at least 10 trajectories, have {n_available}")
+    if len(traj_ids) < 10:
+        print(f"  ERROR: Need at least 10 trajectories, have {len(traj_ids)}")
         return 1
-
-    traj_ids = list(range(n_available))
-    positions = build_positions_from_v2(reader, traj_ids=traj_ids)
-    print(f"  Positions: {len(positions)} across {len(traj_ids)} trajectories")
 
     res_dist = {}
     for pos in positions:
         key = f"{pos.width}x{pos.height}"
         res_dist[key] = res_dist.get(key, 0) + 1
     n_unique_res = len(res_dist)
-    print(f"  Unique resolutions: {n_unique_res}")
-
-    flops_weights = compute_flops_sampling_weights_from_positions(positions)
-
-    sampler = BTRMPairSampler(
-        positions=positions,
-        allow_inter_trajectory=True,
-        allow_intra_trajectory=True,
-        rng_seed=42,
-        flops_weights=flops_weights,
-        clean_fraction=CLEAN_FRACTION,
-    )
-    print(f"  Pair space: {sampler.pair_space_size:,} possible pairs")
-    print(f"  Clean fraction: {CLEAN_FRACTION}")
-    print(f"  Populated tiers: {sampler.populated_tiers}")
 
     print("\n" + "=" * 60)
     print("  Phase 2: Encoding prompts")
     print("=" * 60)
 
-    from futudiffu.text_encoder import create_tokenizer, load_text_encoder, encode_prompt
+    from src_ii.training_setup import encode_training_prompts
 
-    tokenizer = create_tokenizer(TOKENIZER_PATH)
-    te_model = load_text_encoder(TE_PATH, device=device, dtype=dtype)
-
-    prompt_cache = {}
-    for idx in traj_ids:
-        meta, _ = reader[idx]
-        prompt = meta.get("prompt", "")
-        if prompt and prompt not in prompt_cache:
-            cond = encode_prompt(te_model, tokenizer, prompt, device=device)
-            prompt_cache[prompt] = cond.cpu()
-
+    prompt_cache = encode_training_prompts(
+        reader, traj_ids, TOKENIZER_PATH, TE_PATH, device=device, dtype=dtype,
+    )
     n_prompts = len(prompt_cache)
-    print(f"  Encoded {n_prompts} unique prompts")
-
-    del te_model, tokenizer
-    torch.cuda.empty_cache()
-    print(f"  TE freed. VRAM: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
     print("\n" + "=" * 60)
     print("  Phase 3: Encoding PINKIFY challenge images to latents")
@@ -318,31 +280,17 @@ def main():
     print("  Phase 4: Loading backbone + creating BTRM compound model")
     print("=" * 60)
 
-    from src_ii.zimage_model import load_zimage_rlaif
-    from src_ii.btrm_lifecycle import setup_btrm_training, persist_btrm, score_serial
+    from src_ii.training_setup import load_training_backbone
+    from src_ii.btrm_lifecycle import persist_btrm
+
+    raw_model, optimizer, head_names_loaded = load_training_backbone(
+        FP8_PATH, device=device, dtype=dtype, lr=LR,
+    )
+
     from src_ii.multi_lora import get_adapter_params
-    from src_ii.sigma_schedule import build_sigma_schedule, resolution_shift
-
-    raw_model = load_zimage_rlaif(
-        FP8_PATH, device=device, dtype=dtype,
-        compile_model=False, fuse=True,
-    )
-    print(f"  VRAM after backbone: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
-
-    optimizer = setup_btrm_training(
-        raw_model,
-        adapter_name="rtheta",
-        adapter_rank=8,
-        adapter_alpha=16.0,
-        adapter_init_b_std=0.01,
-    )
-
     n_adapter = sum(p.numel() for p in get_adapter_params(raw_model, "rtheta").values())
     n_head = sum(p.numel() for p in raw_model.score_proj.parameters()) + \
              sum(p.numel() for p in raw_model.score_norm.parameters())
-    print(f"  Adapter params: {n_adapter:,}")
-    print(f"  Head params: {n_head:,}")
-    print(f"  Total trainable: {n_adapter + n_head:,}")
 
     print("\n" + "=" * 60)
     print("  Phase 4b: Initial PINKIFY evaluation (before training)")
@@ -369,51 +317,8 @@ def main():
         status = "PASS" if check["passed"] else "FAIL"
         print(f"    [{status}] {check['name']}")
 
-    _v2_meta_cache = {}
-
-    def _get_v2_meta(traj_id):
-        if traj_id not in _v2_meta_cache:
-            meta, accessor = reader[traj_id]
-            _v2_meta_cache[traj_id] = (meta, accessor)
-        return _v2_meta_cache[traj_id]
-
-    def load_latent_fn(key):
-        traj_id, step_key = key
-        meta, accessor = _get_v2_meta(traj_id)
-        latent = accessor[step_key].to(device=device, dtype=dtype)
-        if latent.dim() == 3:
-            latent = latent.unsqueeze(0)
-
-        n_steps_traj = meta.get("n_steps", 30)
-        w = meta.get("width", 1280)
-        h = meta.get("height", 832)
-        recorded_shift = meta.get("sampling_shift")
-        if recorded_shift is not None:
-            shift = float(recorded_shift)
-        else:
-            shift = resolution_shift(w, h)
-
-        sigmas = build_sigma_schedule(
-            n_steps_traj, sampling_shift=shift, device="cpu", dtype=torch.float32,
-        )
-
-        if step_key == "final":
-            sigma_val = 0.0
-        else:
-            step_idx = int(step_key.split("_")[1])
-            sigma_val = float(sigmas[step_idx].item()) if step_idx < len(sigmas) else 0.01
-
-        timestep = torch.tensor([sigma_val], device=device, dtype=dtype)
-
-        prompt = meta.get("prompt", "")
-        cond = prompt_cache.get(prompt)
-        if cond is None:
-            raise ValueError(f"No cached prompt for traj {traj_id}: '{prompt[:60]}...'")
-        cond = cond.to(device=device, dtype=dtype)
-
-        num_tokens = cond.shape[1]
-
-        return latent, timestep, cond, num_tokens
+    from src_ii.dataset_io import make_load_latent_fn
+    load_latent_fn = make_load_latent_fn(reader, prompt_cache, device=device, dtype=dtype)
 
     def preference_fn(pair: dict) -> dict:
         """Deterministic preference: cleaner image (lower sigma) wins."""

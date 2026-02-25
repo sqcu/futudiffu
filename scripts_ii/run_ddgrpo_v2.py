@@ -43,10 +43,7 @@ import torch
 # Paths
 # ---------------------------------------------------------------------------
 
-FP8_PATH = r"F:\dox\ai\comfyui\ComfyUI\models\diffusion_models\z_image_fp8_blockwise.safetensors"
-TE_PATH = r"F:\dox\ai\comfyui\ComfyUI\models\text_encoders\qwen_3_4b.safetensors"
-VAE_PATH = r"F:\dox\ai\comfyui\ComfyUI\models\vae\zimage.safetensors"
-TOKENIZER_PATH = str(REPO_ROOT / "src" / "futudiffu" / "tokenizer")
+from src_ii.model_paths import FP8_PATH, TE_PATH, VAE_PATH, TOKENIZER_PATH
 
 BTRM_DIR = REPO_ROOT / "training_output" / "reward_function_run_tnt_v2"
 OUTPUT_DIR = REPO_ROOT / "training_output" / "ddgrpo_v2"

@@ -95,7 +95,7 @@ class MultiLoRALinear(nn.Module):
             self.adapter_alphas.append(alpha)
 
             # A: (rank, in_features) -- Kaiming uniform init
-            A = nn.Parameter(torch.empty(rank, self.in_features))
+            A = nn.Parameter(torch.zeros(rank, self.in_features))
             nn.init.kaiming_uniform_(A, a=math.sqrt(5))
 
             # B: (out_features, rank) -- zero init (adapter starts silent)

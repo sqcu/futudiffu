@@ -160,7 +160,7 @@ class ZImageRLAIF(nn.Module):
 
         # --- Score head (BTRM output) ---
         self.score_norm = RMSNormModule(
-            dim, eps=norm_eps, elementwise_affine=True,
+            dim, eps=norm_eps, elementwise_affine=False,
             device=device, dtype=dtype,
         )
         self.score_proj = nn.Linear(
@@ -173,10 +173,10 @@ class ZImageRLAIF(nn.Module):
         # --- Padding tokens ---
         if self.pad_tokens_multiple is not None:
             self.x_pad_token = nn.Parameter(
-                torch.empty((1, dim), device=device, dtype=dtype)
+                torch.zeros((1, dim), device=device, dtype=dtype)
             )
             self.cap_pad_token = nn.Parameter(
-                torch.empty((1, dim), device=device, dtype=dtype)
+                torch.zeros((1, dim), device=device, dtype=dtype)
             )
 
         # --- RoPE ---
@@ -906,18 +906,14 @@ def load_zimage_rlaif(
     model.load_state_dict(remaining, strict=False, assign=True)
     del remapped, remaining
 
-    # Score head (score_proj, score_norm) may still be on meta device if not
-    # in the checkpoint (legacy checkpoints lack these). Materialize them on
-    # the target device before model.to(device), which cannot copy meta tensors.
-    for name in ("score_proj", "score_norm"):
-        submod = getattr(model, name, None)
-        if submod is not None:
-            for pname, param in submod.named_parameters():
-                if param.device.type == "meta":
-                    materialized = torch.empty(
-                        param.shape, device=device, dtype=param.dtype,
-                    )
-                    setattr(submod, pname, nn.Parameter(materialized, requires_grad=param.requires_grad))
+    # score_proj may still be on meta device if not in the checkpoint (legacy
+    # checkpoints lack it). Materialize before model.to(device).
+    for pname, param in model.score_proj.named_parameters():
+        if param.device.type == "meta":
+            materialized = torch.zeros(
+                param.shape, device=device, dtype=param.dtype,
+            )
+            setattr(model.score_proj, pname, nn.Parameter(materialized, requires_grad=param.requires_grad))
 
     model = model.to(device)
 
@@ -926,7 +922,6 @@ def load_zimage_rlaif(
     # materializes as uninitialized garbage. If the checkpoint had score_proj
     # weights, load_state_dict(assign=True) already overwrote them. If not
     # (legacy checkpoint), we need explicit zeros for "untrained = zero scores."
-    # Unconditional zero is safe: overwritten weights get overwritten again.
     model.score_proj.weight.data.zero_()
 
     model.eval()
