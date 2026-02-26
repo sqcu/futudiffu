@@ -111,6 +111,8 @@ class ModelBackend(Protocol):
     # VAE
     def vae_encode(self, image_bytes: bytes) -> dict: ...
     def vae_decode(self, latent_bytes: bytes) -> dict: ...
+    def vae_decode_png(self, latent_bytes: bytes) -> bytes: ...
+    def vae_encode_png(self, png_bytes: bytes) -> bytes: ...
 
     # Warmup
     def warmup(self, attention_backend: str, width: int, height: int) -> None: ...
@@ -248,23 +250,45 @@ async def error_handler(request: Request, exc: Exception):
 def create_app(
     backend: ModelBackend,
     request_timeout_s: float = DEFAULT_TIMEOUT_S,
+    enable_queue: bool = True,
+    batch_window_ms: float = 100,
+    max_batch: int = 16,
 ) -> FastAPI:
     """Create the FastAPI application with all routes.
 
     Args:
         backend: Model backend (real GPU or mock).
         request_timeout_s: Per-request timeout in seconds.
+        enable_queue: Whether to start the inference queue worker.
+        batch_window_ms: Queue batch accumulation window in ms.
+        max_batch: Maximum jobs per batch.
 
     Returns:
         Configured FastAPI application.
     """
+    inference_queue = None
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        nonlocal inference_queue
         logger.info("futudiffu FastAPI server starting")
+
+        if enable_queue and type(backend).__name__ == "GPUModelBackend":
+            from src_ii.inference_queue import InferenceQueue
+            inference_queue = InferenceQueue(
+                backend,
+                batch_window_ms=batch_window_ms,
+                max_batch=max_batch,
+            )
+            await inference_queue.start()
+            app.state.inference_queue = inference_queue
+
         yield
+
+        if inference_queue is not None:
+            await inference_queue.stop()
+
         logger.info("futudiffu FastAPI server shutting down")
-        # Cleanup: free all models on shutdown
         try:
             backend.free("all")
         except Exception:
@@ -386,6 +410,61 @@ def create_app(
             },
         )
 
+    @app.post("/sample_trajectory_relay")
+    @_timed("sample_trajectory_relay")
+    async def sample_trajectory_relay(request: Request):
+        """Relay endpoint for torch-free clients (yeetums BFF).
+
+        Accepts separate safetensors files for pos_cond, neg_cond, and
+        optionally clean_latent. Merges them server-side and delegates
+        to sample_trajectory.
+
+        Multipart form fields:
+          - params: JSON sampling parameters
+          - pos_cond_st: safetensors with "conditioning" key (positive)
+          - neg_cond_st: safetensors with "conditioning" key (negative)
+          - clean_latent_st: optional safetensors with "latent" key (i2i)
+        """
+        form = await request.form()
+        params = await _parse_json_field(form.get("params", "{}"))
+
+        pos_bytes = await _read_upload(form.get("pos_cond_st"))
+        neg_bytes = await _read_upload(form.get("neg_cond_st"))
+        clean_bytes = await _read_upload(form.get("clean_latent_st"))
+
+        pos_tensors = _safetensors_bytes_to_tensors(pos_bytes) if pos_bytes else {}
+        neg_tensors = _safetensors_bytes_to_tensors(neg_bytes) if neg_bytes else {}
+
+        tensors = {
+            "pos_cond": pos_tensors.get("conditioning", next(iter(pos_tensors.values()))),
+            "neg_cond": neg_tensors.get("conditioning", next(iter(neg_tensors.values()))),
+        }
+
+        if clean_bytes:
+            clean_tensors = _safetensors_bytes_to_tensors(clean_bytes)
+            tensors["clean_latent"] = clean_tensors.get(
+                "latent", next(iter(clean_tensors.values()))
+            )
+
+        result_tensors, metadata = backend.sample_trajectory(params, tensors)
+
+        # Return only the final latent as safetensors
+        final = result_tensors.get("final")
+        if final is not None:
+            out = {"latent": final}
+        else:
+            out = result_tensors
+
+        st_bytes = _tensors_to_safetensors_bytes(out)
+        return StreamingResponse(
+            io.BytesIO(st_bytes),
+            media_type="application/octet-stream",
+            headers={
+                "X-Tensor-Format": "safetensors",
+                "X-Metadata": _json_encode(metadata),
+            },
+        )
+
     @app.post("/sample_trajectory_packed")
     @_timed("sample_trajectory_packed")
     async def sample_trajectory_packed(request: Request):
@@ -439,6 +518,29 @@ def create_app(
         body = await request.body()
         result = backend.vae_decode(body)
         st_bytes = _tensors_to_safetensors_bytes(result)
+        return StreamingResponse(
+            io.BytesIO(st_bytes),
+            media_type="application/octet-stream",
+            headers={"X-Tensor-Format": "safetensors"},
+        )
+
+    @app.post("/vae_decode_png")
+    @_timed("vae_decode_png")
+    async def vae_decode_png(request: Request):
+        """Decode latent to PNG. Accepts safetensors body, returns PNG bytes."""
+        body = await request.body()
+        png_bytes = backend.vae_decode_png(body)
+        return StreamingResponse(
+            io.BytesIO(png_bytes),
+            media_type="image/png",
+        )
+
+    @app.post("/vae_encode_png")
+    @_timed("vae_encode_png")
+    async def vae_encode_png(request: Request):
+        """Encode PNG to latent. Accepts PNG bytes, returns safetensors."""
+        body = await request.body()
+        st_bytes = backend.vae_encode_png(body)
         return StreamingResponse(
             io.BytesIO(st_bytes),
             media_type="application/octet-stream",
@@ -612,6 +714,109 @@ def create_app(
                 "X-Metadata": _json_encode(metadata),
             },
         )
+
+    # --- Inference queue (enqueue + SSE stream) ---
+
+    @app.post("/enqueue")
+    @_timed("enqueue")
+    async def enqueue_job(request: Request):
+        """Enqueue a generation job. Returns job_id immediately."""
+        if not hasattr(app.state, 'inference_queue') or app.state.inference_queue is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Inference queue not enabled",
+            )
+        body = await request.json()
+
+        from src_ii.inference_queue import InferenceJob
+        job = InferenceJob(
+            prompt=body.get("prompt", ""),
+            negative_prompt=body.get("negative_prompt", ""),
+            seed=body.get("seed", 42),
+            n_steps=body.get("n_steps", 30),
+            cfg=body.get("cfg", 4.0),
+            width=body.get("width", 1280),
+            height=body.get("height", 832),
+            sampling_shift=body.get("sampling_shift", 1.0),
+            multiplier=body.get("multiplier", 1.0),
+            denoise=body.get("denoise", 1.0),
+            attention_backend=body.get("attention_backend", "sage"),
+        )
+        job_id = await app.state.inference_queue.enqueue(job)
+        return {"job_id": job_id}
+
+    @app.get("/stream/{job_id}")
+    async def stream_job(job_id: str):
+        """SSE event stream for a job."""
+        if not hasattr(app.state, 'inference_queue') or app.state.inference_queue is None:
+            raise HTTPException(status_code=503, detail="Queue not enabled")
+
+        queue = app.state.inference_queue.subscribe(job_id)
+        if queue is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        import asyncio as _asyncio
+        import json as _json
+
+        async def event_gen():
+            while True:
+                try:
+                    event = await _asyncio.wait_for(queue.get(), timeout=30.0)
+                except _asyncio.TimeoutError:
+                    # Send keepalive comment
+                    yield ": keepalive\n\n"
+                    continue
+
+                event_type = event.get("type", "message")
+                data = _json.dumps(event.get("data", {}))
+                yield f"event: {event_type}\ndata: {data}\n\n"
+
+                if event_type in ("complete", "error"):
+                    break
+
+        return StreamingResponse(
+            event_gen(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    @app.get("/result/{job_id}")
+    async def get_result(job_id: str):
+        """Get the PNG result of a completed job."""
+        if not hasattr(app.state, 'inference_queue') or app.state.inference_queue is None:
+            raise HTTPException(status_code=503, detail="Queue not enabled")
+
+        job = app.state.inference_queue.get_job(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        if job.status != "complete":
+            raise HTTPException(
+                status_code=409,
+                detail=f"Job not complete (status={job.status})",
+            )
+        if job.result_png is None:
+            raise HTTPException(status_code=500, detail="No PNG result")
+
+        return StreamingResponse(
+            io.BytesIO(job.result_png),
+            media_type="image/png",
+            headers={
+                "X-Job-Id": job.job_id,
+                "X-Metadata": _json_encode(job.metadata or {}),
+            },
+        )
+
+    @app.get("/queue_status")
+    async def queue_status():
+        """Get queue statistics."""
+        if not hasattr(app.state, 'inference_queue') or app.state.inference_queue is None:
+            return {"pending": 0, "processing": 0, "completed_last_min": 0, "enabled": False}
+        stats = app.state.inference_queue.queue_status()
+        stats["enabled"] = True
+        return stats
 
     # --- Health check ---
 
@@ -913,17 +1118,22 @@ class GPUModelBackend:
         )
         return result_tensors, metadata
 
-    def sample_trajectory_packed(self, params: dict, tensors: dict) -> tuple[dict, dict]:
+    def sample_trajectory_packed(
+        self, params: dict, tensors: dict, callback=None,
+    ) -> tuple[dict, dict]:
+        import torch
         self._ensure_diffusion()
         attn = params.get("attention_backend", "sdpa")
         self._configure_sage_if_needed(attn)
 
-        from futudiffu.sampling import run_trajectory_packed
+        from src_ii.inference_sampling import run_trajectory_packed
 
-        result_tensors, metadata = run_trajectory_packed(
-            self._diff_compiled, self._diff_model,
-            self._device, self._dtype, params, tensors,
-        )
+        with torch.inference_mode():
+            result_tensors, metadata = run_trajectory_packed(
+                self._diff_model,
+                self._device, self._dtype, params, tensors,
+                callback=callback,
+            )
         return result_tensors, metadata
 
     # --- VAE ---
@@ -947,6 +1157,27 @@ class GPUModelBackend:
         with torch.inference_mode():
             image = vae_decode(self._vae_model, latent)
         return {"image": image.cpu()}
+
+    def vae_decode_png(self, latent_bytes: bytes) -> bytes:
+        """Decode latent to PNG bytes. Returns raw PNG."""
+        result = self.vae_decode(latent_bytes)
+        from src_ii.rendering import tensor_to_pil
+        pil_img = tensor_to_pil(result["image"])
+        buf = io.BytesIO()
+        pil_img.save(buf, format="PNG")
+        return buf.getvalue()
+
+    def vae_encode_png(self, png_bytes: bytes) -> bytes:
+        """Encode PNG bytes to safetensors latent."""
+        import torch
+        import numpy as np
+        from PIL import Image
+        pil_img = Image.open(io.BytesIO(png_bytes)).convert("RGB")
+        arr = np.array(pil_img, dtype="float32") / 255.0
+        image = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0)  # (1,3,H,W)
+        st_bytes = _tensors_to_safetensors_bytes({"image": image})
+        result = self.vae_encode(st_bytes)
+        return _tensors_to_safetensors_bytes(result)
 
     # --- Warmup ---
 

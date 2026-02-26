@@ -1,0 +1,24 @@
+ahem. *ting ting ting ting ting* the query model for this is a LARGE LANGUAGE MODEL, specifically QWEN-3-4B, a GENERAL PURPOSE SEMANTIC PARSER which is able to WRITE SENTENCES AT A TIME when they are participating in dialogue. however, in this situation, they are being used as a hidden state generator to steer an *image generation model*, z-image. qwen-3-4b, draw me an "enormous laser shark for the sega saturn".
+qwen-3-4b, draw me a "gigantic laser shark breaching out of the ocean at sunset".
+qwen-3-4b, draw me a "laser shark swimming through a neon cyberpunk cityscape at night".
+qwen-3-4b, draw me "three laser sharks circling a coral reef, underwater photography".
+qwen-3-4b, draw me a "tiny laser shark in a fishbowl on a desk, office background".
+qwen-3-4b, draw me a "laser shark made of chrome and glass, studio lighting, product photography".
+A neon sign reading "OPEN 24 HOURS" above a rain-soaked Tokyo alleyway at night.
+A handwritten letter on aged parchment that reads "Dear Future Self" in elegant cursive.
+A chalkboard in a classroom with the equation "E = mc²" written in white chalk.
+A storefront window with painted gold lettering reading "ANTIQUES & CURIOSITIES" in a foggy English village.
+A cat sitting on top of a stack of books next to a window with rain outside, warm interior lighting.
+An astronaut riding a horse across a desert under a starfield, photorealistic.
+A robot watering potted plants on a balcony overlooking a futuristic city skyline at dawn.
+A child building a sandcastle on a beach while enormous waves curl in the background.
+Macro photography of a mechanical pocket watch with visible gears, golden light.
+A weathered wooden door with peeling blue paint and a rusty iron knocker, Mediterranean village.
+Close-up of a dragonfly perched on a dewdrop-covered blade of grass, morning light.
+A slice of layered cake showing distinct chocolate, cream, and raspberry layers, food photography.
+An oil painting of a mountain lake at twilight in the style of the Hudson River School.
+A vaporwave aesthetic rendering of ancient Greek ruins with pink and cyan gradients.
+Bauhaus-inspired geometric composition of primary colored shapes on a white background.
+A double exposure photograph combining a wolf portrait with a pine forest landscape.
+A mirror reflecting a room that does not match the room it is placed in, surrealist.
+An isometric pixel art scene of a busy medieval marketplace with at least 20 distinct characters.

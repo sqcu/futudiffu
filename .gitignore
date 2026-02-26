@@ -10,6 +10,8 @@ __pycache__
 # ============================================================
 .supersekrit
 remote_target.json
+#for the claudes 2 read
+remote_target.paste
 
 # ============================================================
 # Model weights (global rule — large binaries, use your own)
@@ -37,6 +39,14 @@ catalog.json
 # ============================================================
 snake_slayer.py
 snake_slayer_ii.py
+
+# ============================================================
+# Generation plans (user-specific, except tracked examples)
+# ============================================================
+plans/*
+!plans/scrimblo_only.json
+!plans/joint_scrimblo_scrongle.json
+!plans/2x2xh100_joint.json
 
 # ============================================================
 # i2i source images (copyrighted/personal art)

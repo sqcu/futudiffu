@@ -363,6 +363,42 @@ class HTTPInferenceClient:
         tensors = _st_bytes_to_tensors(result_bytes)
         return tensors["image"]
 
+    def vae_decode_png(self, latent: torch.Tensor) -> bytes:
+        """Decode latent to PNG bytes.
+
+        Args:
+            latent: (1, 16, H, W).
+
+        Returns:
+            Raw PNG bytes.
+        """
+        data = _tensor_to_st_bytes({"latent": latent})
+        resp = self._client.post(
+            "/vae_decode_png",
+            content=data,
+            headers={"Content-Type": "application/octet-stream"},
+        )
+        resp.raise_for_status()
+        return resp.content
+
+    def vae_encode_png(self, png_bytes: bytes) -> torch.Tensor:
+        """Encode a PNG image to latent.
+
+        Args:
+            png_bytes: Raw PNG file bytes.
+
+        Returns:
+            Latent tensor (1, 16, H/8, W/8) on CPU.
+        """
+        resp = self._client.post(
+            "/vae_encode_png",
+            content=png_bytes,
+            headers={"Content-Type": "image/png"},
+        )
+        resp.raise_for_status()
+        tensors = _st_bytes_to_tensors(resp.content)
+        return tensors["latent"]
+
     # ------------------------------------------------------------------
     # Warmup (no torch required)
     # ------------------------------------------------------------------

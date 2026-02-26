@@ -1,0 +1,16 @@
+{
+  "prompts_file": "prompts/btrm_24.txt",
+  "attention_backends": ["sdpa", "sage"],
+  "n_steps": [8, 10, 12, 14, 16, 18, 20, 22, 30],
+  "cfg": 4.0,
+  "resolution": {
+    "megapixels": {"values": [65536, 102400, 147456, 262144, 495616, 1048576]},
+    "aspect_ratio": {"min": 0.5, "max": 2.0, "distribution": "log_uniform"},
+    "quantize": 32
+  },
+  "seeds_per_combo": 10,
+  "base_seed": 500000,
+  "sparse_steps_mode": "logsnr_uniform",
+  "n_save": 7,
+  "run_name": "joint_gen"
+}

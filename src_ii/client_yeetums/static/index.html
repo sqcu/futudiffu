@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>futudiffu // yeetums</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<!-- SVG canvas for arrows (full-page overlay, pointer-events: none) -->
+<svg id="arrow-canvas" class="arrow-overlay">
+  <defs>
+    <marker id="arrowhead-idle" markerWidth="10" markerHeight="7"
+            refX="9" refY="3.5" orient="auto" fill="#555">
+      <polygon points="0 0, 10 3.5, 0 7" />
+    </marker>
+    <marker id="arrowhead-flow" markerWidth="10" markerHeight="7"
+            refX="9" refY="3.5" orient="auto" fill="#4a9eff">
+      <polygon points="0 0, 10 3.5, 0 7" />
+    </marker>
+    <marker id="arrowhead-done" markerWidth="10" markerHeight="7"
+            refX="9" refY="3.5" orient="auto" fill="#4ade80">
+      <polygon points="0 0, 10 3.5, 0 7" />
+    </marker>
+    <marker id="arrowhead-error" markerWidth="10" markerHeight="7"
+            refX="9" refY="3.5" orient="auto" fill="#f87171">
+      <polygon points="0 0, 10 3.5, 0 7" />
+    </marker>
+  </defs>
+</svg>
+
+<!-- Top bar -->
+<header class="topbar">
+  <div class="topbar-left">
+    <span class="logo">futudiffu</span>
+    <span class="logo-sub">// yeetums</span>
+  </div>
+  <div class="topbar-center">
+    <button class="tab-btn active" data-tab="generate">Generate</button>
+    <button class="tab-btn" data-tab="gallery">Gallery</button>
+  </div>
+  <div class="topbar-right">
+    <span id="status-led" class="led led-off" title="Server disconnected"></span>
+    <span id="status-text" class="status-text">Disconnected</span>
+  </div>
+</header>
+
+<!-- Main layout: three-column diegetic flow -->
+<main class="main-layout">
+
+  <!-- LEFT: Config JSON panel -->
+  <section id="panel-config" class="panel panel-config">
+    <div class="panel-header">
+      <h2>Config</h2>
+      <button id="btn-reset-config" class="btn btn-small" title="Reset to defaults">Reset</button>
+    </div>
+    <div class="panel-body">
+      <pre id="config-editor" class="config-editor" contenteditable="true" spellcheck="false"></pre>
+    </div>
+  </section>
+
+  <!-- CENTER: Controls panel -->
+  <section id="panel-controls" class="panel panel-controls">
+    <div class="panel-header">
+      <h2>Controls</h2>
+    </div>
+    <div class="panel-body" id="controls-body">
+
+      <!-- Prompt -->
+      <div class="control-group">
+        <label for="ctrl-prompt">Prompt</label>
+        <textarea id="ctrl-prompt" class="ctrl-textarea" rows="3"
+                  placeholder="A photograph of a cat wearing a tiny hat..."></textarea>
+      </div>
+
+      <div class="control-group">
+        <label for="ctrl-neg-prompt">Negative</label>
+        <textarea id="ctrl-neg-prompt" class="ctrl-textarea" rows="1"
+                  placeholder="(optional)"></textarea>
+      </div>
+
+      <!-- Resolution -->
+      <div class="control-row">
+        <div class="control-group flex-1">
+          <label for="ctrl-anchor">Megapixel Anchor</label>
+          <select id="ctrl-anchor" class="ctrl-select">
+            <option value="65536">256sq tiny (64K px)</option>
+            <option value="102400">320sq small (102K)</option>
+            <option value="147456">384sq medium (147K)</option>
+            <option value="262144">512sq standard (262K)</option>
+            <option value="495616">704sq large (496K)</option>
+            <option value="1048576" selected>1024sq full (1.05M)</option>
+          </select>
+        </div>
+        <div class="control-group flex-1">
+          <label for="ctrl-aspect">Aspect Ratio <span id="aspect-label" class="label-accent">3:2</span></label>
+          <input id="ctrl-aspect" type="range" class="ctrl-slider"
+                 min="-0.693" max="0.693" step="0.01" value="0.431">
+          <!-- ln(0.5) = -0.693, ln(2.0) = 0.693, ln(1.5385) ≈ 0.431 -->
+        </div>
+      </div>
+
+      <div class="resolution-preview">
+        <span id="res-preview">1280 x 832</span>
+        <span id="res-pixels" class="text-dim">1,064,960 px</span>
+      </div>
+
+      <!-- Sampling params -->
+      <div class="control-row">
+        <div class="control-group flex-1">
+          <label for="ctrl-steps">Steps <span id="steps-value" class="label-accent">30</span></label>
+          <input id="ctrl-steps" type="range" class="ctrl-slider"
+                 min="4" max="50" step="1" value="30">
+        </div>
+        <div class="control-group flex-1">
+          <label for="ctrl-cfg">CFG <span id="cfg-value" class="label-accent">4.0</span></label>
+          <input id="ctrl-cfg" type="range" class="ctrl-slider"
+                 min="1.0" max="15.0" step="0.5" value="4.0">
+        </div>
+      </div>
+
+      <div class="control-row">
+        <div class="control-group flex-1">
+          <label for="ctrl-seed">Seed</label>
+          <input id="ctrl-seed" type="number" class="ctrl-input" value="-1"
+                 min="-1" max="4294967295" placeholder="-1 = random">
+        </div>
+        <div class="control-group flex-1">
+          <label for="ctrl-backend">Backend</label>
+          <select id="ctrl-backend" class="ctrl-select">
+            <option value="sage" selected>SageAttention</option>
+            <option value="sdpa">SDPA</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="control-row">
+        <div class="control-group flex-1">
+          <label for="ctrl-shift">Sigma Shift <span id="shift-value" class="label-accent">1.0</span></label>
+          <input id="ctrl-shift" type="range" class="ctrl-slider"
+                 min="0.1" max="8.0" step="0.1" value="1.0">
+        </div>
+        <div class="control-group flex-1">
+          <label for="ctrl-denoise">Denoise <span id="denoise-value" class="label-accent">1.0</span></label>
+          <input id="ctrl-denoise" type="range" class="ctrl-slider"
+                 min="0.0" max="1.0" step="0.05" value="1.0">
+        </div>
+      </div>
+
+      <!-- i2i source upload -->
+      <div class="control-group" id="i2i-group" style="display:none;">
+        <label>Source Image</label>
+        <div class="i2i-upload-area" id="i2i-upload-area">
+          <input type="file" id="i2i-file" accept="image/png,image/jpeg,image/webp" hidden>
+          <button class="btn btn-small" id="btn-upload-source">Upload Source</button>
+          <span id="i2i-status" class="text-dim">No source</span>
+        </div>
+        <img id="i2i-preview" class="i2i-preview" style="display:none;" alt="Source preview">
+      </div>
+
+      <!-- Generate button -->
+      <div class="generate-row">
+        <button id="btn-generate" class="btn btn-primary btn-generate">
+          Generate
+        </button>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- RIGHT: Accelerator status panel -->
+  <section id="panel-accel" class="panel panel-accel">
+    <div class="panel-header">
+      <h2>Accelerator</h2>
+    </div>
+    <div class="panel-body">
+
+      <div class="status-section">
+        <div class="status-row">
+          <span class="status-label">Connection</span>
+          <span id="accel-connection" class="led led-off"></span>
+        </div>
+        <div class="status-row">
+          <span class="status-label">Phase</span>
+          <span id="accel-phase" class="text-dim">--</span>
+        </div>
+        <div class="status-row">
+          <span class="status-label">Server</span>
+          <span id="accel-version" class="text-dim">--</span>
+        </div>
+      </div>
+
+      <!-- VRAM bar -->
+      <div class="vram-section">
+        <label class="status-label">VRAM</label>
+        <div class="vram-bar-container">
+          <div id="vram-bar" class="vram-bar" style="width:0%"></div>
+        </div>
+        <span id="vram-text" class="text-dim">-- / -- GB</span>
+      </div>
+
+      <!-- Loaded models -->
+      <div class="models-section">
+        <label class="status-label">Models</label>
+        <div id="model-badges" class="model-badges">
+          <span class="badge badge-off">diffusion</span>
+          <span class="badge badge-off">text encoder</span>
+          <span class="badge badge-off">vae</span>
+        </div>
+      </div>
+
+      <!-- Activity log -->
+      <div class="activity-section">
+        <label class="status-label">Activity</label>
+        <div id="activity-log" class="activity-log"></div>
+      </div>
+
+    </div>
+  </section>
+
+</main>
+
+<!-- BOTTOM: Gallery strip -->
+<section id="panel-gallery" class="panel panel-gallery">
+  <div class="panel-header">
+    <h2>Gallery</h2>
+    <span id="gallery-count" class="text-dim">0 images</span>
+  </div>
+  <div class="gallery-strip" id="gallery-strip">
+    <!-- Thumbnails injected by gallery.js -->
+  </div>
+</section>
+
+<!-- Fullscreen overlay -->
+<div id="fullscreen-overlay" class="fullscreen-overlay" style="display:none;">
+  <img id="fullscreen-img" class="fullscreen-img" alt="Fullscreen">
+  <div id="fullscreen-meta" class="fullscreen-meta"></div>
+  <button id="fullscreen-close" class="btn btn-small fullscreen-close">Close</button>
+</div>
+
+<script src="/static/arrows.js"></script>
+<script src="/static/config_flow.js"></script>
+<script src="/static/generate.js"></script>
+<script src="/static/gallery.js"></script>
+<script src="/static/app.js"></script>
+
+</body>
+</html>
