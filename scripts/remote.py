@@ -21,6 +21,9 @@ Usage:
     python scripts/remote.py pull
     python scripts/remote.py kill server_0
     python scripts/remote.py teardown
+    python scripts/remote.py deploy-observer
+    python scripts/remote.py observe
+    python scripts/remote.py compress --file remote_validation/server_gpu0.log
 """
 
 from __future__ import annotations
@@ -52,6 +55,8 @@ class RemoteConfig:
     model_dir: str
     base_port: int
     n_gpus: int
+    training_output_dir: str = ""
+    expected_sessions: list[str] | None = None
 
     @classmethod
     def load(cls, path: Path = CONFIG_FILE) -> "RemoteConfig":
@@ -62,14 +67,29 @@ class RemoteConfig:
             sys.exit(1)
         with open(path) as f:
             data = json.load(f)
+        n_gpus = data.get("n_gpus", 2)
+        remote_dir = data["remote_dir"]
         return cls(
             host=data["host"],
             ssh_key=os.path.expanduser(data["ssh_key"]),
-            remote_dir=data["remote_dir"],
-            model_dir=data.get("model_dir", data["remote_dir"] + "/models"),
+            remote_dir=remote_dir,
+            model_dir=data.get("model_dir", remote_dir + "/models"),
             base_port=data.get("base_port", 5555),
-            n_gpus=data.get("n_gpus", 2),
+            n_gpus=n_gpus,
+            training_output_dir=data.get(
+                "training_output_dir",
+                remote_dir + "/training_output",
+            ),
+            expected_sessions=data.get("expected_sessions"),
         )
+
+    def get_expected_sessions(self) -> list[str]:
+        if self.expected_sessions is not None:
+            return self.expected_sessions
+        return [f"server_{i}" for i in range(self.n_gpus)] + ["train"]
+
+    def get_server_ports(self) -> list[int]:
+        return [self.base_port + i for i in range(self.n_gpus)]
 
 
 # ---------------------------------------------------------------------------
@@ -699,6 +719,81 @@ def cmd_teardown(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Observer subcommands
+# ---------------------------------------------------------------------------
+
+def cmd_observe(args: argparse.Namespace) -> None:
+    """Start local aggregator loop (pulls observations from remote nodes)."""
+    observe_script = REPO_ROOT / "scripts_ii" / "observe_remote.py"
+    config_path = args.config or str(CONFIG_FILE)
+    python = sys.executable
+
+    cmd = [
+        python, str(observe_script),
+        "--config", config_path,
+        "--interval", str(args.interval),
+        "--output-dir", str(REPO_ROOT / "observations"),
+    ]
+    if args.cycles:
+        cmd.extend(["--cycles", str(args.cycles)])
+    if args.dry_run:
+        cmd.append("--dry-run")
+
+    print(f"  Starting local aggregator...")
+    subprocess.run(cmd)
+
+
+def cmd_compress(args: argparse.Namespace) -> None:
+    """Run log compression on pulled logs."""
+    compress_script = REPO_ROOT / "scripts_ii" / "compress_node_logs.py"
+    python = sys.executable
+
+    cmd = [python, str(compress_script)]
+    if args.file:
+        cmd.extend(["--file", args.file])
+    elif args.logs_dir:
+        cmd.extend(["--logs-dir", args.logs_dir])
+    else:
+        # Default: remote_validation/
+        default_dir = str(REPO_ROOT / "remote_validation")
+        print(f"  (no --file or --logs-dir specified, using {default_dir})")
+        cmd.extend(["--logs-dir", default_dir])
+
+    if args.output:
+        cmd.extend(["--output", args.output])
+    if args.context:
+        cmd.extend(["--context", str(args.context)])
+
+    subprocess.run(cmd)
+
+
+def cmd_deploy_observer(args: argparse.Namespace) -> None:
+    """Deploy node_heartbeat.py as fd_observer tmux session on each remote node."""
+    config = RemoteConfig.load()
+    python = _find_remote_python(config)
+
+    sessions = ",".join(config.get_expected_sessions())
+    ports = ",".join(str(p) for p in config.get_server_ports())
+    interval = args.interval or 60
+
+    cmd_parts = [
+        f"cd {config.remote_dir} &&",
+        f"{python} scripts_ii/node_heartbeat.py",
+        f"--interval {interval}",
+        f"--expected-sessions {sessions}",
+        f"--ports {ports}",
+    ]
+    if config.training_output_dir:
+        metrics_path = f"{config.training_output_dir}/training_metrics.jsonl"
+        cmd_parts.append(f"--training-metrics {metrics_path}")
+
+    observer_cmd = " ".join(cmd_parts)
+    _remote_tmux_launch(config, "observer", observer_cmd)
+    print(f"  Observer deployed on {config.host}")
+    print(f"  Monitor with: python scripts/remote.py logs observer")
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -794,6 +889,37 @@ def main() -> None:
     p.add_argument("--pull", action="store_true",
                    help="Pull final outputs before teardown")
     p.set_defaults(func=cmd_teardown)
+
+    # observe
+    p = sub.add_parser("observe", help="Start local observation aggregator loop")
+    p.add_argument("--config", type=str, default=None,
+                   help="Path to remote_target.json")
+    p.add_argument("--interval", type=int, default=300,
+                   help="Aggregation interval in seconds (default: 300)")
+    p.add_argument("--cycles", type=int, default=0,
+                   help="Number of cycles (0 = forever)")
+    p.add_argument("--dry-run", action="store_true",
+                   help="Skip rsync, produce empty report")
+    p.set_defaults(func=cmd_observe)
+
+    # compress
+    p = sub.add_parser("compress", help="Compress pulled log files into a timeline")
+    p.add_argument("--file", type=str, default=None,
+                   help="Single log file to compress")
+    p.add_argument("--logs-dir", type=str, default=None,
+                   help="Directory of log files to compress")
+    p.add_argument("--output", type=str, default=None,
+                   help="Output file (default: stdout)")
+    p.add_argument("--context", type=int, default=None,
+                   help="Lines of context around anomalies (default: 5)")
+    p.set_defaults(func=cmd_compress)
+
+    # deploy-observer
+    p = sub.add_parser("deploy-observer",
+                       help="Launch node_heartbeat.py on remote as fd_observer tmux session")
+    p.add_argument("--interval", type=int, default=None,
+                   help="Observer interval in seconds (default: 60)")
+    p.set_defaults(func=cmd_deploy_observer)
 
     args = parser.parse_args()
     args.func(args)

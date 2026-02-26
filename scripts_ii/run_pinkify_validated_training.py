@@ -410,7 +410,6 @@ def main():
         log_interval=5,
         warmup_steps=WARMUP_STEPS,
         lr_schedule=LR_SCHEDULE,
-        packed=True,
         output_dir=str(OUTPUT_DIR),
         artifacts=artifacts,
         checkpoint_steps=CHECKPOINT_STEPS,

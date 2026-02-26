@@ -180,6 +180,7 @@ def score_packed(
     model: nn.Module,
     images: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]],
     gradient_checkpointing: bool = True,
+    executor=None,
 ) -> torch.Tensor:
     """Score N images via scatter-gather through BatchExecutor.
 
@@ -201,12 +202,12 @@ def score_packed(
             conditioning: (1, seq, cap_feat_dim) text conditioning.
             num_tokens: Number of text tokens.
         gradient_checkpointing: Whether to use gradient checkpointing.
+        executor: Optional pre-built executor (BatchExecutor or AcceleratorPool).
+            If None, creates a throwaway BatchExecutor (today's behavior).
 
     Returns:
         (N, n_score_heads) score tensor with grad_fn.
     """
-    from src_ii.batch_executor import BatchExecutor
-
     device = images[0][0].device
 
     # Build queries: each image is a single-fork identity query
@@ -225,7 +226,10 @@ def score_packed(
     old_gc = getattr(model, 'gradient_checkpointing', False)
     model.gradient_checkpointing = gradient_checkpointing
 
-    executor = BatchExecutor(model, device=device)
+    if executor is None:
+        from src_ii.batch_executor import BatchExecutor
+        executor = BatchExecutor(model, device=device)
+
     results = executor.execute(queries)
 
     model.gradient_checkpointing = old_gc

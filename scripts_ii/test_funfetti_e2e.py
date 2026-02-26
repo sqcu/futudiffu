@@ -1,16 +1,15 @@
 r"""End-to-end functional test for funfetti batching integration.
 
 This is NOT a unit test. It loads real FP8 weights, runs real GPU forwards
-through the 6B backbone, produces real persisted artifacts, and compares
-the packed and serial training paths on identical pairs.
+through the 6B backbone, produces real persisted artifacts, and verifies
+the FLOPS-budget training path.
 
 What it exercises:
-  1. BTRMCompoundModel with real FP8 backbone
+  1. ZImageRLAIF with real FP8 backbone
   2. BTRMPairSampler with FLOPS weights (non-degenerate for multi-res)
-  3. train_btrm_differentiable() with packed=True (FlexAttention batch packing)
-  4. train_btrm_differentiable() with packed=False (serial baseline)
-  5. ValidationMetrics tracker wired into the training loop
-  6. All outputs persisted to disk in funfetti_e2e_output/
+  3. train_btrm_differentiable() with FLOPS-budget macrobatch
+  4. ValidationMetrics tracker wired into the training loop
+  5. All outputs persisted to disk in funfetti_e2e_output/
 
 Supports two dataset modes:
   USE_MULTI_RES=False: V1 btrm_dataset/ (monoresolution 1280x832, FLOPS weights degenerate)
@@ -20,7 +19,7 @@ Execution:
   PYTHONUNBUFFERED=1 /mnt/f/dox/repos/ai/futudiffu/.venv/Scripts/python.exe ^
       F:\dox\repos\ai\futudiffu\scripts_ii\test_funfetti_e2e.py
 
-Expected runtime: ~3-10 minutes on RTX 4090 (3 steps packed + 3 steps serial).
+Expected runtime: ~3-5 minutes on RTX 4090 (3 steps FLOPS-budget).
 """
 
 from __future__ import annotations
@@ -53,11 +52,9 @@ DATASET_DIR = V2_DATASET_DIR if USE_MULTI_RES else V1_DATASET_DIR
 
 OUTPUT_DIR = REPO_ROOT / "funfetti_e2e_output"
 PACKED_DIR = OUTPUT_DIR / "packed"
-SERIAL_DIR = OUTPUT_DIR / "serial"
 
 N_STEPS = 3
 N_TRAJECTORIES = 8 if USE_MULTI_RES else 4  # more trajectories for multi-res diversity
-PAIRS_PER_PACK = 2   # 2 pairs = 4 images per packed forward
 LR = 3e-4
 GRAD_CLIP = 0.1
 WARMUP_STEPS = 1
@@ -69,7 +66,6 @@ def main():
     wall_start = time.perf_counter()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     PACKED_DIR.mkdir(parents=True, exist_ok=True)
-    SERIAL_DIR.mkdir(parents=True, exist_ok=True)
 
     device = torch.device("cuda")
     dtype = torch.bfloat16
@@ -81,7 +77,7 @@ def main():
         "config": {
             "n_steps": N_STEPS,
             "n_trajectories": N_TRAJECTORIES,
-            "pairs_per_pack": PAIRS_PER_PACK,
+            "macrobatch_budget": 3.0,
             "lr": LR,
             "grad_clip": GRAD_CLIP,
         },
@@ -195,8 +191,8 @@ def main():
     )
     print(f"  Pair space: {sampler.pair_space_size:,} possible pairs")
 
-    fixed_pairs = sampler.sample_batch(N_STEPS * PAIRS_PER_PACK * 2)
-    print(f"  Pre-sampled {len(fixed_pairs)} pairs for reproducibility")
+    # Sampler will be passed directly to train_btrm_differentiable()
+    print(f"  Sampler ready for FLOPS-budget macrobatch sampling")
 
     print("\n" + "=" * 60)
     print("  Phase 2: Encoding prompts")
@@ -347,15 +343,13 @@ def main():
         return prefs
 
     print("\n" + "=" * 60)
-    print(f"  Phase 4: Packed training ({N_STEPS} steps, pairs_per_pack={PAIRS_PER_PACK})")
+    print(f"  Phase 4: FLOPS-budget training ({N_STEPS} steps)")
     print("=" * 60)
 
     optimizer = setup_btrm_training(raw_model)
 
     from src_ii.btrm_training import train_btrm_differentiable
     from src_ii.training_artifacts import TrainingArtifacts
-
-    packed_sampler = _ReplaySampler(fixed_pairs)
 
     t_packed_start = time.perf_counter()
 
@@ -367,7 +361,7 @@ def main():
 
     packed_curve = train_btrm_differentiable(
         model=raw_model,
-        pair_sampler=packed_sampler,
+        pair_sampler=sampler,
         load_latent_fn=load_latent_fn,
         preference_fn=preference_fn,
         n_steps=N_STEPS,
@@ -378,10 +372,8 @@ def main():
         max_grad_norm=GRAD_CLIP,
         log_interval=1,
         warmup_steps=WARMUP_STEPS,
-        grad_accum_steps=1,
         lr_schedule="warmup_only",
-        packed=True,
-        pairs_per_pack=PAIRS_PER_PACK,
+        macrobatch_budget=3.0,
         output_dir=str(PACKED_DIR),
         artifacts=packed_artifacts,
     )
@@ -390,7 +382,7 @@ def main():
     print(f"  Packed training: {packed_time:.1f}s ({packed_time / N_STEPS:.1f}s/step)")
 
     packed_artifacts.generate_analysis(run_config={
-        "mode": "packed", "n_steps": N_STEPS, "pairs_per_pack": PAIRS_PER_PACK,
+        "mode": "flops_budget", "n_steps": N_STEPS, "macrobatch_budget": 3.0,
         "lr": LR, "grad_clip": GRAD_CLIP,
     })
     print(f"  Packed analysis generated: {PACKED_DIR / 'charts'}")
@@ -408,63 +400,10 @@ def main():
 
     torch.cuda.empty_cache()
 
-    print("\n" + "=" * 60)
-    print(f"  Phase 5: Serial training ({N_STEPS} steps)")
-    print("=" * 60)
-
-    optimizer = setup_btrm_training(raw_model)
-
-    serial_sampler = _ReplaySampler(fixed_pairs)
-
-    t_serial_start = time.perf_counter()
-
-    serial_artifacts = TrainingArtifacts(
-        output_dir=str(SERIAL_DIR),
-        run_name="funfetti_serial",
-        head_names=HEAD_NAMES,
-    )
-
-    serial_curve = train_btrm_differentiable(
-        model=raw_model,
-        pair_sampler=serial_sampler,
-        load_latent_fn=load_latent_fn,
-        preference_fn=preference_fn,
-        n_steps=N_STEPS,
-        lr=LR,
-        head_names=HEAD_NAMES,
-        pref_keys=PREF_KEYS,
-        gradient_checkpointing=True,
-        max_grad_norm=GRAD_CLIP,
-        log_interval=1,
-        warmup_steps=WARMUP_STEPS,
-        grad_accum_steps=1,
-        lr_schedule="warmup_only",
-        packed=False,
-        output_dir=str(SERIAL_DIR),
-        artifacts=serial_artifacts,
-    )
-
-    serial_time = time.perf_counter() - t_serial_start
-    print(f"  Serial training: {serial_time:.1f}s ({serial_time / N_STEPS:.1f}s/step)")
-
-    serial_artifacts.generate_analysis(run_config={
-        "mode": "serial", "n_steps": N_STEPS, "lr": LR, "grad_clip": GRAD_CLIP,
-    })
-    print(f"  Serial analysis generated: {SERIAL_DIR / 'charts'}")
-
-    serial_grad_stats = _collect_grad_stats(raw_model)
-    results["serial"] = {
-        "time_s": serial_time,
-        "time_per_step_s": serial_time / N_STEPS,
-        "curve": serial_curve,
-        "grad_stats": serial_grad_stats,
-    }
-
-    serial_persist = persist_btrm(raw_model, "rtheta", str(SERIAL_DIR))
-    results["serial"]["persist"] = serial_persist
+    # Serial path removed — FLOPS-budget is the only valid training path.
 
     print("\n" + "=" * 60)
-    print("  Phase 6: Verification and comparison")
+    print("  Phase 6: Verification")
     print("=" * 60)
 
     checks = []
@@ -476,75 +415,41 @@ def main():
     checks.append(("packed_losses_finite", packed_finite, packed_losses))
     print(f"  [{'PASS' if packed_finite else 'FAIL'}] Packed losses finite: {packed_losses}")
 
-    serial_losses = [e["loss"] for e in serial_curve]
-    serial_finite = all(
-        not (l != l) and l < float('inf') for l in serial_losses
-    )
-    checks.append(("serial_losses_finite", serial_finite, serial_losses))
-    print(f"  [{'PASS' if serial_finite else 'FAIL'}] Serial losses finite: {serial_losses}")
-
     packed_nonzero = packed_grad_stats["n_nonzero_grad"] > 0
     checks.append(("packed_adapter_gradients", packed_nonzero, packed_grad_stats))
     print(f"  [{'PASS' if packed_nonzero else 'FAIL'}] Packed adapter grads nonzero: "
           f"{packed_grad_stats['n_nonzero_grad']}/{packed_grad_stats['n_with_grad']}")
 
-    serial_nonzero = serial_grad_stats["n_nonzero_grad"] > 0
-    checks.append(("serial_adapter_gradients", serial_nonzero, serial_grad_stats))
-    print(f"  [{'PASS' if serial_nonzero else 'FAIL'}] Serial adapter grads nonzero: "
-          f"{serial_grad_stats['n_nonzero_grad']}/{serial_grad_stats['n_with_grad']}")
-
     packed_vm_path = PACKED_DIR / "validation_metrics.json"
-    serial_vm_path = SERIAL_DIR / "validation_metrics.json"
     packed_vm_exists = packed_vm_path.exists()
-    serial_vm_exists = serial_vm_path.exists()
     checks.append(("packed_validation_metrics_saved", packed_vm_exists, str(packed_vm_path)))
-    checks.append(("serial_validation_metrics_saved", serial_vm_exists, str(serial_vm_path)))
     print(f"  [{'PASS' if packed_vm_exists else 'FAIL'}] Packed validation_metrics.json exists")
-    print(f"  [{'PASS' if serial_vm_exists else 'FAIL'}] Serial validation_metrics.json exists")
 
     packed_vm_entries = 0
-    serial_vm_entries = 0
+    packed_vm_data = {}
     if packed_vm_exists:
         with open(str(packed_vm_path)) as f:
             packed_vm_data = json.load(f)
         packed_vm_entries = packed_vm_data.get("n_updates", 0)
-    if serial_vm_exists:
-        with open(str(serial_vm_path)) as f:
-            serial_vm_data = json.load(f)
-        serial_vm_entries = serial_vm_data.get("n_updates", 0)
 
     packed_vm_nonempty = packed_vm_entries > 0
-    serial_vm_nonempty = serial_vm_entries > 0
     checks.append(("packed_validation_has_entries", packed_vm_nonempty, packed_vm_entries))
-    checks.append(("serial_validation_has_entries", serial_vm_nonempty, serial_vm_entries))
     print(f"  [{'PASS' if packed_vm_nonempty else 'FAIL'}] Packed VM entries: {packed_vm_entries}")
-    print(f"  [{'PASS' if serial_vm_nonempty else 'FAIL'}] Serial VM entries: {serial_vm_entries}")
 
-    if packed_losses and serial_losses:
+    if packed_losses:
         packed_mean = sum(packed_losses) / len(packed_losses)
-        serial_mean = sum(serial_losses) / len(serial_losses)
-        comparable = (
-            0.0 < packed_mean < 5.0
-            and 0.0 < serial_mean < 5.0
-        )
-        checks.append(("loss_trajectories_comparable", comparable,
-                       {"packed_mean": packed_mean, "serial_mean": serial_mean}))
-        print(f"  [{'PASS' if comparable else 'FAIL'}] Loss ranges: "
-              f"packed_mean={packed_mean:.4f}, serial_mean={serial_mean:.4f}")
+        comparable = 0.0 < packed_mean < 5.0
+        checks.append(("loss_range_reasonable", comparable, {"packed_mean": packed_mean}))
+        print(f"  [{'PASS' if comparable else 'FAIL'}] Loss range: "
+              f"packed_mean={packed_mean:.4f}")
 
     packed_charts_exist = (PACKED_DIR / "charts" / "01_loss_curve.png").exists()
-    serial_charts_exist = (SERIAL_DIR / "charts" / "01_loss_curve.png").exists()
     checks.append(("packed_charts_generated", packed_charts_exist, str(PACKED_DIR / "charts")))
-    checks.append(("serial_charts_generated", serial_charts_exist, str(SERIAL_DIR / "charts")))
     print(f"  [{'PASS' if packed_charts_exist else 'FAIL'}] Packed charts generated")
-    print(f"  [{'PASS' if serial_charts_exist else 'FAIL'}] Serial charts generated")
 
     packed_analysis_exists = (PACKED_DIR / "training_analysis.md").exists()
-    serial_analysis_exists = (SERIAL_DIR / "training_analysis.md").exists()
     checks.append(("packed_analysis_generated", packed_analysis_exists, str(PACKED_DIR / "training_analysis.md")))
-    checks.append(("serial_analysis_generated", serial_analysis_exists, str(SERIAL_DIR / "training_analysis.md")))
     print(f"  [{'PASS' if packed_analysis_exists else 'FAIL'}] Packed training_analysis.md generated")
-    print(f"  [{'PASS' if serial_analysis_exists else 'FAIL'}] Serial training_analysis.md generated")
 
     if USE_MULTI_RES:
         flops_nondegen = not results.get("flops_weights_degenerate", True)
@@ -580,14 +485,7 @@ def main():
     try:
         from src_ii.exemplar_renderer import render_exemplars_from_model
 
-        serial_config_path = SERIAL_DIR / "btrm_compound_config.json"
-        if serial_config_path.exists():
-            install_multi_lora(raw_model, ["rtheta"])
-            load_btrm(raw_model, "rtheta", str(SERIAL_DIR))
-            print(f"  Loaded serial adapter for exemplar scoring")
-        else:
-            setup_btrm_training(raw_model)
-            print(f"  No saved serial model found, using untrained model for exemplar scoring")
+        # Use the packed-trained model (already in memory) for exemplar scoring
 
         sample_keys = []
         for idx in traj_indices:
@@ -631,7 +529,6 @@ def main():
     results["verdict"] = verdict
     results["wall_time_s"] = time.perf_counter() - wall_start
     results["packed_time_s"] = packed_time
-    results["serial_time_s"] = serial_time
     results["end_time"] = datetime.now(timezone.utc).isoformat()
 
     _save_results(results)
@@ -642,13 +539,9 @@ def main():
     print(f"{'=' * 60}")
     print(f"  Wall time: {results['wall_time_s']:.1f}s")
     print(f"  Packed: {packed_time:.1f}s ({packed_time/N_STEPS:.1f}s/step)")
-    print(f"  Serial: {serial_time:.1f}s ({serial_time/N_STEPS:.1f}s/step)")
     print(f"  Packed losses: {packed_losses}")
-    print(f"  Serial losses: {serial_losses}")
     print(f"  Packed VM entries: {packed_vm_entries}")
-    print(f"  Serial VM entries: {serial_vm_entries}")
     print(f"  Packed charts: {packed_charts_exist}")
-    print(f"  Serial charts: {serial_charts_exist}")
     print(f"  Exemplars rendered: {exemplars_rendered}")
     print(f"  Checks: {sum(1 for _, ok, _ in checks if ok)}/{len(checks)} passed")
     print(f"  Output: {OUTPUT_DIR}")
@@ -659,25 +552,6 @@ def main():
     torch.cuda.empty_cache()
     return 0 if verdict == "PASS" else 1
 
-
-
-class _ReplaySampler:
-    """Replays pre-sampled pairs in order. Wraps around when exhausted."""
-
-    def __init__(self, pairs: list[dict]):
-        self._pairs = pairs
-        self._idx = 0
-
-    def sample_pair(self) -> dict:
-        pair = self._pairs[self._idx % len(self._pairs)]
-        self._idx += 1
-        return dict(pair)  # copy to prevent mutation
-
-    def sample_batch(self, n: int) -> list[dict]:
-        return [self.sample_pair() for _ in range(n)]
-
-    def stats(self) -> dict:
-        return {"type": "replay", "total_pairs": len(self._pairs), "consumed": self._idx}
 
 
 def _collect_grad_stats(model) -> dict:

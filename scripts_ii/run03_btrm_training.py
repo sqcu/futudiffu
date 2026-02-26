@@ -85,7 +85,7 @@ BTRM_LR = 3e-4
 BTRM_GRAD_CLIP = 0.1
 BTRM_N_STEPS = 100  # optimizer steps (doubled from run02's 30 macrobatches)
 BTRM_WARMUP = 40
-BTRM_GRAD_ACCUM = 2  # 2 microbatches per optimizer step
+BTRM_MACROBATCH_BUDGET = 3.0  # FLOPS-budget in 1024^2-equivalent units
 BTRM_CHECKPOINT_INTERVAL = 10
 
 HEAD_NAMES = ("scrimble", "scrongle")
@@ -467,7 +467,7 @@ def phase2_train(client: InferenceClient, gen_dataset_dir: Path):
     print(f"  Steps: {BTRM_N_STEPS}")
     print(f"  LR: {BTRM_LR}")
     print(f"  Grad clip: {BTRM_GRAD_CLIP}")
-    print(f"  Grad accum: {BTRM_GRAD_ACCUM}")
+    print(f"  Macrobatch budget: {BTRM_MACROBATCH_BUDGET}")
     print(f"  Warmup: {BTRM_WARMUP}")
     print(f"  Heads: {HEAD_NAMES}")
 
@@ -496,7 +496,6 @@ def phase2_train(client: InferenceClient, gen_dataset_dir: Path):
         preference_fn=preference_fn,
         n_steps=BTRM_N_STEPS,
         lr=BTRM_LR,
-        logsquare_weight=0.05,
         head_names=HEAD_NAMES,
         pref_keys=PREF_KEYS,
         gradient_checkpointing=True,
@@ -504,7 +503,7 @@ def phase2_train(client: InferenceClient, gen_dataset_dir: Path):
         log_interval=5,
         callback=training_callback,
         warmup_steps=BTRM_WARMUP,
-        grad_accum_steps=BTRM_GRAD_ACCUM,
+        macrobatch_budget=BTRM_MACROBATCH_BUDGET,
     )
 
     metrics_file.close()
@@ -550,7 +549,7 @@ def main():
         "btrm_grad_clip": BTRM_GRAD_CLIP,
         "btrm_n_steps": BTRM_N_STEPS,
         "btrm_warmup": BTRM_WARMUP,
-        "btrm_grad_accum": BTRM_GRAD_ACCUM,
+        "btrm_macrobatch_budget": BTRM_MACROBATCH_BUDGET,
         "btrm_checkpoint_interval": BTRM_CHECKPOINT_INTERVAL,
         "head_names": list(HEAD_NAMES),
         "existing_datasets": [str(p) for p in EXISTING_V2_DATASETS],

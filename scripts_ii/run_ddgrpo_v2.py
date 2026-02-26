@@ -197,7 +197,7 @@ def load_model_and_setup(device, dtype):
 # Executor (local, wraps BatchExecutor — same as validate_ddgrpo_e2e.py)
 # ---------------------------------------------------------------------------
 
-def make_local_executor(model, device):
+def make_local_executor(model, device, pool=None):
     """Build a local executor wrapping BatchExecutor for ktuple_sampling.
 
     executor_fn is called as: executor(x_bases, specs, step_i, adapter_scales)
@@ -206,13 +206,24 @@ def make_local_executor(model, device):
     Uses REFERENCE_TOTAL_LEN — the fixed bin capacity sized for 1280x832 +
     p90 text overhead. One compiled graph, zero recompiles, and a cfg2 pair
     at 512² fits in a single bin with room to spare.
+
+    Args:
+        pool: Optional AcceleratorPool. If provided, used as the batch
+            executor instead of creating a new BatchExecutor.
     """
-    from src_ii.batch_executor import BatchExecutor
     from src_ii.bin_packer import REFERENCE_TOTAL_LEN
 
-    _log(f"  BatchExecutor max_total_len={REFERENCE_TOTAL_LEN}")
+    if pool is None:
+        from src_ii.accelerator_pool import AcceleratorPool
+        pool = AcceleratorPool(
+            model_factory=lambda d, _m=model: _m,
+            devices=[device],
+            max_total_len=REFERENCE_TOTAL_LEN,
+        )
 
-    batch_exec = BatchExecutor(model, device=device, max_total_len=REFERENCE_TOTAL_LEN)
+    batch_exec = pool
+    _log(f"  AcceleratorPool ({len(pool.devices)} devices) "
+         f"max_total_len={pool.max_total_len}")
 
     class ExecutorWithSigmas:
         def __init__(self):

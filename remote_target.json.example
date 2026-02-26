@@ -4,5 +4,7 @@
   "remote_dir": "~/futudiffu",
   "model_dir": "~/futudiffu/models",
   "base_port": 5555,
-  "n_gpus": 2
+  "n_gpus": 2,
+  "training_output_dir": "~/futudiffu/training_output/current_run",
+  "expected_sessions": ["server_0", "server_1", "train"]
 }

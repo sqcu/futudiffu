@@ -157,7 +157,7 @@ def load_model_and_setup(device, dtype):
 
 
 
-def make_local_executor(model, device, cap_lens, resolutions):
+def make_local_executor(model, device, cap_lens, resolutions, pool=None):
     """Build a local executor that wraps BatchExecutor for ktuple_sampling.
 
     Sizes the bin capacity from the actual workload: max single-entry seq_len
@@ -165,8 +165,11 @@ def make_local_executor(model, device, cap_lens, resolutions):
 
     executor_fn is called as: executor(x_bases, specs, step_i, adapter_scales)
     The caller must set executor_fn.query_sigmas before the solve loop.
+
+    Args:
+        pool: Optional AcceleratorPool. If provided, used as the batch
+            executor instead of creating a new BatchExecutor.
     """
-    from src_ii.batch_executor import BatchExecutor
     from src_ii.inference_packing import compute_entry_seq_len
 
     max_entry_len = max(
@@ -174,10 +177,19 @@ def make_local_executor(model, device, cap_lens, resolutions):
         for cap_len in cap_lens
         for w, h in resolutions
     )
-    _log(f"  BatchExecutor max_total_len={max_entry_len} "
-         f"(max entry from {len(cap_lens)} prompts × {len(resolutions)} resolutions)")
 
-    batch_exec = BatchExecutor(model, device=device, max_total_len=max_entry_len)
+    if pool is None:
+        from src_ii.accelerator_pool import AcceleratorPool
+        pool = AcceleratorPool(
+            model_factory=lambda d, _m=model: _m,
+            devices=[device],
+            max_total_len=max_entry_len,
+        )
+
+    batch_exec = pool
+    _log(f"  AcceleratorPool ({len(pool.devices)} devices) "
+         f"max_total_len={pool.max_total_len} "
+         f"(workload max_entry_len={max_entry_len})")
 
     class ExecutorWithSigmas:
         """Executor that closes over mutable query_sigmas reference."""
@@ -332,13 +344,13 @@ def score_finals(executor, trajectories, pos_cond, resolution, device, dtype):
 def accumulate_and_step(
     executor, model, trajectories, advantages,
     pos_cond, neg_cond, resolution, cfg,
-    adapter_name, lr, max_grad_norm, device, dtype,
-    policy_optimizers, gather_fn=None,
+    optimizer, max_grad_norm, device, dtype,
+    gather_fn=None,
 ):
     """Accumulate REINFORCE gradients for all K trajectories, then step.
 
-    Uses the same executor and gather function as the rollout generation.
-    The policy gradient path is completely opaque to the reduction function.
+    Caller owns optimizer creation (at setup) and zero_grad (before this call).
+    This function: accumulate gradients → clip → step.
     """
     from src_ii.policy_step import accumulate_reinforce_gradients, policy_optimizer_step
     from src_ii.triumphant_future_reduction_ops import cfg2
@@ -387,8 +399,8 @@ def accumulate_and_step(
             continue
 
         result = accumulate_reinforce_gradients(
-            executor, spec, query_sigmas, grad_traj,
-            sparse_steps, adv_k,
+            executor, [spec], [query_sigmas], [grad_traj],
+            sparse_steps, [adv_k],
             adapter_scales=policy_scales,
             ref_adapter_scales=ref_scales,
             gather_fn=gather_fn,
@@ -401,13 +413,7 @@ def accumulate_and_step(
 
     model.gradient_checkpointing = old_gc
 
-    opt_params = {
-        "adapter_name": adapter_name,
-        "max_grad_norm": max_grad_norm,
-        "lr": lr,
-    }
-    opt_result = policy_optimizer_step(
-        model, policy_optimizers, device, dtype, opt_params)
+    opt_result = policy_optimizer_step(optimizer, max_grad_norm)
 
     return {
         "total_log_prob": total_log_prob,
@@ -417,7 +423,7 @@ def accumulate_and_step(
         "n_params_with_grad": opt_result.get("n_params_with_grad", 0),
         "module_grad_norms": opt_result.get("module_grad_norms"),
         "per_step_diag": all_per_step,
-        "lr": opt_result.get("lr", lr),
+        "lr": float(optimizer.param_groups[0]["lr"]),
     }
 
 
@@ -497,7 +503,11 @@ def main():
     from src_ii.multi_lora import save_adapter, load_adapter
     from src_ii.incremental_save import atomic_json_save, load_training_curve_jsonl, TrainingCurveWriter
 
-    policy_optimizers = {}
+    from src_ii.multi_lora import get_adapter_params
+    policy_params = list(get_adapter_params(model, POLICY_ADAPTER_NAME).values())
+    policy_optimizer = torch.optim.AdamW(policy_params, lr=LR)
+    _log(f"  Policy optimizer: AdamW, {len(policy_params)} param groups, lr={LR}")
+
     metrics_path = OUTPUT_DIR / "training_metrics.jsonl"
     resume_path = OUTPUT_DIR / "resume_state.json"
     checkpoint_dir = OUTPUT_DIR / "checkpoints"
@@ -516,16 +526,11 @@ def main():
 
         opt_ckpt = checkpoint_dir / "optimizer_state.pt"
         if opt_ckpt.exists():
-            # Optimizer will be created on first accumulate_and_step call;
-            # defer state_dict load until after it exists. Store for later.
-            _deferred_opt_state = torch.load(str(opt_ckpt), weights_only=True)
-            _log(f"  Optimizer state loaded (will apply after first step)")
-        else:
-            _deferred_opt_state = None
+            opt_state = torch.load(str(opt_ckpt), weights_only=True)
+            policy_optimizer.load_state_dict(opt_state)
+            _log(f"  Optimizer state restored from {opt_ckpt.name}")
 
         _log(f"  Resuming from iteration {start_iteration} (last completed: {last_completed})")
-    else:
-        _deferred_opt_state = None
 
     # Load existing rewards from JSONL for reward tracking continuity
     all_rewards = []
@@ -567,21 +572,13 @@ def main():
         rewards, advantages = env.compute_advantages(scores)
         all_rewards.append(float(rewards.mean()))
 
+        policy_optimizer.zero_grad()
         grad_result = accumulate_and_step(
             executor, model, trajs, advantages,
             pos_conds[prompt_idx], neg_cond, resolution, CFG,
-            POLICY_ADAPTER_NAME, LR, MAX_GRAD_NORM,
-            DEVICE, DTYPE, policy_optimizers,
+            policy_optimizer, MAX_GRAD_NORM,
+            DEVICE, DTYPE,
         )
-
-        # Apply deferred optimizer state on first iteration after resume
-        if _deferred_opt_state is not None and POLICY_ADAPTER_NAME in policy_optimizers:
-            try:
-                policy_optimizers[POLICY_ADAPTER_NAME].load_state_dict(_deferred_opt_state)
-                _log(f"  Applied deferred optimizer state")
-            except Exception as e:
-                _log(f"  Warning: could not restore optimizer state: {e}")
-            _deferred_opt_state = None
 
         elapsed = time.perf_counter() - t0
 
@@ -619,11 +616,10 @@ def main():
         adapter_ckpt_path = checkpoint_dir / f"policy_step_{iteration:04d}.safetensors"
         save_adapter(model, POLICY_ADAPTER_NAME, str(adapter_ckpt_path))
 
-        if POLICY_ADAPTER_NAME in policy_optimizers:
-            torch.save(
-                policy_optimizers[POLICY_ADAPTER_NAME].state_dict(),
-                str(checkpoint_dir / "optimizer_state.pt"),
-            )
+        torch.save(
+            policy_optimizer.state_dict(),
+            str(checkpoint_dir / "optimizer_state.pt"),
+        )
 
         atomic_json_save({"iteration": iteration, "completed": True}, resume_path)
 

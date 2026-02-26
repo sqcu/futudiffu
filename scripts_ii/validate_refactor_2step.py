@@ -120,7 +120,6 @@ def main():
         log_interval=1,
         warmup_steps=1,
         lr_schedule="warmup_cosine",
-        packed=True,
         macrobatch_budget=MACROBATCH_BUDGET,
         macrobatch_cross_resolution=True,
         output_dir=str(OUTPUT_DIR),

@@ -599,6 +599,7 @@ def main():
     print("=" * 60)
 
     from src_ii.btrm_training import train_btrm_differentiable
+    from src_ii.dataset_io import make_reward_manifest_preference_fn
     from src_ii.training_artifacts import TrainingArtifacts
     from src_ii.incremental_save import TrainingCurveWriter
 
@@ -693,6 +694,9 @@ def main():
     training_curve = train_btrm_differentiable(
         model=raw_model,
         pair_sampler=sampler,
+        preference_fn=make_reward_manifest_preference_fn(
+            reward_manifest, vae, load_latent_fn, HEAD_NAMES, PREF_KEYS,
+        ),
         load_latent_fn=load_latent_fn,
         n_steps=N_STEPS,
         lr=LR,
@@ -703,7 +707,6 @@ def main():
         log_interval=5,
         warmup_steps=WARMUP_STEPS,
         lr_schedule=LR_SCHEDULE,
-        packed=True,
         output_dir=str(OUTPUT_DIR),
         artifacts=artifacts,
         checkpoint_steps=CHECKPOINT_STEPS,
@@ -713,8 +716,6 @@ def main():
         val_metrics_save_interval=10,
         summary_path=str(OUTPUT_DIR / "run_summary.json"),
         callback=validation_callback,
-        reward_manifest=reward_manifest,
-        vae=vae,
     )
 
     curve_writer.close()
