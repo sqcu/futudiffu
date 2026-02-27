@@ -285,15 +285,17 @@ def run_trajectory_packed(
         widths = [w] * n_images
         heights = [h] * n_images
 
-    # Resolve per-image sampling shifts
+    # Resolve per-image sampling shifts: auto-shift from resolution * user modifier.
+    # resolution_shift() computes SD3 Eq.23: alpha = sqrt(ref_pixels / target_pixels).
+    # User shift (default 1.0) is a multiplier on top — 1.0 = "use model's trained schedule".
+    auto_shifts = [resolution_shift(widths[i], heights[i]) for i in range(n_images)]
     if "sampling_shifts" in params:
-        sampling_shifts = params["sampling_shifts"]
+        user_shifts = params["sampling_shifts"]
     elif "sampling_shift" in params:
-        sampling_shifts = [params["sampling_shift"]] * n_images
+        user_shifts = [params["sampling_shift"]] * n_images
     else:
-        sampling_shifts = [
-            resolution_shift(widths[i], heights[i]) for i in range(n_images)
-        ]
+        user_shifts = [1.0] * n_images
+    sampling_shifts = [a * u for a, u in zip(auto_shifts, user_shifts)]
 
     patch_size = model.patch_size
 

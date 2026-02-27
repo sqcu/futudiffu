@@ -27,7 +27,11 @@ const Generate = (() => {
 
     const config = ConfigFlow.getConfig();
 
-    if (!config.prompt || !config.prompt.trim()) {
+    // Prompt may be a string (scalar) or array (enum distribution)
+    const promptEmpty = Array.isArray(config.prompt)
+      ? config.prompt.length === 0 || config.prompt.every(p => !p.trim())
+      : !config.prompt || !config.prompt.trim();
+    if (promptEmpty) {
       App.logActivity('No prompt provided', 'err');
       return;
     }
@@ -43,7 +47,10 @@ const Generate = (() => {
     Arrows.setState('arrow-config-controls', 'flowing');
     Arrows.bounce('arrow-config-controls');
 
-    App.logActivity(`Submitting batch (k=${k}): ` + config.prompt.slice(0, 40), 'msg');
+    const promptPreview = Array.isArray(config.prompt)
+      ? `[${config.prompt.length}] ${config.prompt[0].slice(0, 30)}`
+      : config.prompt.slice(0, 40);
+    App.logActivity(`Submitting batch (k=${k}): ` + promptPreview, 'msg');
 
     try {
       // Step 1: POST distributional config to batch endpoint
