@@ -186,6 +186,8 @@ const App = (() => {
 
     Generate.init();
     Gallery.init();
+    OutputConfig.init();
+    ConfigGeometry.init();
     setupTabs();
     setupArrows();
 

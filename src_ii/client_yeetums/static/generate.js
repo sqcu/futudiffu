@@ -1,21 +1,25 @@
-/* generate.js — t2i/i2i form submission with SSE streaming progress.
+/* generate.js — Batch-first generation: k jobs, k individual SSE streams.
  *
  * Flow:
- *   1. POST /api/generate → {job_id, stream_url, seed, width, height}
- *   2. EventSource(stream_url) → encoding/progress/decoding/complete events
- *   3. On 'gallery_ready' → add image to gallery
+ *   1. POST /api/batch_generate → {batch_id, k, jobs: [{job_id, stream_url, ...}, ...]}
+ *   2. Open k individual EventSource connections (one per job, through /api/stream/{job_id})
+ *   3. On each 'gallery_ready' → add image to gallery (with batch grouping if k>1)
+ *   4. When all k complete → reset UI
+ *
+ * No multiplexed streams. ONE streaming path: /api/stream/{job_id}.
+ * The queue is the scatter. The gallery is the gather.
  */
 
 const Generate = (() => {
 
   let isGenerating = false;
   let currentSourceId = null;
-  let activeEventSource = null;
+  let activeEventSources = [];
 
   const $ = (id) => document.getElementById(id);
 
   // ---------------------------------------------------------------------------
-  // Submission (queue-based with SSE streaming)
+  // Submission (always through batch path)
   // ---------------------------------------------------------------------------
 
   async function submit() {
@@ -28,64 +32,53 @@ const Generate = (() => {
       return;
     }
 
+    const k = Math.max(1, Math.min(16, config.k || 1));
+
     isGenerating = true;
     const btn = $('btn-generate');
     btn.disabled = true;
-    btn.textContent = 'Queuing...';
+    btn.textContent = k > 1 ? `Queuing ${k} draws...` : 'Queuing...';
     btn.classList.add('btn-generating');
 
     Arrows.setState('arrow-config-controls', 'flowing');
     Arrows.bounce('arrow-config-controls');
 
-    App.logActivity('Submitting: ' + config.prompt.slice(0, 40), 'msg');
-
-    const res = config.resolution || {};
-    const body = {
-      prompt: config.prompt,
-      negative_prompt: config.negative_prompt || '',
-      seed: config.seed !== undefined ? config.seed : -1,
-      n_steps: config.n_steps || 30,
-      cfg: config.cfg || 4.0,
-      attention_backend: config.attention_backend || 'sage',
-      sampling_shift: config.sampling_shift || 1.0,
-      multiplier: config.multiplier || 1.0,
-      denoise: config.denoise || 1.0,
-      anchor_pixels: res.megapixels || 1048576,
-      aspect_ratio: res.aspect_ratio || 1.0,
-      source_id: currentSourceId,
-    };
+    App.logActivity(`Submitting batch (k=${k}): ` + config.prompt.slice(0, 40), 'msg');
 
     try {
-      // Step 1: Enqueue the job
-      const resp = await fetch('/api/generate', {
+      // Step 1: POST distributional config to batch endpoint
+      const resp = await fetch('/api/batch_generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+        body: JSON.stringify({ config }),
       });
 
       if (!resp.ok) {
         const err = await resp.json().catch(() => ({ detail: resp.statusText }));
-        throw new Error(err.detail || 'Enqueue failed');
+        throw new Error(err.detail || 'Batch enqueue failed');
       }
 
       const result = await resp.json();
-      const jobId = result.job_id;
+      const batchId = result.batch_id;
 
-      // Update seed if it was random
-      if (config.seed === -1 || config.seed < 0) {
-        const newConfig = ConfigFlow.getConfig();
-        newConfig.seed = result.seed;
-        ConfigFlow.setConfig(newConfig);
-      }
-
-      btn.textContent = 'Generating...';
+      btn.textContent = k > 1 ? `Generating 0/${k}...` : 'Generating...';
       Arrows.setState('arrow-controls-accel', 'flowing');
       Arrows.bounce('arrow-controls-accel');
 
-      App.logActivity('Job queued: ' + jobId, 'msg');
+      App.logActivity(`Batch ${batchId}: ${k} job(s) queued`, 'msg');
 
-      // Step 2: Connect to SSE stream
-      await streamJob(result.stream_url, result);
+      // Prepare batch group in gallery with resolved configs visible.
+      // The template config lets the gallery identify distributional fields.
+      // Always create the group — even k=1 shows resolved config before image.
+      Gallery.startBatchGroup(batchId, k, result.jobs, config);
+
+      // Show first job's resolved config in output panel
+      if (result.jobs.length > 0 && result.jobs[0].resolved_config) {
+        OutputConfig.show(result.jobs[0].resolved_config, `seed ${result.jobs[0].seed}`);
+      }
+
+      // Step 2: Open k individual SSE streams (scatter)
+      await streamAllJobs(result.jobs, batchId, k);
 
     } catch (e) {
       Arrows.setState('arrow-config-controls', 'error');
@@ -96,102 +89,133 @@ const Generate = (() => {
   }
 
   // ---------------------------------------------------------------------------
-  // SSE event streaming
+  // k individual SSE streams (one per job, gathered by completion counting)
   // ---------------------------------------------------------------------------
 
-  function streamJob(streamUrl, enqueueResult) {
-    return new Promise((resolve, reject) => {
-      if (activeEventSource) {
-        activeEventSource.close();
+  function streamAllJobs(jobs, batchId, k) {
+    return new Promise((resolve) => {
+      // Close any leftover streams
+      closeAllStreams();
+
+      let completedCount = 0;
+      let errorCount = 0;
+
+      for (const job of jobs) {
+        const streamUrl = job.stream_url +
+          `?batch_id=${encodeURIComponent(batchId)}` +
+          `&batch_index=${job.batch_index}`;
+
+        const es = new EventSource(streamUrl);
+        activeEventSources.push(es);
+
+        es.addEventListener('encoding', () => {
+          if (k === 1) $('btn-generate').textContent = 'Encoding...';
+        });
+
+        es.addEventListener('progress', (e) => {
+          try {
+            const d = JSON.parse(e.data);
+            const step = d.step || 0;
+            const total = d.total_steps || 30;
+            if (k === 1) {
+              $('btn-generate').textContent = `Sampling ${step}/${total}`;
+            }
+          } catch (err) { /* ignore */ }
+        });
+
+        es.addEventListener('sampling', () => {
+          if (k === 1) $('btn-generate').textContent = 'Sampling...';
+        });
+
+        es.addEventListener('decoding', () => {
+          Arrows.setState('arrow-accel-gallery', 'flowing');
+          Arrows.bounce('arrow-accel-gallery');
+          if (k === 1) $('btn-generate').textContent = 'Decoding...';
+        });
+
+        es.addEventListener('complete', () => {
+          App.logActivity(`[${job.batch_index}] Complete, saving...`, 'msg');
+        });
+
+        es.addEventListener('gallery_ready', (e) => {
+          es.close();
+          removeStream(es);
+
+          try {
+            const d = JSON.parse(e.data);
+            completedCount++;
+
+            App.logActivity(
+              `[${job.batch_index}] ` +
+              `${d.width}x${d.height}, seed=${d.seed}, ${d.elapsed_s}s`,
+              'ok'
+            );
+
+            // Route to gallery: always through batch group (we always create one)
+            Gallery.addToBatchGroup(d);
+
+            if (k > 1) {
+              $('btn-generate').textContent = `Generating ${completedCount}/${k}...`;
+            }
+          } catch (err) {
+            App.logActivity('Gallery update error: ' + err.message, 'err');
+          }
+
+          checkAllDone();
+        });
+
+        es.addEventListener('error', (e) => {
+          let msg = 'Generation error';
+          if (e.data) {
+            try {
+              const d = JSON.parse(e.data);
+              msg = d.error || msg;
+            } catch (err) { /* ignore */ }
+          }
+          App.logActivity(`[${job.batch_index}] Error: ` + msg, 'err');
+          es.close();
+          removeStream(es);
+          errorCount++;
+          checkAllDone();
+        });
+
+        es.onerror = () => {
+          if (es.readyState === EventSource.CLOSED) return;
+          es.close();
+          removeStream(es);
+          App.logActivity(`[${job.batch_index}] SSE connection lost`, 'err');
+          errorCount++;
+          checkAllDone();
+        };
       }
 
-      const es = new EventSource(streamUrl);
-      activeEventSource = es;
-
-      es.addEventListener('encoding', () => {
-        $('btn-generate').textContent = 'Encoding...';
-        App.logActivity('Encoding prompts...', 'msg');
-      });
-
-      es.addEventListener('progress', (e) => {
-        try {
-          const d = JSON.parse(e.data);
-          const step = d.step || 0;
-          const total = d.total_steps || enqueueResult.n_steps || 30;
-          $('btn-generate').textContent = `Sampling ${step}/${total}`;
-        } catch (err) { /* ignore parse errors */ }
-      });
-
-      es.addEventListener('sampling', () => {
-        $('btn-generate').textContent = 'Sampling...';
-      });
-
-      es.addEventListener('decoding', () => {
-        $('btn-generate').textContent = 'Decoding...';
-        Arrows.setState('arrow-accel-gallery', 'flowing');
-        Arrows.bounce('arrow-accel-gallery');
-      });
-
-      es.addEventListener('complete', (e) => {
-        App.logActivity('Generation complete, saving to gallery...', 'msg');
-      });
-
-      es.addEventListener('gallery_ready', (e) => {
-        es.close();
-        activeEventSource = null;
-
-        try {
-          const d = JSON.parse(e.data);
-
+      function checkAllDone() {
+        if (completedCount + errorCount >= k) {
           Arrows.setState('arrow-config-controls', 'complete');
           Arrows.setState('arrow-controls-accel', 'complete');
           Arrows.setState('arrow-accel-gallery', 'complete');
-
-          App.logActivity(
-            `Done: ${d.width}x${d.height}, seed=${d.seed}, ${d.elapsed_s}s`,
-            'ok'
-          );
-
-          Gallery.addEntry(d);
-        } catch (err) {
-          App.logActivity('Gallery update error: ' + err.message, 'err');
+          App.logActivity(`Batch done: ${completedCount}/${k} images`, 'ok');
+          resetUI();
+          resolve();
         }
-
-        resetUI();
-        resolve();
-      });
-
-      es.addEventListener('error', (e) => {
-        es.close();
-        activeEventSource = null;
-
-        let msg = 'Generation error';
-        if (e.data) {
-          try {
-            const d = JSON.parse(e.data);
-            msg = d.error || msg;
-          } catch (err) { /* ignore */ }
-        }
-
-        Arrows.setState('arrow-config-controls', 'error');
-        Arrows.setState('arrow-controls-accel', 'error');
-        App.logActivity('Error: ' + msg, 'err');
-
-        resetUI();
-        reject(new Error(msg));
-      });
-
-      // EventSource built-in error (connection failure)
-      es.onerror = () => {
-        if (es.readyState === EventSource.CLOSED) return;
-        es.close();
-        activeEventSource = null;
-        Arrows.setState('arrow-controls-accel', 'error');
-        App.logActivity('SSE connection lost', 'err');
-        resetUI();
-        reject(new Error('SSE connection lost'));
-      };
+      }
     });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Stream cleanup
+  // ---------------------------------------------------------------------------
+
+  function closeAllStreams() {
+    for (const es of activeEventSources) {
+      es.close();
+    }
+    activeEventSources = [];
+  }
+
+  function removeStream(es) {
+    const idx = activeEventSources.indexOf(es);
+    if (idx >= 0) activeEventSources.splice(idx, 1);
   }
 
   // ---------------------------------------------------------------------------

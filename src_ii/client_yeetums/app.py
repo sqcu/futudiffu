@@ -10,9 +10,11 @@ import json
 import logging
 import random
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
+import httpx
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -21,15 +23,18 @@ from src_ii.client_yeetums.bridge import InferenceBridge
 from src_ii.client_yeetums.gallery import Gallery
 from src_ii.client_yeetums.models import (
     BatchGenerateRequest,
+    BatchGenerateResponse,
+    ConfigVolumesRequest,
+    ConfigVolumesResponse,
     DefaultConfigResponse,
     GalleryEntry,
     GalleryListResponse,
     GenerateRequest,
-    GenerateResponse,
     ResolutionRequest,
     ResolutionResponse,
     ServerStatusResponse,
 )
+from src_ii.config_distributions import compute_config_volumes, resolve_generation_config
 
 logger = logging.getLogger("yeetums.app")
 
@@ -39,13 +44,14 @@ STATIC_DIR = Path(__file__).parent / "static"
 DEFAULT_CONFIG: dict[str, Any] = {
     "prompt": "",
     "negative_prompt": "",
-    "seed": -1,
+    "seed": {"min": 0, "max": 4294967295},
     "n_steps": 30,
     "cfg": 4.0,
     "attention_backend": "sage",
     "sampling_shift": 1.0,
     "multiplier": 1.0,
     "denoise": 1.0,
+    "k": 1,
     "resolution": {
         "megapixels": 1048576,
         "aspect_ratio": 1.5385,
@@ -59,6 +65,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
 # ---------------------------------------------------------------------------
 
 _source_store: dict[str, bytes] = {}
+
+# Resolved configs from distributional draws (keyed by job_id, ephemeral)
+_resolved_configs: dict[str, dict] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -154,58 +163,107 @@ def create_app(
         """Return the default generation config."""
         return DefaultConfigResponse(config=DEFAULT_CONFIG).model_dump()
 
+    @app.post("/api/config/volumes")
+    async def api_config_volumes(req: ConfigVolumesRequest):
+        """Compute per-field volume info for distributional config fields."""
+        k = max(1, min(16, req.k))
+        volumes = compute_config_volumes(req.config, k=k)
+        total_log = sum(v["log_volume"] for v in volumes)
+        return ConfigVolumesResponse(
+            volumes=volumes,
+            total_log_volume=total_log,
+        ).model_dump()
+
     # ---------------------------------------------------------------
     # Generation (queue-based with SSE streaming)
     # ---------------------------------------------------------------
 
-    @app.post("/api/generate")
-    async def api_generate(req: GenerateRequest):
-        """Enqueue a generation job. Returns job_id + stream URL immediately.
+    @app.post("/api/batch_generate")
+    async def api_batch_generate(req: BatchGenerateRequest):
+        """Resolve distributional config k times, enqueue k scalar jobs.
 
-        The actual GPU work happens asynchronously on the inference server.
-        Use /api/stream/{job_id} to get progress events.
+        Pure data transformation: distributional config → k scalar configs →
+        k enqueue calls. No scheduling, no stream management. Each job gets
+        its own stream_url through the ONE streaming path (/api/stream/{job_id}).
         """
+        config = req.config
+        k = max(1, min(16, int(config.get("k", 1))))
+        batch_id = uuid.uuid4().hex[:12]
+        base_seed = random.randint(0, 2**32 - 1)
+
         from src_ii.resolution_sampling import sample_resolution
 
-        seed = req.seed if req.seed >= 0 else random.randint(0, 2**32 - 1)
-        w, h = sample_resolution(req.anchor_pixels, req.aspect_ratio)
+        jobs = []
+        for i in range(k):
+            rng = random.Random(base_seed + i)
+            resolved = resolve_generation_config(config, rng)
 
-        try:
-            job_id = bridge.enqueue_generation(
-                prompt=req.prompt,
-                negative_prompt=req.negative_prompt,
-                seed=seed,
-                n_steps=req.n_steps,
-                cfg=req.cfg,
-                width=w,
-                height=h,
-                attention_backend=req.attention_backend,
-                sampling_shift=req.sampling_shift,
-                multiplier=req.multiplier,
-                denoise=req.denoise,
+            # Derive (w, h) from resolved megapixels + aspect_ratio.
+            # resolve_generation_config preserves input shape, so resolution
+            # is always {megapixels, aspect_ratio, quantize} — never {width, height}.
+            res = resolved.get("resolution", {})
+            w, h = sample_resolution(
+                res.get("megapixels", 1048576),
+                float(res.get("aspect_ratio", 1.0)),
+                step=res.get("quantize", 32),
             )
-        except Exception as e:
-            logger.error(f"Enqueue failed: {e}")
-            raise HTTPException(status_code=502, detail=str(e))
 
-        return {
-            "job_id": job_id,
-            "stream_url": f"/api/stream/{job_id}",
-            "seed": seed,
-            "width": w,
-            "height": h,
-        }
+            seed = resolved.get("seed", rng.randint(0, 2**32 - 1))
+            if isinstance(seed, float):
+                seed = int(seed)
+
+            try:
+                job_id = bridge.enqueue_generation(
+                    prompt=resolved.get("prompt", ""),
+                    negative_prompt=resolved.get("negative_prompt", ""),
+                    seed=seed,
+                    n_steps=int(resolved.get("n_steps", 30)),
+                    cfg=float(resolved.get("cfg", 4.0)),
+                    width=w,
+                    height=h,
+                    attention_backend=resolved.get("attention_backend", "sage"),
+                    sampling_shift=float(resolved.get("sampling_shift", 1.0)),
+                    multiplier=float(resolved.get("multiplier", 1.0)),
+                    denoise=float(resolved.get("denoise", 1.0)),
+                )
+            except Exception as e:
+                logger.error(f"Enqueue failed for batch {batch_id}[{i}]: {e}")
+                raise HTTPException(status_code=502, detail=str(e))
+
+            # Build resolved config: a complete, valid input config with all
+            # distributions collapsed to their sampled scalars. Pasting this
+            # back into the input config panel and hitting generate reproduces
+            # the exact same image.
+            resolved_scalar = dict(resolved)
+            resolved_scalar["seed"] = seed
+            resolved_scalar["k"] = 1
+            _resolved_configs[job_id] = resolved_scalar
+
+            jobs.append({
+                "job_id": job_id,
+                "batch_index": i,
+                "seed": seed,
+                "width": w,
+                "height": h,
+                "stream_url": f"/api/stream/{job_id}",
+                "batch_id": batch_id,
+                "resolved_config": resolved_scalar,
+            })
+
+        return BatchGenerateResponse(
+            batch_id=batch_id,
+            k=k,
+            jobs=jobs,
+        ).model_dump()
 
     @app.get("/api/stream/{job_id}")
-    async def api_stream(job_id: str):
+    async def api_stream(job_id: str, batch_id: str = "", batch_index: int = -1):
         """Proxy SSE events from the inference server to the browser.
 
-        Connects to the inference server's /stream/{job_id} SSE endpoint and
-        forwards events. On 'complete', fetches the PNG result, saves to
-        gallery, and emits a 'gallery_ready' event with the image URL.
+        ONE streaming path for all jobs. Batch metadata (batch_id, batch_index)
+        passed as query params, injected into gallery_ready so the frontend
+        can reconstruct batch groups.
         """
-        import httpx
-
         async def event_gen():
             url = f"{bridge._base_url}/stream/{job_id}"
             try:
@@ -234,6 +292,12 @@ def create_app(
                                     # Fetch PNG, save to gallery, emit gallery_ready
                                     try:
                                         png_bytes, metadata = bridge.get_result_png(job_id)
+                                        if batch_id:
+                                            metadata["batch_id"] = batch_id
+                                            metadata["batch_index"] = batch_index
+                                        resolved_cfg = _resolved_configs.pop(job_id, None)
+                                        if resolved_cfg is not None:
+                                            metadata["resolved_config"] = resolved_cfg
                                         entry = gallery.add(png_bytes, metadata)
                                         gallery_data = json.dumps({
                                             "gallery_id": entry["id"],
@@ -243,6 +307,9 @@ def create_app(
                                             "height": metadata.get("height"),
                                             "elapsed_s": metadata.get("elapsed_s"),
                                             "prompt": metadata.get("prompt", ""),
+                                            "batch_id": batch_id or None,
+                                            "batch_index": batch_index if batch_index >= 0 else None,
+                                            "resolved_config": resolved_cfg,
                                         })
                                         yield f"event: gallery_ready\ndata: {gallery_data}\n\n"
                                     except Exception as e:

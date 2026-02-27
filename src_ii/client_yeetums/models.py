@@ -44,9 +44,18 @@ class GenerateResponse(BaseModel):
 
 
 class BatchGenerateRequest(BaseModel):
-    """Batch generation from a distribution config."""
+    """Batch generation from a distributional config. k is inside config."""
     config: dict[str, Any]
-    count: int = 4
+
+
+class BatchGenerateResponse(BaseModel):
+    """Response after batch generation is enqueued.
+
+    Each job in jobs[] has its own stream_url. No multiplexed stream.
+    """
+    batch_id: str
+    k: int
+    jobs: list[dict[str, Any]]
 
 
 # ---------------------------------------------------------------------------
@@ -86,6 +95,9 @@ class GalleryEntry(BaseModel):
     image_url: str
     denoise: float = 1.0
     source_id: str | None = None
+    batch_id: str | None = None
+    batch_index: int | None = None
+    resolved_config: dict[str, Any] | None = None
 
 
 class GalleryListResponse(BaseModel):
@@ -117,3 +129,15 @@ class ServerStatusResponse(BaseModel):
 class DefaultConfigResponse(BaseModel):
     """Default generation config with distribution annotations."""
     config: dict[str, Any]
+
+
+class ConfigVolumesRequest(BaseModel):
+    """Request for config space volume computation."""
+    config: dict[str, Any]
+    k: int = 1
+
+
+class ConfigVolumesResponse(BaseModel):
+    """Per-field volume info for distributional config fields."""
+    volumes: list[dict[str, Any]]
+    total_log_volume: float

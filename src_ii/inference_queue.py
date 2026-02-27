@@ -211,7 +211,11 @@ class InferenceQueue:
     # ------------------------------------------------------------------
 
     async def _worker_loop(self):
-        """Drain -> group by n_steps -> execute -> resolve."""
+        """Drain -> group by n_steps -> bin pack -> execute bins -> resolve."""
+        from src_ii.bin_packer import BinPackScheduler
+
+        packer = BinPackScheduler()
+
         while self._running:
             try:
                 batch = await self._drain_batch()
@@ -224,15 +228,24 @@ class InferenceQueue:
                     groups.setdefault(job.n_steps, []).append(job)
 
                 for n_steps, group_jobs in groups.items():
-                    try:
-                        await self._execute_batch(group_jobs)
-                    except Exception as e:
-                        logger.error(f"Batch failed: {e}", exc_info=True)
-                        for job in group_jobs:
-                            job.status = "error"
-                            job.error = str(e)
-                            _notify(job, "error", {"error": str(e)})
-                            job._event.set()
+                    # Bin pack: split group into bins that fit in one forward pass
+                    plan = [
+                        {"width": j.width, "height": j.height, "_job": j}
+                        for j in group_jobs
+                    ]
+                    bins = packer.pack_generation_plan(plan)
+
+                    for bin_items in bins:
+                        bin_jobs = [item["_job"] for item in bin_items]
+                        try:
+                            await self._execute_batch(bin_jobs)
+                        except Exception as e:
+                            logger.error(f"Batch failed: {e}", exc_info=True)
+                            for job in bin_jobs:
+                                job.status = "error"
+                                job.error = str(e)
+                                _notify(job, "error", {"error": str(e)})
+                                job._event.set()
 
             except asyncio.CancelledError:
                 break

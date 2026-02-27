@@ -49,16 +49,28 @@
 <!-- Main layout: three-column diegetic flow -->
 <main class="main-layout">
 
-  <!-- LEFT: Config JSON panel -->
-  <section id="panel-config" class="panel panel-config">
-    <div class="panel-header">
-      <h2>Config</h2>
-      <button id="btn-reset-config" class="btn btn-small" title="Reset to defaults">Reset</button>
-    </div>
-    <div class="panel-body">
-      <pre id="config-editor" class="config-editor" contenteditable="true" spellcheck="false"></pre>
-    </div>
-  </section>
+  <!-- LEFT: Config panels -->
+  <div class="left-panels">
+    <section id="panel-config" class="panel panel-config">
+      <div class="panel-header">
+        <h2>Config</h2>
+        <button id="btn-reset-config" class="btn btn-small" title="Reset to defaults">Reset</button>
+      </div>
+      <div class="panel-body">
+        <pre id="config-editor" class="config-editor" contenteditable="true" spellcheck="false"></pre>
+      </div>
+    </section>
+
+    <section id="panel-output-config" class="panel panel-output-config">
+      <div class="panel-header">
+        <h2>Output Config</h2>
+        <span id="output-config-label" class="text-dim">no selection</span>
+      </div>
+      <div class="panel-body">
+        <pre id="output-config-view" class="config-editor config-readonly"></pre>
+      </div>
+    </section>
+  </div>
 
   <!-- CENTER: Controls panel -->
   <section id="panel-controls" class="panel panel-controls">
@@ -83,15 +95,10 @@
       <!-- Resolution -->
       <div class="control-row">
         <div class="control-group flex-1">
-          <label for="ctrl-anchor">Megapixel Anchor</label>
-          <select id="ctrl-anchor" class="ctrl-select">
-            <option value="65536">256sq tiny (64K px)</option>
-            <option value="102400">320sq small (102K)</option>
-            <option value="147456">384sq medium (147K)</option>
-            <option value="262144">512sq standard (262K)</option>
-            <option value="495616">704sq large (496K)</option>
-            <option value="1048576" selected>1024sq full (1.05M)</option>
-          </select>
+          <label for="ctrl-anchor">px² <span id="anchor-value" class="label-accent">1.05M</span></label>
+          <input id="ctrl-anchor" type="range" class="ctrl-slider"
+                 min="11.09" max="13.86" step="0.01" value="13.86">
+          <!-- ln(65536) ≈ 11.09, ln(1048576) ≈ 13.86 -->
         </div>
         <div class="control-group flex-1">
           <label for="ctrl-aspect">Aspect Ratio <span id="aspect-label" class="label-accent">3:2</span></label>
@@ -159,8 +166,16 @@
         <img id="i2i-preview" class="i2i-preview" style="display:none;" alt="Source preview">
       </div>
 
-      <!-- Generate button -->
+      <!-- Draws (k) slider + Geometry + Generate button -->
       <div class="generate-row">
+        <div class="control-row" style="margin-bottom: 8px;">
+          <div class="control-group flex-1">
+            <label for="ctrl-k">Draws <span id="k-value" class="label-accent">1</span></label>
+            <input id="ctrl-k" type="range" class="ctrl-slider"
+                   min="1" max="16" step="1" value="1">
+          </div>
+        </div>
+        <div id="config-geometry-container" class="config-geometry-container"></div>
         <button id="btn-generate" class="btn btn-primary btn-generate">
           Generate
         </button>
@@ -241,6 +256,8 @@
 
 <script src="/static/arrows.js"></script>
 <script src="/static/config_flow.js"></script>
+<script src="/static/output_config.js"></script>
+<script src="/static/config_geometry.js"></script>
 <script src="/static/generate.js"></script>
 <script src="/static/gallery.js"></script>
 <script src="/static/app.js"></script>

@@ -54,12 +54,14 @@ This is a compact demonstration that reward models implemented as low rank adapt
 
 ![Cabin 1280x832 -- ref / v2 / v2b policy comparison with BTRM score trajectories](validation_renders/policy_intervention_v2_v2b/run01/cabin/1280x832/composite.png)
 
-### why?
 
-brain hurt after trying to cram for mats / anthropic fellows code screens in ancient dead languages no longer used in ml, needed cooldown exercise
-
-### 
+### if this is a diffusion model repo where do i click on buttons and write 'prompts'?
 
 uv run python scripts_ii\launch_server.py
 
-python scripts_ii\launch_yeetums.py --inference-url http://localhost:8000 --port 8079
+uv run python scripts_ii\launch_yeetums.py --inference-url http://localhost:8000 --port 8079
+
+
+### why?
+
+brain hurt after trying to cram for mats / anthropic fellows code screens in ancient dead languages no longer used in ml, needed cooldown exercise

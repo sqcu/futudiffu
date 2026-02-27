@@ -200,6 +200,32 @@ body {
 .cfg-bracket { color: var(--text-dim); }
 
 /* ====================================================================
+   Left panels container (input config + output config)
+   ================================================================= */
+
+.left-panels {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 260px;
+  overflow: hidden;
+}
+
+.left-panels .panel {
+  flex: 1;
+  min-height: 0;
+}
+
+.panel-output-config { min-width: 260px; }
+
+.config-readonly {
+  background: var(--bg-deep);
+  cursor: default;
+  user-select: text;
+  min-height: 60px;
+}
+
+/* ====================================================================
    Controls (center panel)
    ================================================================= */
 
@@ -644,6 +670,370 @@ body {
 .arrow-flowing { animation: arrow-pulse 1s ease-in-out infinite; }
 
 /* ====================================================================
+   Batch group (gallery)
+   ================================================================= */
+
+.gallery-batch-group {
+  display: inline-flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  border: 2px solid var(--magenta);
+  border-radius: 6px;
+  padding: 4px;
+  gap: 4px;
+  background: rgba(232, 121, 249, 0.05);
+}
+
+.batch-group-label {
+  font-size: 9px;
+  color: var(--magenta);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-weight: 600;
+  padding: 0 4px;
+  white-space: nowrap;
+}
+
+.batch-slots {
+  display: flex;
+  gap: 4px;
+}
+
+.batch-slot {
+  width: 120px;
+  height: 100px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  position: relative;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+
+.batch-slot:hover {
+  border-color: var(--accent);
+}
+
+.batch-slot img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.batch-slot .slot-pending {
+  font-size: 10px;
+  color: var(--text-dim);
+  text-align: center;
+}
+
+/* Resolved config card in pending slot */
+.slot-config-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  padding: 4px 6px;
+  width: 100%;
+  font-family: 'Cascadia Code', 'Fira Code', monospace;
+  font-size: 9px;
+  line-height: 1.3;
+}
+
+.config-card-line {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.config-card-seed {
+  color: var(--magenta);
+  font-weight: 600;
+}
+
+.config-card-sampled {
+  color: var(--cyan);
+}
+
+.config-card-dim {
+  color: var(--text-dim);
+  font-size: 8px;
+  margin-top: auto;
+}
+
+.batch-slot .thumb-overlay {
+  position: absolute;
+  bottom: 0; left: 0; right: 0;
+  padding: 3px 6px;
+  background: rgba(18, 18, 30, 0.85);
+  font-size: 9px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ====================================================================
+   Config geometry visualization
+   ================================================================= */
+
+.config-geometry-container {
+  margin: 8px 0;
+  min-height: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.config-geometry-container svg {
+  display: block;
+  margin: 0 auto;
+}
+
+/* ====================================================================
+   Distribution-mode controls
+   ================================================================= */
+
+.dist-badge {
+  display: inline-block;
+  font-size: 9px;
+  color: var(--magenta);
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  margin-left: 4px;
+  cursor: pointer;
+  user-select: none;
+  transition: color 0.15s;
+}
+
+.dist-badge:hover {
+  color: #f0a0ff;
+}
+
+.dist-badge-scalar {
+  color: var(--text-dim);
+  opacity: 0.5;
+}
+
+.dist-badge-scalar:hover {
+  color: var(--magenta);
+  opacity: 1;
+}
+
+/* Distributional textarea: magenta left border + slight glow */
+.ctrl-dist-textarea {
+  border-left: 2px solid var(--magenta) !important;
+  box-shadow: inset 3px 0 8px rgba(232, 121, 249, 0.12);
+}
+
+/* Range highlight overlay on slider track */
+.slider-range-highlight {
+  position: absolute;
+  top: 50%;
+  height: 6px;
+  transform: translateY(-50%);
+  background: rgba(232, 121, 249, 0.35);
+  border-radius: 3px;
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* Enum dot on slider track */
+.slider-enum-dot {
+  position: absolute;
+  top: 50%;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--magenta);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  z-index: 1;
+}
+
+.slider-enum-dot-draggable {
+  pointer-events: auto;
+  cursor: ew-resize;
+  width: 8px;
+  height: 8px;
+  transition: box-shadow 0.15s, width 0.1s, height 0.1s;
+}
+
+.slider-enum-dot-draggable:hover {
+  box-shadow: 0 0 8px rgba(232, 121, 249, 0.6);
+  width: 10px;
+  height: 10px;
+}
+
+/* Range handles — draggable min/max on slider track */
+.range-handle {
+  position: absolute;
+  top: 50%;
+  width: 8px;
+  height: 18px;
+  transform: translate(-50%, -50%);
+  background: var(--magenta);
+  border-radius: 2px;
+  cursor: ew-resize;
+  z-index: 2;
+  opacity: 0.7;
+  transition: opacity 0.15s, box-shadow 0.15s;
+}
+
+.range-handle:hover {
+  opacity: 1;
+  box-shadow: 0 0 8px rgba(232, 121, 249, 0.6);
+}
+
+/* Value labels at range handle / enum dot positions */
+.range-value-label {
+  position: absolute;
+  bottom: -13px;
+  transform: translateX(-50%);
+  font-size: 8px;
+  color: var(--magenta);
+  font-family: 'Cascadia Code', 'Fira Code', monospace;
+  pointer-events: none;
+  white-space: nowrap;
+  opacity: 0.8;
+  z-index: 1;
+}
+
+.enum-value-label {
+  position: absolute;
+  bottom: -13px;
+  transform: translateX(-50%);
+  font-size: 8px;
+  color: var(--magenta);
+  font-family: 'Cascadia Code', 'Fira Code', monospace;
+  pointer-events: none;
+  white-space: nowrap;
+  opacity: 0.7;
+  z-index: 1;
+}
+
+/* Range step editing row */
+.range-step-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.range-step-input {
+  width: 60px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--magenta);
+  font-size: 10px;
+  padding: 2px 4px;
+  font-family: 'Cascadia Code', 'Fira Code', monospace;
+}
+
+.range-step-input:focus {
+  outline: none;
+  border-color: var(--magenta);
+}
+
+.range-step-card {
+  color: var(--text-dim);
+  font-size: 9px;
+  font-family: 'Cascadia Code', 'Fira Code', monospace;
+}
+
+/* Wrapper for slider + overlays */
+.slider-wrapper {
+  position: relative;
+  width: 100%;
+  padding-bottom: 2px;
+  margin-bottom: 10px;
+}
+
+/* Select distributional overlay: shows active options as chips */
+.select-dist-overlay {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  margin-top: 4px;
+}
+
+.select-dist-chip {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  color: var(--magenta);
+  background: rgba(232, 121, 249, 0.12);
+  border: 1px solid rgba(232, 121, 249, 0.3);
+}
+
+/* Geometry zoom controls */
+.geometry-zoom-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  padding: 0 4px;
+}
+
+.geometry-zoom-label {
+  font-size: 9px;
+  color: var(--text-dim);
+  letter-spacing: 2px;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.geometry-zoom-slider {
+  flex: 1;
+  height: 3px;
+  -webkit-appearance: none;
+  appearance: none;
+  background: var(--border);
+  border-radius: 2px;
+  outline: none;
+  cursor: pointer;
+}
+
+.geometry-zoom-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--magenta);
+  cursor: pointer;
+  box-shadow: 0 0 4px rgba(232, 121, 249, 0.4);
+}
+
+.geometry-zoom-slider::-moz-range-thumb {
+  width: 10px;
+  height: 10px;
+  border: none;
+  border-radius: 50%;
+  background: var(--magenta);
+  cursor: pointer;
+}
+
+.geometry-zoom-auto {
+  font-size: 9px !important;
+  padding: 1px 6px !important;
+  opacity: 0.6;
+  transition: opacity 0.15s;
+}
+
+.geometry-zoom-auto:hover {
+  opacity: 1;
+}
+
+/* ====================================================================
    Responsive
    ================================================================= */
 
@@ -652,5 +1042,5 @@ body {
     grid-template-columns: 1fr;
     height: auto;
   }
-  .panel-config, .panel-accel { max-height: 300px; }
+  .panel-config, .panel-output-config, .panel-accel { max-height: 300px; }
 }
