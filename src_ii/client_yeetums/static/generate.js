@@ -27,13 +27,17 @@ const Generate = (() => {
 
     const config = ConfigFlow.getConfig();
 
-    // Prompt may be a string (scalar) or array (enum distribution)
-    const promptEmpty = Array.isArray(config.prompt)
-      ? config.prompt.length === 0 || config.prompt.every(p => !p.trim())
-      : !config.prompt || !config.prompt.trim();
-    if (promptEmpty) {
-      App.logActivity('No prompt provided', 'err');
-      return;
+    // Typed configs (btrm, ddgrpo, policy_intervention, validate) use
+    // their own prompt fields (e.g. "prompts"); skip the inference check.
+    const configType = config.type || 'inference';
+    if (configType === 'inference') {
+      const promptEmpty = Array.isArray(config.prompt)
+        ? config.prompt.length === 0 || config.prompt.every(p => !p.trim())
+        : !config.prompt || !config.prompt.trim();
+      if (promptEmpty) {
+        App.logActivity('No prompt provided', 'err');
+        return;
+      }
     }
 
     const k = Math.max(1, Math.min(16, config.k || 1));
@@ -47,10 +51,11 @@ const Generate = (() => {
     Arrows.setState('arrow-config-controls', 'flowing');
     Arrows.bounce('arrow-config-controls');
 
-    const promptPreview = Array.isArray(config.prompt)
-      ? `[${config.prompt.length}] ${config.prompt[0].slice(0, 30)}`
-      : config.prompt.slice(0, 40);
-    App.logActivity(`Submitting batch (k=${k}): ` + promptPreview, 'msg');
+    const promptSrc = config.prompt || config.prompts || '';
+    const promptPreview = Array.isArray(promptSrc)
+      ? `[${promptSrc.length}] ${(promptSrc[0] || '').slice(0, 30)}`
+      : String(promptSrc).slice(0, 40);
+    App.logActivity(`Submitting ${configType} (k=${k}): ` + (promptPreview || configType), 'msg');
 
     try {
       // Step 1: POST distributional config to batch endpoint
@@ -108,8 +113,9 @@ const Generate = (() => {
       let errorCount = 0;
 
       for (const job of jobs) {
+        const sep = job.stream_url.includes('?') ? '&' : '?';
         const streamUrl = job.stream_url +
-          `?batch_id=${encodeURIComponent(batchId)}` +
+          `${sep}batch_id=${encodeURIComponent(batchId)}` +
           `&batch_index=${job.batch_index}`;
 
         const es = new EventSource(streamUrl);
@@ -145,29 +151,27 @@ const Generate = (() => {
         });
 
         es.addEventListener('gallery_ready', (e) => {
-          es.close();
-          removeStream(es);
-
           try {
             const d = JSON.parse(e.data);
-            completedCount++;
-
+            Gallery.addToBatchGroup(d);
+            const desc = d.label || (d.width && d.height ? `${d.width}x${d.height}` : 'artifact');
             App.logActivity(
-              `[${job.batch_index}] ` +
-              `${d.width}x${d.height}, seed=${d.seed}, ${d.elapsed_s}s`,
+              `[${job.batch_index}] artifact: ${desc}`,
               'ok'
             );
-
-            // Route to gallery: always through batch group (we always create one)
-            Gallery.addToBatchGroup(d);
-
-            if (k > 1) {
-              $('btn-generate').textContent = `Generating ${completedCount}/${k}...`;
-            }
           } catch (err) {
             App.logActivity('Gallery update error: ' + err.message, 'err');
           }
+        });
 
+        es.addEventListener('done', (e) => {
+          es.close();
+          removeStream(es);
+          completedCount++;
+
+          if (k > 1) {
+            $('btn-generate').textContent = `Generating ${completedCount}/${k}...`;
+          }
           checkAllDone();
         });
 

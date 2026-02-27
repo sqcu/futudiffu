@@ -113,6 +113,44 @@ class MultiLoRALinear(nn.Module):
             ),
         )
 
+    def add_adapter(self, cfg: dict) -> None:
+        """Add a new adapter to an existing MultiLoRALinear wrapper.
+
+        Args:
+            cfg: Dict with "name" (str), "rank" (int), "alpha" (float, optional).
+        """
+        name = cfg["name"]
+        if name in self.lora_A:
+            raise ValueError(f"Adapter {name!r} already exists")
+
+        rank = cfg["rank"]
+        alpha = cfg.get("alpha", float(rank))
+
+        self.adapter_names.append(name)
+        self.adapter_ranks.append(rank)
+        self.adapter_alphas.append(alpha)
+        self.n_adapters += 1
+
+        A = nn.Parameter(torch.zeros(rank, self.in_features))
+        nn.init.kaiming_uniform_(A, a=math.sqrt(5))
+        B = nn.Parameter(torch.zeros(self.out_features, rank))
+
+        # Match device/dtype of existing adapters
+        if len(self.lora_A) > 0:
+            ref = next(iter(self.lora_A.values()))
+            A = nn.Parameter(A.to(device=ref.device, dtype=ref.dtype))
+            B = nn.Parameter(B.to(device=ref.device, dtype=ref.dtype))
+
+        self.lora_A[name] = A
+        self.lora_B[name] = B
+
+        # Recompute scalings buffer
+        self._lora_scalings = torch.tensor(
+            [a / r for a, r in zip(self.adapter_alphas, self.adapter_ranks)],
+            dtype=torch.float32,
+            device=self._lora_scalings.device,
+        )
+
     def __getattr__(self, name: str):
         """Proxy unknown attributes to the base linear.
 
@@ -286,6 +324,11 @@ class MultiLoRALinear(nn.Module):
         return adapter_out.reshape(orig_shape[:-1] + (self.out_features,))
 
 
+def _strip_orig_mod(name: str) -> str:
+    """Remove ``._orig_mod`` segments inserted by torch.compile wrappers."""
+    return name.replace("._orig_mod", "")
+
+
 def _is_target_module(name: str, target_patterns: list[str] | None) -> bool:
     """Check if a module name matches any target pattern.
 
@@ -294,11 +337,13 @@ def _is_target_module(name: str, target_patterns: list[str] | None) -> bool:
       - Patterns are matched against the full dotted module path
       - "layers." prefix matches main transformer blocks
       - Exact substring match (e.g., "attention.qkv" matches "layers.5.attention.qkv")
+      - torch.compile ``._orig_mod`` segments are stripped before matching.
     """
+    canonical = _strip_orig_mod(name)
     if target_patterns is None:
         # Default: target all linears in main transformer blocks
-        return name.startswith("layers.")
-    return any(pattern in name for pattern in target_patterns)
+        return canonical.startswith("layers.")
+    return any(pattern in canonical for pattern in target_patterns)
 
 
 def _find_target_linears(
@@ -328,10 +373,18 @@ def _find_target_linears(
     for name, module in model.named_modules():
         if not _is_target_module(name, target_patterns):
             continue
-        if any(ex in name for ex in exclude):
+        canonical = _strip_orig_mod(name)
+        if any(ex in canonical for ex in exclude):
             continue
+        # Skip inner .base of an existing MultiLoRALinear (it's a child module
+        # visible to named_modules but should not be independently targeted)
+        if ".base" in canonical:
+            continue
+        # Already-wrapped MultiLoRALinear — include so install can add adapters
+        if isinstance(module, MultiLoRALinear):
+            targets[name] = module
         # Check if it's a Linear-like layer
-        if isinstance(module, nn.Linear):
+        elif isinstance(module, nn.Linear):
             targets[name] = module
         elif hasattr(module, "weight") and hasattr(module, "__call__"):
             # FP8Linear or similar custom linear
@@ -377,6 +430,14 @@ def install_multi_lora(
     wrappers: dict[str, MultiLoRALinear] = {}
 
     for name, module in targets.items():
+        if isinstance(module, MultiLoRALinear):
+            # Already wrapped — add new adapter(s) to existing wrapper
+            for cfg in adapter_configs:
+                if cfg["name"] not in module.lora_A:
+                    module.add_adapter(cfg)
+            wrappers[name] = module
+            continue
+
         # Split name into parent path and attribute name
         parts = name.rsplit(".", 1)
         if len(parts) == 2:
@@ -504,10 +565,11 @@ def get_adapter_params(
     params = {}
     for name, module in model.named_modules():
         if isinstance(module, MultiLoRALinear):
+            canonical = _strip_orig_mod(name)
             if adapter_name in module.lora_A:
-                params[f"{name}.lora_A.{adapter_name}"] = module.lora_A[adapter_name]
+                params[f"{canonical}.lora_A.{adapter_name}"] = module.lora_A[adapter_name]
             if adapter_name in module.lora_B:
-                params[f"{name}.lora_B.{adapter_name}"] = module.lora_B[adapter_name]
+                params[f"{canonical}.lora_B.{adapter_name}"] = module.lora_B[adapter_name]
     return params
 
 
@@ -526,12 +588,13 @@ def save_adapter(
     tensors = {}
     for name, module in model.named_modules():
         if isinstance(module, MultiLoRALinear):
+            canonical = _strip_orig_mod(name)
             if adapter_name in module.lora_A:
-                tensors[f"{name}.lora_A.{adapter_name}"] = (
+                tensors[f"{canonical}.lora_A.{adapter_name}"] = (
                     module.lora_A[adapter_name].data.contiguous()
                 )
             if adapter_name in module.lora_B:
-                tensors[f"{name}.lora_B.{adapter_name}"] = (
+                tensors[f"{canonical}.lora_B.{adapter_name}"] = (
                     module.lora_B[adapter_name].data.contiguous()
                 )
 
@@ -603,8 +666,9 @@ def load_adapter(
     loaded = 0
     for name, module in model.named_modules():
         if isinstance(module, MultiLoRALinear):
-            a_key = f"{name}.lora_A.{adapter_name}"
-            b_key = f"{name}.lora_B.{adapter_name}"
+            canonical = _strip_orig_mod(name)
+            a_key = f"{canonical}.lora_A.{adapter_name}"
+            b_key = f"{canonical}.lora_B.{adapter_name}"
 
             if a_key in state and adapter_name in module.lora_A:
                 module.lora_A[adapter_name].data.copy_(state[a_key])

@@ -1,0 +1,13 @@
+{
+  "type": "policy_intervention",
+  "prompts": ["a beautiful glizzy, hot dogged, there is a hot dog, golden hour, dramatic clouds parting to reveal the glizzy"],
+  "seeds": [42],
+  "width": 1280,
+  "height": 832,
+  "n_steps": 20,
+  "btrm_dir": "training_output/reward_function_run_tnt_v2",
+  "adapter_name": "rtheta",
+  "policy_checkpoint": "training_output/ddgrpo_v2b/policy_adapter_final.safetensors",
+  "policy_adapter_name": "policy_pinkify",
+  "diff_scale": 10.0
+}

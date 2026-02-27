@@ -1,0 +1,11 @@
+{
+  "type": "ddgrpo",
+  "btrm_checkpoint": "training_output/reward_function_run_tnt_v2",
+  "n_iters": 50,
+  "prompts": ["a beautiful landscape"],
+  "n_rollouts_per_prompt": 2,
+  "rollout_steps": 20,
+  "policy_lr": 2e-5,
+  "adapter_rank": 8,
+  "adapter_alpha": 16.0
+}

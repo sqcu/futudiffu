@@ -1,0 +1,17 @@
+{
+  "prompt": "",
+  "negative_prompt": "",
+  "seed": {"min": 0, "max": 4294967295},
+  "n_steps": 30,
+  "cfg": 4.0,
+  "attention_backend": "sage",
+  "sampling_shift": 1.0,
+  "multiplier": 1.0,
+  "denoise": 1.0,
+  "k": 1,
+  "resolution": {
+    "megapixels": 1048576,
+    "aspect_ratio": 1.5385,
+    "quantize": 32
+  }
+}

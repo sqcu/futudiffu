@@ -22,6 +22,10 @@ from fastapi.staticfiles import StaticFiles
 from src_ii.client_yeetums.bridge import InferenceBridge
 from src_ii.client_yeetums.gallery import Gallery
 from src_ii.client_yeetums.models import (
+    AdapterAllocateRequest,
+    AdapterConfigRequest,
+    AdapterInitRequest,
+    BTRMHeadRequest,
     BatchGenerateRequest,
     BatchGenerateResponse,
     ConfigVolumesRequest,
@@ -33,6 +37,9 @@ from src_ii.client_yeetums.models import (
     ResolutionRequest,
     ResolutionResponse,
     ServerStatusResponse,
+    TrainingRunRequest,
+    TrainingStatusResponse,
+    ValidationRequest,
 )
 from src_ii.config_distributions import compute_config_volumes, resolve_generation_config
 
@@ -163,6 +170,17 @@ def create_app(
         """Return the default generation config."""
         return DefaultConfigResponse(config=DEFAULT_CONFIG).model_dump()
 
+    @app.get("/api/config/presets")
+    async def api_config_presets():
+        """List available config presets from the presets/ directory."""
+        presets_dir = Path(__file__).parent / "presets"
+        presets = []
+        if presets_dir.is_dir():
+            for p in sorted(presets_dir.glob("*.json")):
+                with open(p) as f:
+                    presets.append({"name": p.stem, "config": json.load(f)})
+        return {"presets": presets}
+
     @app.post("/api/config/volumes")
     async def api_config_volumes(req: ConfigVolumesRequest):
         """Compute per-field volume info for distributional config fields."""
@@ -187,6 +205,34 @@ def create_app(
         its own stream_url through the ONE streaming path (/api/stream/{job_id}).
         """
         config = req.config
+
+        # Training runs route through the same batch_generate endpoint.
+        # The frontend gets a single-job batch with a training stream URL.
+        config_type = config.get("type", "inference")
+        if config_type in ("btrm", "ddgrpo", "validate", "policy_intervention"):
+            try:
+                train_config = dict(config)
+                train_config["run_type"] = config_type
+                result = bridge.start_training_run(train_config)
+            except Exception as e:
+                raise HTTPException(status_code=502, detail=str(e))
+
+            batch_id = uuid.uuid4().hex[:12]
+            return BatchGenerateResponse(
+                batch_id=batch_id,
+                k=1,
+                jobs=[{
+                    "job_id": result["run_id"],
+                    "batch_index": 0,
+                    "seed": 0,
+                    "width": 0,
+                    "height": 0,
+                    "stream_url": f"/api/train/stream/{result['run_id']}?batch_id={batch_id}",
+                    "batch_id": batch_id,
+                    "resolved_config": config,
+                }],
+            ).model_dump()
+
         k = max(1, min(16, int(config.get("k", 1))))
         batch_id = uuid.uuid4().hex[:12]
         base_seed = random.randint(0, 2**32 - 1)
@@ -317,9 +363,11 @@ def create_app(
                                         yield _sse_event("gallery_error", {
                                             "error": str(e)
                                         })
+                                    yield _sse_event("done", {"reason": "complete"})
                                     return
 
                                 if event_type == "error":
+                                    yield _sse_event("done", {"reason": "error"})
                                     return
 
                                 event_type = "message"
@@ -465,6 +513,337 @@ def create_app(
         """Trigger inference server warmup."""
         result = bridge.warmup()
         return result
+
+    # ---------------------------------------------------------------
+    # Training lifecycle (proxy to server via bridge)
+    # ---------------------------------------------------------------
+
+    @app.post("/api/train/btrm/start")
+    async def api_train_btrm_start(req: TrainingRunRequest):
+        """Start a BTRM training run on the inference server."""
+        config = dict(req.config)
+        config["run_type"] = "btrm"
+        try:
+            result = bridge.start_training_run(config)
+            return result
+        except Exception as e:
+            logger.error(f"Training start failed: {e}")
+            raise HTTPException(status_code=502, detail=str(e))
+
+    @app.post("/api/train/ddgrpo/start")
+    async def api_train_ddgrpo_start(req: TrainingRunRequest):
+        """Start a DDGRPO policy optimization run."""
+        config = dict(req.config)
+        config["run_type"] = "ddgrpo"
+        try:
+            result = bridge.start_training_run(config)
+            return result
+        except Exception as e:
+            logger.error(f"DDGRPO start failed: {e}")
+            raise HTTPException(status_code=502, detail=str(e))
+
+    @app.get("/api/train/status")
+    async def api_train_status():
+        """Get current training run status."""
+        try:
+            result = bridge.get_training_status()
+            return TrainingStatusResponse(**result).model_dump()
+        except Exception as e:
+            return TrainingStatusResponse().model_dump()
+
+    @app.post("/api/train/stop")
+    async def api_train_stop():
+        """Stop the active training run."""
+        try:
+            result = bridge.stop_training_run("")
+            return result
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=str(e))
+
+    @app.get("/api/train/stream/{run_id}")
+    async def api_train_stream(run_id: str, batch_id: str = ""):
+        """Proxy SSE events from a training run.
+
+        Parses SSE events from the server. Intercepts ``artifact_ready``
+        events: fetches the PNG from the server, saves it to the gallery,
+        and emits ``gallery_ready`` so the frontend treats training charts
+        the same as inference images. Emits ``done`` on completion/error.
+        """
+        async def event_gen():
+            url = f"{bridge._base_url}/training/stream/{run_id}"
+            try:
+                async with httpx.AsyncClient(
+                    timeout=httpx.Timeout(3600.0, connect=30.0)
+                ) as client:
+                    async with client.stream("GET", url) as resp:
+                        if resp.status_code != 200:
+                            yield _sse_event("error", {
+                                "error": f"Stream connect failed: {resp.status_code}"
+                            })
+                            yield _sse_event("done", {"reason": "error"})
+                            return
+
+                        event_type = "message"
+                        data_buf = ""
+                        artifact_index = 0
+
+                        async for line in resp.aiter_lines():
+                            if line.startswith("event: "):
+                                event_type = line[7:].strip()
+                            elif line.startswith("data: "):
+                                data_buf = line[6:]
+                            elif line == "" and data_buf:
+                                # Forward non-intercepted events to the browser
+                                if event_type not in ("artifact_ready", "complete", "error"):
+                                    yield f"event: {event_type}\ndata: {data_buf}\n\n"
+
+                                if event_type == "artifact_ready":
+                                    try:
+                                        payload = json.loads(data_buf)
+                                        artifact_path = payload.get("path", "")
+                                        png_url = f"{bridge._base_url}/training/artifacts/{run_id}/{artifact_path}"
+                                        png_resp = await client.get(png_url)
+                                        if png_resp.status_code == 200:
+                                            metadata = payload.get("metadata", {})
+                                            if batch_id:
+                                                metadata["batch_id"] = batch_id
+                                            metadata["batch_index"] = artifact_index
+                                            metadata["artifact_type"] = payload.get("type", "chart")
+                                            metadata["label"] = payload.get("label", artifact_path)
+                                            metadata["run_id"] = run_id
+                                            entry = gallery.add(png_resp.content, metadata)
+                                            gallery_data = json.dumps({
+                                                "gallery_id": entry["id"],
+                                                "image_url": entry["image_url"],
+                                                "batch_id": batch_id or None,
+                                                "batch_index": artifact_index,
+                                                "artifact_type": metadata["artifact_type"],
+                                                "label": metadata["label"],
+                                                "run_id": run_id,
+                                            })
+                                            yield f"event: gallery_ready\ndata: {gallery_data}\n\n"
+                                            artifact_index += 1
+                                        else:
+                                            logger.warning(
+                                                f"Artifact fetch failed ({png_resp.status_code}): {artifact_path}"
+                                            )
+                                    except Exception as e:
+                                        logger.error(f"Artifact interception failed: {e}")
+
+                                elif event_type == "complete":
+                                    yield f"event: {event_type}\ndata: {data_buf}\n\n"
+                                    yield _sse_event("done", {
+                                        "reason": "complete",
+                                        "n_artifacts": artifact_index,
+                                    })
+                                    return
+
+                                elif event_type == "error":
+                                    yield f"event: {event_type}\ndata: {data_buf}\n\n"
+                                    yield _sse_event("done", {"reason": "error"})
+                                    return
+
+                                event_type = "message"
+                                data_buf = ""
+
+            except Exception as e:
+                logger.error(f"Training SSE proxy error: {e}")
+                yield _sse_event("error", {"error": str(e)})
+                yield _sse_event("done", {"reason": "error"})
+
+        return StreamingResponse(
+            event_gen(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    # ---------------------------------------------------------------
+    # Training artifacts
+    # ---------------------------------------------------------------
+
+    @app.get("/api/train/metrics/{run_id}")
+    async def api_train_metrics(run_id: str):
+        """Fetch training metrics JSONL."""
+        try:
+            data = bridge.get_training_artifacts(run_id, "training_metrics.jsonl")
+            return StreamingResponse(
+                iter([data]),
+                media_type="application/x-ndjson",
+            )
+        except Exception as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+    @app.get("/api/train/charts/{run_id}/{chart_name}")
+    async def api_train_chart(run_id: str, chart_name: str):
+        """Fetch a training chart PNG."""
+        try:
+            data = bridge.get_training_artifacts(run_id, chart_name)
+            return StreamingResponse(
+                iter([data]),
+                media_type="image/png",
+            )
+        except Exception as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+    @app.get("/api/train/analysis/{run_id}")
+    async def api_train_analysis(run_id: str):
+        """Fetch training analysis markdown."""
+        try:
+            data = bridge.get_training_artifacts(run_id, "training_analysis.md")
+            return StreamingResponse(
+                iter([data]),
+                media_type="text/markdown",
+            )
+        except Exception as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+    @app.get("/api/train/summary/{run_id}")
+    async def api_train_summary(run_id: str):
+        """Fetch run summary JSON."""
+        try:
+            data = bridge.get_training_artifacts(run_id, "run_summary.json")
+            return JSONResponse(content=json.loads(data))
+        except Exception as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+    @app.get("/api/train/validation/{run_id}/{val_type}")
+    async def api_train_validation(run_id: str, val_type: str):
+        """Fetch validation log (pinkify, tnt, decorrelation)."""
+        filename = f"{val_type}_validation_log.jsonl"
+        try:
+            data = bridge.get_training_artifacts(run_id, filename)
+            return StreamingResponse(
+                iter([data]),
+                media_type="application/x-ndjson",
+            )
+        except Exception as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+    @app.get("/api/train/checkpoint/{run_id}/{step}")
+    async def api_train_checkpoint(run_id: str, step: int):
+        """Fetch a checkpoint's adapter weights."""
+        path = f"checkpoint_step{step:03d}/rtheta_adapter.safetensors"
+        try:
+            data = bridge.get_training_artifacts(run_id, path)
+            return StreamingResponse(
+                iter([data]),
+                media_type="application/octet-stream",
+            )
+        except Exception as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+    # ---------------------------------------------------------------
+    # On-demand validation
+    # ---------------------------------------------------------------
+
+    @app.post("/api/validate/pinkify")
+    async def api_validate_pinkify():
+        """Run pinkify validation against current model state."""
+        try:
+            config = {"challenge_type": "pinkify", "run_type": "validate"}
+            # Use the training endpoint for validation
+            resp = bridge._client.post(
+                "/training/validate",
+                json={"challenge_type": "pinkify"},
+            )
+            if resp.status_code != 200:
+                raise HTTPException(status_code=502, detail=resp.text[:500])
+            return resp.json()
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=str(e))
+
+    @app.post("/api/validate/tnt")
+    async def api_validate_tnt():
+        """Run TNT validation against current model state."""
+        try:
+            resp = bridge._client.post(
+                "/training/validate",
+                json={"challenge_type": "tnt"},
+            )
+            if resp.status_code != 200:
+                raise HTTPException(status_code=502, detail=resp.text[:500])
+            return resp.json()
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=str(e))
+
+    @app.post("/api/validate/decorrelation")
+    async def api_validate_decorrelation():
+        """Run cross-head decorrelation check."""
+        try:
+            resp = bridge._client.post(
+                "/training/validate",
+                json={"challenge_type": "decorrelation"},
+            )
+            if resp.status_code != 200:
+                raise HTTPException(status_code=502, detail=resp.text[:500])
+            return resp.json()
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=str(e))
+
+    # ---------------------------------------------------------------
+    # Model management (relay to server)
+    # ---------------------------------------------------------------
+
+    @app.post("/api/model/adapter/allocate")
+    async def api_adapter_allocate(req: AdapterAllocateRequest):
+        """Allocate a LoRA adapter on the inference server."""
+        try:
+            return bridge.allocate_adapter(
+                req.name, req.rank, req.alpha, req.layer_indices,
+            )
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=str(e))
+
+    @app.post("/api/model/adapter/init")
+    async def api_adapter_init(req: AdapterInitRequest):
+        """Initialize adapter weights."""
+        try:
+            return bridge.init_adapter_weights(
+                req.name, req.init_b_std, req.scale,
+            )
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=str(e))
+
+    @app.post("/api/model/adapter/config")
+    async def api_adapter_config(req: AdapterConfigRequest):
+        """Set adapter scale and/or freeze state."""
+        try:
+            return bridge.set_adapter_config(
+                req.name, req.scale, req.frozen,
+            )
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=str(e))
+
+    @app.get("/api/model/adapter/state")
+    async def api_adapter_state(name: str | None = None):
+        """Get current LoRA weights as safetensors bytes."""
+        try:
+            data = bridge.get_lora_state_dict(name)
+            return StreamingResponse(
+                iter([data]),
+                media_type="application/octet-stream",
+            )
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=str(e))
+
+    @app.post("/api/model/btrm/inject")
+    async def api_btrm_inject(req: BTRMHeadRequest):
+        """Inject BTRM scoring head."""
+        try:
+            return bridge.inject_btrm_head(
+                req.head_names, req.logit_cap, req.lr, req.hidden_dim,
+            )
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=str(e))
 
     return app
 

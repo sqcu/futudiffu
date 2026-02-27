@@ -160,12 +160,13 @@ const Gallery = (() => {
 
     const label = document.createElement('div');
     label.className = 'batch-group-label';
-    label.textContent = k === 1 ? '1 draw' : `${k} draws`;
+    label.textContent = k === 0 ? 'training run' : k === 1 ? '1 draw' : `${k} draws`;
     group.appendChild(label);
 
     const slotsContainer = document.createElement('div');
     slotsContainer.className = 'batch-slots';
 
+    // Pre-allocate slots only for inference (k > 0). Training slots arrive dynamically.
     for (let i = 0; i < k; i++) {
       const slot = document.createElement('div');
       slot.className = 'batch-slot';
@@ -208,10 +209,20 @@ const Gallery = (() => {
       return;
     }
 
-    const slot = group.element.querySelector(
+    let slot = group.element.querySelector(
       `.batch-slot[data-batch-index="${batchIndex}"]`
     );
-    if (!slot) return;
+    if (!slot) {
+      // Dynamically create slot for training artifacts (or late-arriving results)
+      slot = document.createElement('div');
+      slot.className = 'batch-slot';
+      slot.dataset.batchIndex = batchIndex;
+      const slotsContainer = group.element.querySelector('.batch-slots');
+      slotsContainer.appendChild(slot);
+      // Update group label to reflect growing count
+      const label = group.element.querySelector('.batch-group-label');
+      label.textContent = `${batchIndex + 1}+ artifacts`;
+    }
 
     // Clear pending text
     slot.innerHTML = '';
@@ -223,10 +234,12 @@ const Gallery = (() => {
     img.loading = 'lazy';
     slot.appendChild(img);
 
-    // Add overlay
+    // Add overlay (training artifacts show label, inference shows seed + dimensions)
     const overlayDiv = document.createElement('div');
     overlayDiv.className = 'thumb-overlay';
-    overlayDiv.textContent = `${result.seed || '?'} | ${result.width || '?'}x${result.height || '?'}`;
+    overlayDiv.textContent = result.artifact_type
+      ? (result.label || result.artifact_type)
+      : `${result.seed || '?'} | ${result.width || '?'}x${result.height || '?'}`;
     slot.appendChild(overlayDiv);
 
     // Click to fullscreen
@@ -242,6 +255,9 @@ const Gallery = (() => {
       batch_id: batchId,
       batch_index: batchIndex,
       resolved_config: result.resolved_config || null,
+      artifact_type: result.artifact_type || null,
+      label: result.label || null,
+      run_id: result.run_id || null,
     };
     slot.addEventListener('click', () => openFullscreen(entry));
 
@@ -352,16 +368,28 @@ const Gallery = (() => {
 
   function openFullscreen(entry) {
     fsImg.src = entry.image_url;
-    fsMeta.innerHTML = [
-      `<strong>${entry.prompt || '(no prompt)'}</strong>`,
-      entry.negative_prompt ? `<em class="text-dim">neg: ${entry.negative_prompt}</em>` : '',
-      `seed: ${entry.seed} | ${entry.width}x${entry.height}`,
-      entry.elapsed_s ? `${entry.elapsed_s}s` : '',
-      entry.n_steps ? `${entry.n_steps} steps` : '',
-      entry.cfg ? `cfg ${entry.cfg}` : '',
-      entry.attention_backend || '',
-      entry.batch_id ? `batch: ${entry.batch_id}[${entry.batch_index}]` : '',
-    ].filter(Boolean).join(' &middot; ');
+
+    if (entry.artifact_type) {
+      // Training artifact metadata
+      fsMeta.innerHTML = [
+        `<strong>${entry.label || entry.artifact_type}</strong>`,
+        entry.run_id ? `run: ${entry.run_id}` : '',
+        entry.step ? `step ${entry.step}` : '',
+        entry.batch_id ? `batch: ${entry.batch_id}` : '',
+      ].filter(Boolean).join(' &middot; ');
+    } else {
+      // Inference image metadata
+      fsMeta.innerHTML = [
+        `<strong>${entry.prompt || '(no prompt)'}</strong>`,
+        entry.negative_prompt ? `<em class="text-dim">neg: ${entry.negative_prompt}</em>` : '',
+        `seed: ${entry.seed} | ${entry.width}x${entry.height}`,
+        entry.elapsed_s ? `${entry.elapsed_s}s` : '',
+        entry.n_steps ? `${entry.n_steps} steps` : '',
+        entry.cfg ? `cfg ${entry.cfg}` : '',
+        entry.attention_backend || '',
+        entry.batch_id ? `batch: ${entry.batch_id}[${entry.batch_index}]` : '',
+      ].filter(Boolean).join(' &middot; ');
+    }
 
     overlay.style.display = 'flex';
 

@@ -1,0 +1,11 @@
+{
+  "type": "policy_intervention",
+  "prompts": ["enormous laser sharks, photorealistic, dramatic lighting, ocean scene"],
+  "seeds": [42],
+  "width": 1280,
+  "height": 832,
+  "n_steps": 20,
+  "btrm_dir": "training_output/reward_function_run_tnt_v2",
+  "adapter_name": "rtheta",
+  "diff_scale": 10.0
+}

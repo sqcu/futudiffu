@@ -58,6 +58,7 @@ i2i_off_policies/
 # ============================================================
 btrm_dataset/renders/
 btrm_dataset/.uploaded_manifest.json
+yeetums_gallery/
 
 # ============================================================
 # Validation tensor dumps (historical stream variants)

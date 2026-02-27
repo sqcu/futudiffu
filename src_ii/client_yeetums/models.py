@@ -141,3 +141,64 @@ class ConfigVolumesResponse(BaseModel):
     """Per-field volume info for distributional config fields."""
     volumes: list[dict[str, Any]]
     total_log_volume: float
+
+
+# ---------------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------------
+
+class TrainingRunRequest(BaseModel):
+    """Request to start a training run."""
+    config: dict[str, Any]
+    run_type: str = "btrm"  # "btrm" | "ddgrpo"
+
+
+class TrainingStatusResponse(BaseModel):
+    """Current training run status."""
+    run_id: str | None = None
+    active: bool = False
+    step: int = 0
+    n_steps: int = 0
+    phase: str = "idle"
+    loss: float | None = None
+    accuracy: dict[str, float] | None = None
+    elapsed_s: float = 0.0
+
+
+class ValidationRequest(BaseModel):
+    """Request for on-demand validation."""
+    challenge_type: str = "pinkify"  # "pinkify" | "tnt" | "decorrelation"
+
+
+# ---------------------------------------------------------------------------
+# Model management
+# ---------------------------------------------------------------------------
+
+class AdapterAllocateRequest(BaseModel):
+    """Allocate a LoRA adapter."""
+    name: str
+    rank: int = 8
+    alpha: float = 16.0
+    layer_indices: list[int] | None = None
+
+
+class AdapterInitRequest(BaseModel):
+    """Initialize adapter weights."""
+    name: str
+    init_b_std: float = 0.0
+    scale: float = 1.0
+
+
+class AdapterConfigRequest(BaseModel):
+    """Set adapter config."""
+    name: str
+    scale: float | None = None
+    frozen: bool | None = None
+
+
+class BTRMHeadRequest(BaseModel):
+    """Inject BTRM scoring head."""
+    head_names: list[str] = Field(default_factory=lambda: ["bit_quality", "step_quality"])
+    logit_cap: float = 10.0
+    lr: float | None = None
+    hidden_dim: int = 3840

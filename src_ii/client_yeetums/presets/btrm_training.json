@@ -1,0 +1,14 @@
+{
+  "type": "btrm",
+  "dataset_path": "multi_res_trajectories",
+  "n_steps": 100,
+  "lr": 3e-4,
+  "head_names": ["pinkify", "thisnotthat"],
+  "pref_keys": ["pinkify_pref", "thisnotthat_pref"],
+  "macrobatch_budget": 3.0,
+  "adapter_name": "rtheta",
+  "adapter_rank": 8,
+  "adapter_alpha": 16.0,
+  "lr_schedule": "warmup_cosine",
+  "checkpoint_steps": [25, 50, 75, 100]
+}

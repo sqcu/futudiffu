@@ -79,7 +79,20 @@ def main():
 
     app = create_app(backend, request_timeout_s=args.timeout)
 
+    import signal
     import uvicorn
+
+    # Force-exit on second Ctrl+C (first triggers uvicorn graceful shutdown)
+    _interrupted = False
+    def _force_exit(sig, frame):
+        nonlocal _interrupted
+        if _interrupted:
+            print("\nForce exit.", flush=True)
+            os._exit(1)
+        _interrupted = True
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGINT, _force_exit)
+
     print(f"\nStarting server on http://{args.host}:{args.port}")
     uvicorn.run(
         app,
@@ -87,6 +100,7 @@ def main():
         port=args.port,
         workers=args.workers,
         log_level="info",
+        timeout_graceful_shutdown=2,
     )
 
 

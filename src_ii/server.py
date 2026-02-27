@@ -268,6 +268,9 @@ def create_app(
     """
     inference_queue = None
 
+    from src_ii.training_orchestrator import TrainingOrchestrator
+    training_orchestrator = TrainingOrchestrator()
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         nonlocal inference_queue
@@ -282,6 +285,8 @@ def create_app(
             )
             await inference_queue.start()
             app.state.inference_queue = inference_queue
+
+        app.state.training_orchestrator = training_orchestrator
 
         yield
 
@@ -714,6 +719,105 @@ def create_app(
                 "X-Metadata": _json_encode(metadata),
             },
         )
+
+    # --- Training orchestration ---
+
+    @app.post("/training/start")
+    @_timed("training_start")
+    async def training_start(request: Request):
+        """Start a background training run. Returns {run_id, stream_url}."""
+        body = await request.json()
+        run_type = body.pop("run_type", "btrm")
+
+        if run_type == "btrm":
+            result = training_orchestrator.start_btrm_run(body, backend)
+        elif run_type == "ddgrpo":
+            result = training_orchestrator.start_ddgrpo_run(body, backend)
+        elif run_type == "policy_intervention":
+            result = training_orchestrator.start_policy_intervention_run(body, backend)
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown run_type: {run_type!r}. Valid: btrm, ddgrpo, policy_intervention",
+            )
+        return result
+
+    @app.get("/training/status")
+    async def training_status():
+        """Get current training run status."""
+        return training_orchestrator.get_status()
+
+    @app.post("/training/stop")
+    @_timed("training_stop")
+    async def training_stop(request: Request):
+        """Stop the active training run."""
+        training_orchestrator.stop()
+        return {"stopped": True}
+
+    @app.get("/training/stream/{run_id}")
+    async def training_stream(run_id: str):
+        """SSE event stream for a training run."""
+        if training_orchestrator._run_id != run_id:
+            raise HTTPException(status_code=404, detail="Run not found")
+
+        queue = training_orchestrator.subscribe()
+
+        import asyncio as _asyncio
+        import json as _json
+
+        async def event_gen():
+            while True:
+                try:
+                    event = await _asyncio.wait_for(queue.get(), timeout=30.0)
+                except _asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+                    continue
+
+                event_type = event.get("type", "message")
+                data = _json.dumps(event.get("data", {}))
+                yield f"event: {event_type}\ndata: {data}\n\n"
+
+                if event_type in ("complete", "error"):
+                    break
+
+        return StreamingResponse(
+            event_gen(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    @app.get("/training/artifacts/{run_id}/{path:path}")
+    async def training_artifacts(run_id: str, path: str):
+        """Serve training artifacts (charts, metrics, checkpoints)."""
+        artifact_path = training_orchestrator.get_artifact_path(run_id, path)
+        if artifact_path is None:
+            raise HTTPException(status_code=404, detail="Artifact not found")
+
+        # Infer content type from extension
+        suffix = artifact_path.suffix.lower()
+        content_types = {
+            ".png": "image/png",
+            ".json": "application/json",
+            ".jsonl": "application/x-ndjson",
+            ".md": "text/markdown",
+            ".safetensors": "application/octet-stream",
+        }
+        ct = content_types.get(suffix, "application/octet-stream")
+
+        from fastapi.responses import FileResponse
+        return FileResponse(str(artifact_path), media_type=ct)
+
+    @app.post("/training/validate")
+    @_timed("training_validate")
+    async def training_validate(request: Request):
+        """Run an on-demand validation challenge against current model state."""
+        body = await request.json()
+        challenge_type = body.get("challenge_type", "pinkify")
+        result = training_orchestrator.run_validation(challenge_type, backend)
+        return result
 
     # --- Inference queue (enqueue + SSE stream) ---
 

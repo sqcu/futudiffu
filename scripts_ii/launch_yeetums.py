@@ -52,7 +52,20 @@ def main():
         timeout_s=args.timeout,
     )
 
+    import signal
     import uvicorn
+
+    # Force-exit on second Ctrl+C (first triggers uvicorn graceful shutdown)
+    _interrupted = False
+    def _force_exit(sig, frame):
+        nonlocal _interrupted
+        if _interrupted:
+            print("\nForce exit.", flush=True)
+            os._exit(1)
+        _interrupted = True
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGINT, _force_exit)
+
     print(f"Starting yeetums on http://{args.host}:{args.port}")
     print(f"Open http://localhost:{args.port} in your browser")
     uvicorn.run(
@@ -60,6 +73,7 @@ def main():
         host=args.host,
         port=args.port,
         log_level="info",
+        timeout_graceful_shutdown=2,
     )
 
 

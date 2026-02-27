@@ -209,12 +209,14 @@ def load_policy_adapter(
         remapped[new_key] = tensor
 
     # Copy matching tensors into model's MultiLoRALinear modules
+    from src_ii.multi_lora import _strip_orig_mod
     loaded = 0
     for name, module in model.named_modules():
         if not isinstance(module, MultiLoRALinear):
             continue
-        a_key = f"{name}.lora_A.{target_name}"
-        b_key = f"{name}.lora_B.{target_name}"
+        canonical = _strip_orig_mod(name)
+        a_key = f"{canonical}.lora_A.{target_name}"
+        b_key = f"{canonical}.lora_B.{target_name}"
 
         if a_key in remapped and target_name in module.lora_A:
             module.lora_A[target_name].data.copy_(remapped[a_key])

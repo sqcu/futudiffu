@@ -12,6 +12,7 @@ const ConfigFlow = (() => {
   // Current config state
   let config = {};
   let suppressSync = false;
+  let presetCache = [];
 
   const editor = document.getElementById('config-editor');
 
@@ -1035,11 +1036,29 @@ const ConfigFlow = (() => {
   // Initialize
   // ---------------------------------------------------------------------------
 
+  async function loadPresets() {
+    try {
+      const resp = await fetch('/api/config/presets');
+      if (!resp.ok) return;
+      const data = await resp.json();
+      presetCache = data.presets || [];
+      const sel = document.getElementById('preset-select');
+      while (sel.options.length > 1) sel.remove(1);
+      for (let i = 0; i < presetCache.length; i++) {
+        const opt = document.createElement('option');
+        opt.value = String(i);
+        opt.textContent = presetCache[i].name.replace(/_/g, ' ');
+        sel.add(opt);
+      }
+    } catch (e) { /* preset fetch failed, dropdown stays empty */ }
+  }
+
   function init(defaultConfig) {
     config = JSON.parse(JSON.stringify(defaultConfig));
     renderConfig();
     syncConfigToControls();
     bindControls();
+    loadPresets();
   }
 
   function bindControls() {
@@ -1128,6 +1147,17 @@ const ConfigFlow = (() => {
         e.preventDefault();
         parseEditorToConfig();
       }
+    });
+
+    // Preset dropdown
+    $('preset-select').addEventListener('change', (e) => {
+      const idx = parseInt(e.target.value, 10);
+      if (!isNaN(idx) && presetCache[idx]) {
+        config = JSON.parse(JSON.stringify(presetCache[idx].config));
+        renderConfig();
+        syncConfigToControls();
+      }
+      e.target.value = '';  // reset so same preset can be re-selected
     });
 
     // Reset button
