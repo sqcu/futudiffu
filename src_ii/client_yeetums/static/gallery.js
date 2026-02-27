@@ -32,6 +32,7 @@ const Gallery = (() => {
     const entry = {
       id: result.gallery_id,
       prompt: result.prompt,
+      negative_prompt: result.negative_prompt || (result.resolved_config && result.resolved_config.negative_prompt) || '',
       seed: result.seed,
       width: result.width,
       height: result.height,
@@ -232,6 +233,7 @@ const Gallery = (() => {
     const entry = {
       id: result.gallery_id,
       prompt: result.prompt,
+      negative_prompt: result.negative_prompt || (result.resolved_config && result.resolved_config.negative_prompt) || '',
       seed: result.seed,
       width: result.width,
       height: result.height,
@@ -352,6 +354,7 @@ const Gallery = (() => {
     fsImg.src = entry.image_url;
     fsMeta.innerHTML = [
       `<strong>${entry.prompt || '(no prompt)'}</strong>`,
+      entry.negative_prompt ? `<em class="text-dim">neg: ${entry.negative_prompt}</em>` : '',
       `seed: ${entry.seed} | ${entry.width}x${entry.height}`,
       entry.elapsed_s ? `${entry.elapsed_s}s` : '',
       entry.n_steps ? `${entry.n_steps} steps` : '',
