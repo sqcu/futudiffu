@@ -41,7 +41,7 @@ import torch
 import numpy as np
 
 from src_ii.zimage_model import load_zimage_rlaif
-from src_ii.multi_lora import install_multi_lora, adapter_summary
+from src_ii.multi_lora import install_multi_lora, assign_adapter, adapter_summary, init_adapter_b_weights
 from src_ii.ktuple_sampling import batch_rollout
 from src_ii.sigma_schedule import resolution_shift
 from src_ii.rendering import (
@@ -153,7 +153,7 @@ def phase2a_sdpa_determinism(model, pos_list, neg_list, cap_lens, device, dtype)
     _log("\n  --- Phase 2a: SDPA Determinism Baseline ---")
     from futudiffu.attention import set_attention_backend
     set_attention_backend("sdpa")
-    scales = torch.tensor([[1.0, 0.0], [1.0, 0.0]], device=device)
+    scales = torch.tensor([[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]], device=device)
 
     t1 = time.perf_counter()
     trajs_sdpa1, _ = batch_rollout(
@@ -210,9 +210,9 @@ def phase2b_sdpa_adapter_effect(model, pos_list, neg_list, cap_lens,
 
     def scales_fn(step_i):
         if step_i < mid:
-            return torch.tensor([[1.0, 0.0], [1.0, 0.0]], device=device)
+            return torch.tensor([[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]], device=device)
         else:
-            return torch.tensor([[0.0, 0.0], [1.0, 0.0]], device=device)
+            return torch.tensor([[0.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]], device=device)
 
     t1 = time.perf_counter()
     trajs_sdpa_b, _ = batch_rollout(
@@ -265,12 +265,10 @@ def phase2_rollouts(pos, neg, cap_len, device, dtype, output_dir):
     )
     _log(f"  VRAM after backbone load: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
-    wrappers = install_multi_lora(model, [
-        {"name": "p_theta", "rank": 4, "alpha": 4.0},
-        {"name": "r_theta", "rank": 4, "alpha": 4.0},
-    ])
-    for wrapper in wrappers.values():
-        wrapper.init_adapter_b("p_theta", std=0.01)
+    wrappers = install_multi_lora(model, max_adapters=4, max_rank=8)
+    assign_adapter(model, 0, "p_theta", 4, 4.0)
+    assign_adapter(model, 1, "r_theta", 4, 4.0)
+    init_adapter_b_weights(model, "p_theta", std=0.01)
 
     summary = adapter_summary(model)
     _log(f"  LoRA installed: {summary['n_wrapped_layers']} layers, "
@@ -292,7 +290,7 @@ def phase2_rollouts(pos, neg, cap_len, device, dtype, output_dir):
 
     _log("\n  --- Phase 2c: SageAttention Noise Characterization ---")
     _log("  Run A: adapter p_theta ON (constant scales), SageAttention")
-    scales_a = torch.tensor([[1.0, 0.0], [1.0, 0.0]], device=device)
+    scales_a = torch.tensor([[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]], device=device)
 
     t1 = time.perf_counter()
     trajs_a, meta_a = batch_rollout(
@@ -319,9 +317,9 @@ def phase2_rollouts(pos, neg, cap_len, device, dtype, output_dir):
 
     def scales_fn(step_i):
         if step_i < mid:
-            return torch.tensor([[1.0, 0.0], [1.0, 0.0]], device=device)
+            return torch.tensor([[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]], device=device)
         else:
-            return torch.tensor([[0.0, 0.0], [1.0, 0.0]], device=device)
+            return torch.tensor([[0.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]], device=device)
 
     t1 = time.perf_counter()
     trajs_b, meta_b = batch_rollout(

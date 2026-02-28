@@ -3,8 +3,8 @@
   "n_queries": 3,
   "total_entries": 9,
   "n_bins": 2,
-  "total_elapsed_s": 41.074871099554,
-  "peak_vram_gb": 0.570223104,
+  "total_elapsed_s": 45.0484758997336,
+  "peak_vram_gb": 0.57368576,
   "queries": [
     {
       "name": "shrimp",
@@ -13,7 +13,7 @@
         512
       ],
       "k": 4,
-      "final_norm": 5881.6240234375
+      "final_norm": 5866.677734375
     },
     {
       "name": "banana",
@@ -22,7 +22,7 @@
         512
       ],
       "k": 3,
-      "final_norm": 5926.9091796875
+      "final_norm": 5923.02734375
     },
     {
       "name": "tiny",
@@ -31,7 +31,7 @@
         256
       ],
       "k": 2,
-      "final_norm": 2807.39013671875
+      "final_norm": 2920.309814453125
     }
   ]
 }

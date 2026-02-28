@@ -179,15 +179,17 @@ def load_training_backbone(
         gradient_checkpointing=gradient_checkpointing,
     )
 
+    head_names = None
     if btrm_checkpoint_dir is not None:
         load_btrm(raw_model, adapter_name, btrm_checkpoint_dir)
         print(f"[training_setup] Loaded BTRM checkpoint from {btrm_checkpoint_dir}")
-
-    head_names = []
-    n_heads = raw_model.n_score_heads
-    default_names = ["bit_quality", "step_quality"]
-    for i in range(n_heads):
-        head_names.append(default_names[i] if i < len(default_names) else f"head_{i}")
+        # Read head_names from checkpoint config if present
+        config_path = Path(btrm_checkpoint_dir) / "btrm_compound_config.json"
+        if config_path.exists():
+            import json
+            with open(config_path) as f:
+                cfg = json.load(f)
+            head_names = cfg.get("head_names")
 
     from src_ii.multi_lora import get_adapter_params
     n_adapter = sum(p.numel() for p in get_adapter_params(raw_model, adapter_name).values())

@@ -165,7 +165,7 @@ class DumpAllLorasRequest(BaseModel):
 class InjectBTRMHeadRequest(BaseModel):
     """Create BTRM scoring head on server."""
     hidden_dim: int = 3840
-    head_names: list[str] = Field(default=["bit_quality", "step_quality"])
+    head_names: list[str]
     logit_cap: float = 10.0
     lr: float | None = None
     weight_decay: float = 0.0

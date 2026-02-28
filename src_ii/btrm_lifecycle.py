@@ -9,9 +9,9 @@ between those components and the training loop.
 
 Import constraints:
   - IMPORTS from src_ii.zimage_model: ZImageRLAIF, load_zimage_rlaif
-  - IMPORTS from src_ii.multi_lora: install_multi_lora, freeze_base_params,
-    unfreeze_score_head, init_adapter_b_weights, get_adapter_params,
-    save_adapter, load_adapter, adapter_summary
+  - IMPORTS from src_ii.multi_lora: assign_adapter, freeze_base_params,
+    unfreeze_score_head, set_adapter_trainable, init_adapter_b_weights,
+    get_adapter_params, save_adapter, load_adapter, adapter_summary
   - IMPORTS from src_ii.forward_packed: prepare_packed_forward, packed_forward
   - No futudiffu imports (all model access through ZImageRLAIF interface)
 """
@@ -19,6 +19,7 @@ Import constraints:
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
 
 import torch
@@ -26,9 +27,12 @@ import torch.nn as nn
 from safetensors.torch import load_file, save_file
 
 from src_ii.multi_lora import (
+    MultiLoRALinear,
     install_multi_lora,
+    assign_adapter,
     freeze_base_params,
     unfreeze_score_head,
+    set_adapter_trainable,
     init_adapter_b_weights,
     get_adapter_params,
     save_adapter,
@@ -44,6 +48,7 @@ DEFAULT_RTHETA_INIT_B_STD = 0.01
 def setup_btrm_training(
     model: nn.Module,
     adapter_name: str = "rtheta",
+    adapter_slot: int = 0,
     adapter_rank: int = DEFAULT_RTHETA_RANK,
     adapter_alpha: float = DEFAULT_RTHETA_ALPHA,
     adapter_init_b_std: float = DEFAULT_RTHETA_INIT_B_STD,
@@ -57,15 +62,14 @@ def setup_btrm_training(
 ) -> torch.optim.Optimizer:
     """Set up a ZImageRLAIF model for BTRM training.
 
-    Installs LoRA adapter, freezes base, unfreezes score head,
-    initializes adapter B matrices, enables gradient checkpointing,
-    and creates optimizer over adapter + score head params.
-
-    This replaces BTRMCompoundModel.__init__ + .optimizer() + .train_mode().
+    Installs adapter capacity if not already present, assigns LoRA adapter
+    to a slot, freezes base, unfreezes score head + adapter, initializes
+    adapter B matrices, enables gradient checkpointing, and creates optimizer.
 
     Args:
-        model: ZImageRLAIF model (raw, not compiled).
+        model: ZImageRLAIF model (capacity installed automatically if needed).
         adapter_name: LoRA adapter name.
+        adapter_slot: Which pre-allocated slot to assign to.
         adapter_rank: LoRA rank.
         adapter_alpha: LoRA alpha.
         adapter_init_b_std: Std for B matrix init (nonzero = nonzero gradient).
@@ -80,20 +84,25 @@ def setup_btrm_training(
     Returns:
         Optimizer over adapter + score head params.
     """
-    # Install LoRA adapter
-    adapter_configs = [{"name": adapter_name, "rank": adapter_rank, "alpha": adapter_alpha}]
-    wrappers = install_multi_lora(model, adapter_configs)
-    print(f"[btrm_lifecycle] Installed {len(wrappers)} MultiLoRALinear wrappers "
-          f"(rank={adapter_rank}, alpha={adapter_alpha})")
+    # Ensure adapter capacity is installed (idempotent: skips existing wrappers)
+    has_wrappers = any(isinstance(m, MultiLoRALinear) for m in model.modules())
+    if not has_wrappers:
+        install_multi_lora(model, max_adapters=4, max_rank=max(16, adapter_rank))
 
-    # Freeze base, unfreeze score head + adapter
-    n_frozen, n_trainable = freeze_base_params(model)
+    # Assign adapter to pre-allocated slot
+    n_wrappers = assign_adapter(model, adapter_slot, adapter_name, adapter_rank, adapter_alpha)
+    print(f"[btrm_lifecycle] Assigned adapter {adapter_name!r} to slot {adapter_slot} "
+          f"across {n_wrappers} wrappers (rank={adapter_rank}, alpha={adapter_alpha})")
+
+    # Freeze everything, then unfreeze score head + this adapter
+    n_frozen = freeze_base_params(model)
     n_head_unfrozen = unfreeze_score_head(model)
+    n_adapter_unfrozen = set_adapter_trainable(model, adapter_name, True)
 
     # Init B matrices for nonzero gradient signal
     n_init = init_adapter_b_weights(model, adapter_name, std=adapter_init_b_std)
-    print(f"[btrm_lifecycle] Frozen={n_frozen}, trainable={n_trainable}, "
-          f"head_unfrozen={n_head_unfrozen}, B_init={n_init}")
+    print(f"[btrm_lifecycle] Frozen={n_frozen}, head_unfrozen={n_head_unfrozen}, "
+          f"adapter_unfrozen={n_adapter_unfrozen}, B_init={n_init}")
 
     # Gradient checkpointing
     model.gradient_checkpointing = gradient_checkpointing
@@ -278,6 +287,7 @@ def persist_btrm(
     model: nn.Module,
     adapter_name: str,
     output_dir: str | Path,
+    head_names: Sequence[str],
 ) -> dict:
     """Save adapter + score head + config.
 
@@ -287,6 +297,12 @@ def persist_btrm(
         output_dir/rtheta_adapter.safetensors
         output_dir/btrm_head.safetensors
         output_dir/btrm_compound_config.json
+
+    Args:
+        model: ZImageRLAIF model with score head and adapters.
+        adapter_name: LoRA adapter name to persist.
+        output_dir: Directory to write checkpoint files into.
+        head_names: Ordered list of score head names. Required — no defaults.
 
     Returns:
         Manifest dict with file paths and param counts.
@@ -311,6 +327,7 @@ def persist_btrm(
         "adapter_name": adapter_name,
         "n_score_heads": model.n_score_heads,
         "score_cap": model.score_cap,
+        "head_names": list(head_names),
     }
     config_path = output_dir / "btrm_compound_config.json"
     with open(config_path, "w") as f:

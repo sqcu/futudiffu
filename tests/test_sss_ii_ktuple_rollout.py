@@ -741,7 +741,7 @@ def phase6_lora_packed_vs_serial():
     _log(f"  Per-query scales: {LORA_ADAPTER_SCALES}")
 
     from tests.stubbed_skinny_shared_ii import load_sss_model, SSS_CAP_FEAT_DIM
-    from src_ii.multi_lora import install_multi_lora, init_adapter_b_weights
+    from src_ii.multi_lora import install_multi_lora, assign_adapter, init_adapter_b_weights
     from src_ii.batch_executor import BatchExecutor, _scatter
     from src_ii.forward_packed import prepare_packed_forward, packed_forward
     from src_ii.triumphant_future_reduction_ops import denoise_all, latent_padded
@@ -752,8 +752,8 @@ def phase6_lora_packed_vs_serial():
     _log(f"  Model loaded in {time.perf_counter() - t0:.1f}s")
 
     # --- Install LoRA adapters ---
-    adapter_configs = [{"name": LORA_ADAPTER_NAME, "rank": LORA_RANK, "alpha": LORA_ALPHA}]
-    wrappers = install_multi_lora(model, adapter_configs)
+    wrappers = install_multi_lora(model, max_adapters=3, max_rank=LORA_RANK)
+    assign_adapter(model, 0, LORA_ADAPTER_NAME, LORA_RANK, LORA_ALPHA)
     _log(f"  LoRA installed: {len(wrappers)} modules wrapped")
 
     # --- Compile ---
@@ -768,7 +768,7 @@ def phase6_lora_packed_vs_serial():
     # --- Init score head with small random values (so scores are nonzero) ---
     torch.manual_seed(999)
     model.score_proj.weight.data.normal_(std=0.01)
-    model.score_norm.weight.data.fill_(1.0)
+    # score_norm is RMSNormModule(elementwise_affine=False) — no learnable weight
     _log(f"  Score head initialized (score_proj std=0.01)")
 
     _log(f"  VRAM: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
@@ -792,11 +792,11 @@ def phase6_lora_packed_vs_serial():
         latents[q_idx] = BASE_SIGMA * noise
 
     # --- Build adapter_scales per query ---
-    # (1, n_adapters) tensor — one adapter "rtheta"
+    # (max_adapters,) tensor — slot 0 is "rtheta", slots 1-2 empty
     query_adapter_scales = {}
     for q_name, _, _ in QUERIES:
         s = LORA_ADAPTER_SCALES[q_name]
-        query_adapter_scales[q_name] = torch.tensor([s], dtype=torch.float32, device=DEVICE)
+        query_adapter_scales[q_name] = torch.tensor([s, 0.0, 0.0], dtype=torch.float32, device=DEVICE)
 
     # --- PACKED path ---
     _log(f"\n  Running PACKED path (with adapter_scales)...")
@@ -857,7 +857,7 @@ def phase6_lora_packed_vs_serial():
         lh, lw = x.shape[2], x.shape[3]
         entry_adapter_scales = entry.get("adapter_scales")
         if entry_adapter_scales is not None:
-            # Serial: single entry, so adapter_scales is (1, n_adapters)
+            # Serial: single entry, so adapter_scales is (1, max_adapters)
             entry_adapter_scales = entry_adapter_scales.unsqueeze(0).to(DEVICE)
 
         t3 = time.perf_counter()
@@ -875,8 +875,10 @@ def phase6_lora_packed_vs_serial():
         denoised_list = denoise_all([x], fields, [sigma_tensor])
         serial_elapsed = time.perf_counter() - t3
 
+        _scales = entry.get("adapter_scales")
+        _s0 = float(_scales[0]) if _scales is not None else 0.0
         _log(f"  Serial {i}/9: {entry['query_id']}/{entry['entry_id']} "
-             f"scale={float(entry.get('adapter_scales', torch.tensor(0.0))):.1f} "
+             f"scale[0]={_s0:.1f} "
              f"in {serial_elapsed:.2f}s, "
              f"denoised_norm={float(denoised_list[0].detach().norm()):.2f}")
 

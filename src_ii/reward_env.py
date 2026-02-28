@@ -162,12 +162,13 @@ class PolicyConfig:
 # ---------------------------------------------------------------------------
 
 def make_standard_envs(
-    head_names: tuple[str, ...] = ("pinkify", "thisnotthat"),
+    head_names: tuple[str, ...],
 ) -> dict[str, BTRMRewardEnv]:
     """Create the three standard reward environments.
 
     Args:
-        head_names: BTRM head names in order. Default ("pinkify", "thisnotthat").
+        head_names: BTRM head names in order. Must contain "pinkify" and
+            "thisnotthat" — raises ValueError if either is missing.
 
     Returns:
         {"pinkify": SingleHead, "tnt": SingleHead, "pinkify_x_tnt": Composed}

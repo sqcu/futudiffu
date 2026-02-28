@@ -12,54 +12,54 @@
       "entry_idx": 0,
       "query_id": "q0",
       "entry_id": "e0",
-      "max_abs": 0.25,
-      "mean_abs": 0.0060466439463198185,
-      "l2": 3.5995264053344727,
-      "cosine_similarity": 0.9999994039535522,
+      "max_abs": 0.5,
+      "mean_abs": 0.0355227030813694,
+      "l2": 12.776995658874512,
+      "cosine_similarity": 0.9999470710754395,
       "verdict": "PASS",
-      "score_max_abs": 0.0
+      "score_max_abs": 0.00390625
     },
     {
       "entry_idx": 1,
       "query_id": "q0",
       "entry_id": "e1",
       "max_abs": 0.375,
-      "mean_abs": 0.027770256623625755,
-      "l2": 10.183566093444824,
-      "cosine_similarity": 0.9999666213989258,
+      "mean_abs": 0.036215640604496,
+      "l2": 12.949625015258789,
+      "cosine_similarity": 0.999947726726532,
       "verdict": "PASS",
-      "score_max_abs": 0.00390625
+      "score_max_abs": 0.001953125
     },
     {
       "entry_idx": 2,
       "query_id": "q0",
       "entry_id": "e2",
-      "max_abs": 0.125,
-      "mean_abs": 0.0034224800765514374,
-      "l2": 2.472090482711792,
-      "cosine_similarity": 1.000003457069397,
+      "max_abs": 0.5,
+      "mean_abs": 0.03598497807979584,
+      "l2": 12.87447738647461,
+      "cosine_similarity": 0.9999479055404663,
       "verdict": "PASS",
-      "score_max_abs": 0.0
+      "score_max_abs": 0.001953125
     },
     {
       "entry_idx": 3,
       "query_id": "q0",
       "entry_id": "e3",
-      "max_abs": 0.25,
-      "mean_abs": 0.005363853648304939,
-      "l2": 3.348182201385498,
-      "cosine_similarity": 1.0000001192092896,
-      "verdict": "PASS",
-      "score_max_abs": 0.0
+      "max_abs": 0.625,
+      "mean_abs": 0.03934711217880249,
+      "l2": 13.958793640136719,
+      "cosine_similarity": 0.9999403953552246,
+      "verdict": "FAIL",
+      "score_max_abs": 0.001953125
     },
     {
       "entry_idx": 4,
       "query_id": "q1",
       "entry_id": "e0",
-      "max_abs": 0.5,
-      "mean_abs": 0.04317339509725571,
-      "l2": 15.44229793548584,
-      "cosine_similarity": 0.9999426007270813,
+      "max_abs": 0.375,
+      "mean_abs": 0.02914416417479515,
+      "l2": 10.839750289916992,
+      "cosine_similarity": 0.999969482421875,
       "verdict": "PASS",
       "score_max_abs": 0.001953125
     },
@@ -67,10 +67,10 @@
       "entry_idx": 5,
       "query_id": "q1",
       "entry_id": "e1",
-      "max_abs": 0.375,
-      "mean_abs": 0.03566722571849823,
-      "l2": 12.93569278717041,
-      "cosine_similarity": 0.9999556541442871,
+      "max_abs": 0.5,
+      "mean_abs": 0.0429081991314888,
+      "l2": 15.472021102905273,
+      "cosine_similarity": 0.9999423623085022,
       "verdict": "PASS",
       "score_max_abs": 0.001953125
     },
@@ -78,35 +78,35 @@
       "entry_idx": 6,
       "query_id": "q1",
       "entry_id": "e2",
-      "max_abs": 0.25,
-      "mean_abs": 0.006866106763482094,
-      "l2": 4.061594486236572,
-      "cosine_similarity": 0.9999991655349731,
+      "max_abs": 0.4375,
+      "mean_abs": 0.03942013531923294,
+      "l2": 14.23981761932373,
+      "cosine_similarity": 0.9999470114707947,
       "verdict": "PASS",
-      "score_max_abs": 0.0
+      "score_max_abs": 0.001953125
     },
     {
       "entry_idx": 7,
       "query_id": "q2",
       "entry_id": "e0",
-      "max_abs": 0.3125,
-      "mean_abs": 0.019937336444854736,
-      "l2": 4.329039573669434,
-      "cosine_similarity": 0.9999681115150452,
+      "max_abs": 0.5,
+      "mean_abs": 0.06427013874053955,
+      "l2": 11.071329116821289,
+      "cosine_similarity": 0.9998498558998108,
       "verdict": "PASS",
-      "score_max_abs": 0.0
+      "score_max_abs": 0.0048828125
     },
     {
       "entry_idx": 8,
       "query_id": "q2",
       "entry_id": "e1",
-      "max_abs": 0.28125,
-      "mean_abs": 0.005219660699367523,
-      "l2": 1.7327440977096558,
-      "cosine_similarity": 0.9999971389770508,
+      "max_abs": 0.4375,
+      "mean_abs": 0.05517923831939697,
+      "l2": 9.64699935913086,
+      "cosine_similarity": 0.9998747110366821,
       "verdict": "PASS",
-      "score_max_abs": 0.0
+      "score_max_abs": 0.00390625
     }
   ],
-  "overall_verdict": "PASS"
+  "overall_verdict": "FAIL"
 }

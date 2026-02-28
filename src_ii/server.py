@@ -984,6 +984,8 @@ class GPUModelBackend:
         device: str = "cuda",
         dtype: str = "bfloat16",
         fp8_block_size: int = 128,
+        max_adapters: int = 4,
+        max_rank: int = 16,
     ):
         import torch
         self._device = torch.device(device)
@@ -999,6 +1001,10 @@ class GPUModelBackend:
         self._vae_path = vae_path
         self._tokenizer_path = tokenizer_path
         self._fp8_block_size = fp8_block_size
+
+        # Pre-allocated adapter capacity (set before compile)
+        self._max_adapters = max_adapters
+        self._max_rank = max_rank
 
         # Model state (lazy-loaded)
         self._te_model = None
@@ -1096,14 +1102,20 @@ class GPUModelBackend:
             torch.cuda.empty_cache()
 
     def _snapshot_lora_weights(self):
-        if self._diff_model is not None and self._lora_configs:
-            from futudiffu.lora import lora_state_dict
-            for cfg in self._lora_configs:
-                name = cfg["adapter_name"]
-                sd = lora_state_dict(self._diff_model, adapter_name=name)
-                self._lora_weights[name] = {
-                    k: v.detach().cpu() for k, v in sd.items()
-                }
+        """Snapshot adapter weights to CPU before freeing diffusion model.
+
+        Uses the new pre-allocated multi_lora API. Only snapshots active slots.
+        """
+        if self._diff_model is not None:
+            from src_ii.multi_lora import adapter_capacity, get_adapter_params
+            cap = adapter_capacity(self._diff_model)
+            for slot in cap["slots"]:
+                if slot["active"] and slot["name"]:
+                    name = slot["name"]
+                    params = get_adapter_params(self._diff_model, name)
+                    self._lora_weights[name] = {
+                        k: v.detach().cpu() for k, v in params.items()
+                    }
 
     # --- Ensure (lazy load) ---
 
@@ -1132,45 +1144,37 @@ class GPUModelBackend:
         self._free_te()
 
         from src_ii.zimage_model import load_zimage_rlaif
+        from src_ii.multi_lora import install_multi_lora
         import torch
 
+        # Load model WITHOUT compiling — we need to install adapter
+        # capacity first so the compiled graph includes the LoRA wrappers.
         diff_model = load_zimage_rlaif(
             self._fp8_diff_path,
             device=self._device,
             dtype=self._dtype,
             fp8_block_size=self._fp8_block_size,
-            compile_model=True,
+            compile_model=False,
             fuse=True,
             use_sage=True,
         )
-        self._diff_model = diff_model
-        self._diff_compiled = diff_model
 
-        # Replay LoRA injections
-        if self._lora_configs:
-            from futudiffu.lora import (
-                allocate_adapter, init_adapter_weights,
-                load_lora_state_dict, set_lora_scale,
-            )
-            for cfg in self._lora_configs:
-                allocate_adapter(
-                    diff_model,
-                    name=cfg["adapter_name"],
-                    rank=cfg["rank"],
-                    alpha=cfg["alpha"],
-                    layer_indices=cfg.get("layer_indices"),
-                )
-            for adapter_name, weights in self._lora_weights.items():
-                if weights:
-                    sd = {k: v.to(dtype=self._dtype) for k, v in weights.items()}
-                    load_lora_state_dict(diff_model, sd)
-            for adapter_name, scale in self._lora_scales.items():
-                if isinstance(scale, (int, float)):
-                    scale_t = torch.tensor([scale], device=self._device, dtype=self._dtype)
-                else:
-                    scale_t = torch.tensor(scale, device=self._device, dtype=self._dtype)
-                set_lora_scale(diff_model, scale_t, adapter_name=adapter_name)
-            logger.info(f"Replayed {len(self._lora_configs)} LoRA injection(s)")
+        # Pre-allocate adapter capacity BEFORE compile
+        install_multi_lora(
+            diff_model,
+            max_adapters=self._max_adapters,
+            max_rank=self._max_rank,
+        )
+        logger.info(
+            f"Pre-allocated adapter capacity: {self._max_adapters} slots, "
+            f"max_rank={self._max_rank}"
+        )
+
+        # NOW compile
+        diff_model.eval()
+        diff_compiled = torch.compile(diff_model, mode="default")
+        self._diff_model = diff_model
+        self._diff_compiled = diff_compiled
 
         self._phase = "diffusion"
 
@@ -1185,11 +1189,8 @@ class GPUModelBackend:
 
     def _configure_sage_if_needed(self, attention_backend: str):
         if not self._sage_configured and attention_backend != "sdpa":
-            try:
-                from futudiffu.sage_attention import configure_sage
-                configure_sage(smooth_k=True, qk_quant="int8", pv_quant="bf16")
-            except ImportError:
-                pass
+            from futudiffu.sage_attention import configure_sage
+            configure_sage(smooth_k=True, qk_quant="int8", pv_quant="bf16")
             self._sage_configured = True
 
     # --- Text encoding ---
@@ -1320,89 +1321,86 @@ class GPUModelBackend:
 
     def allocate_adapter(self, params: dict) -> dict:
         self._ensure_diffusion()
-        from futudiffu.lora import allocate_adapter
+        from src_ii.multi_lora import assign_adapter, adapter_capacity, adapter_summary
 
         adapter_name = params["adapter_name"]
         rank = params.get("rank", 8)
         alpha = params.get("alpha", 16.0)
-        layer_indices = params.get("layer_indices")
-        if layer_indices is not None:
-            layer_indices = set(layer_indices)
+        slot = params.get("slot")
 
-        injected = allocate_adapter(
-            self._diff_model,
-            name=adapter_name,
-            rank=rank,
-            alpha=alpha,
-            layer_indices=layer_indices,
-        )
-        self._lora_configs.append({
-            "adapter_name": adapter_name,
-            "rank": rank,
-            "alpha": alpha,
-            "layer_indices": layer_indices,
-            "init_b_std": 0.0,
-        })
-        n_params = sum(a.lora_A.numel() + a.lora_B.numel() for a in injected.values())
+        # Auto-assign to first empty slot if not specified
+        if slot is None:
+            cap = adapter_capacity(self._diff_model)
+            for s in cap["slots"]:
+                if not s["active"]:
+                    slot = s["index"]
+                    break
+            if slot is None:
+                raise RuntimeError(
+                    f"No empty adapter slots (max_adapters={cap['max_adapters']})"
+                )
+
+        n_wrappers = assign_adapter(self._diff_model, slot, adapter_name, rank, alpha)
+        summary = adapter_summary(self._diff_model)
+        n_params = summary["adapters"].get(adapter_name, {}).get("n_params", 0)
         return {
             "adapter_name": adapter_name,
-            "n_adapters": len(injected),
+            "slot": slot,
+            "n_wrappers": n_wrappers,
             "n_params": n_params,
-            "graph_mutated": True,
         }
 
     def init_adapter_weights(self, params: dict) -> dict:
         self._ensure_diffusion()
-        from futudiffu.lora import init_adapter_weights
+        from src_ii.multi_lora import init_adapter_b_weights
 
-        n = init_adapter_weights(
-            self._diff_model,
-            name=params["adapter_name"],
-            init_b_std=params.get("init_b_std", 0.0),
-            scale=params.get("scale", 1.0),
-        )
+        adapter_name = params["adapter_name"]
+        init_b_std = params.get("init_b_std", 0.01)
+        n = init_adapter_b_weights(self._diff_model, adapter_name, std=init_b_std)
         return {
-            "adapter_name": params["adapter_name"],
+            "adapter_name": adapter_name,
             "n_modules_initialized": n,
         }
 
     def inject_lora(self, params: dict) -> dict:
-        import torch
+        """Legacy RPC: assign adapter + init B weights in one call.
+
+        With pre-allocated capacity, no recompilation is needed.
+        """
         self._ensure_diffusion()
-        from futudiffu.lora import inject_lora
+        from src_ii.multi_lora import (
+            assign_adapter, init_adapter_b_weights,
+            adapter_capacity, adapter_summary,
+        )
 
         adapter_name = params["adapter_name"]
         rank = params.get("rank", 8)
         alpha = params.get("alpha", 16.0)
-        layer_indices = params.get("layer_indices")
         init_b_std = params.get("init_b_std", 0.0)
-        if layer_indices is not None:
-            layer_indices = set(layer_indices)
+        slot = params.get("slot")
 
-        injected = inject_lora(
-            self._diff_model,
-            name=adapter_name,
-            rank=rank,
-            alpha=alpha,
-            layer_indices=layer_indices,
-            init_b_std=init_b_std,
-        )
-        self._lora_configs.append({
-            "adapter_name": adapter_name,
-            "rank": rank,
-            "alpha": alpha,
-            "layer_indices": layer_indices,
-            "init_b_std": init_b_std,
-        })
+        # Auto-assign to first empty slot if not specified
+        if slot is None:
+            cap = adapter_capacity(self._diff_model)
+            for s in cap["slots"]:
+                if not s["active"]:
+                    slot = s["index"]
+                    break
+            if slot is None:
+                raise RuntimeError(
+                    f"No empty adapter slots (max_adapters={cap['max_adapters']})"
+                )
 
-        torch._dynamo.reset()
-        self._diff_model.compile_for_execution()
-        self._diff_compiled = self._diff_model
+        n_wrappers = assign_adapter(self._diff_model, slot, adapter_name, rank, alpha)
+        if init_b_std > 0:
+            init_adapter_b_weights(self._diff_model, adapter_name, std=init_b_std)
 
-        n_params = sum(a.lora_A.numel() + a.lora_B.numel() for a in injected.values())
+        summary = adapter_summary(self._diff_model)
+        n_params = summary["adapters"].get(adapter_name, {}).get("n_params", 0)
         return {
             "adapter_name": adapter_name,
-            "n_adapters": len(injected),
+            "slot": slot,
+            "n_wrappers": n_wrappers,
             "n_params": n_params,
         }
 
@@ -1478,7 +1476,7 @@ class GPUModelBackend:
         from futudiffu.lora import get_lora_params
 
         hidden_dim = params.get("hidden_dim", 3840)
-        head_names = params.get("head_names", ["bit_quality", "step_quality"])
+        head_names = params["head_names"]
         logit_cap = params.get("logit_cap", 10.0)
         lr = params.get("lr")
         weight_decay = params.get("weight_decay", 0.0)

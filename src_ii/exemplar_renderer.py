@@ -262,10 +262,10 @@ def render_exemplars_from_model(
     model,
     load_latent_fn,
     sample_keys: list[tuple[int, str]],
+    head_names: list[str],
     vae=None,
     vae_path: str | None = None,
     top_k: int = 3,
-    head_names: list[str] | None = None,
     device=None,
     dtype=None,
     deduplicate_across_heads: bool = True,
@@ -285,7 +285,7 @@ def render_exemplars_from_model(
         vae: Loaded VAE model (or None to load from vae_path).
         vae_path: Path to VAE safetensors.
         top_k: Number of top/bottom to render per head.
-        head_names: Scoring head names (positional — index i = score column i).
+        head_names: Scoring head names (positional — index i = score column i). Required.
         device: CUDA device.
         dtype: Working dtype.
         deduplicate_across_heads: If True, exclude images already selected
@@ -302,10 +302,6 @@ def render_exemplars_from_model(
         device = torch.device("cuda")
     if dtype is None:
         dtype = torch.bfloat16
-
-    if head_names is None:
-        n_heads = getattr(model, "n_score_heads", 1)
-        head_names = [f"head_{i}" for i in range(n_heads)]
 
     trajectories: list[dict] = []
     scores: dict[str, dict[str, float]] = {}

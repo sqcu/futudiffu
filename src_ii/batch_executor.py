@@ -44,6 +44,11 @@ class BatchExecutor:
         self.max_total_len = max_total_len
         self._plan_cache: dict[str, dict] = {}  # structure_hash -> plan
 
+        # Query adapter capacity once at construction
+        from src_ii.multi_lora import adapter_capacity
+        cap = adapter_capacity(model)
+        self._n_adapter_slots = cap["max_adapters"]
+
     def execute(self, queries: list[dict]) -> list[dict]:
         """Execute fork specs, return tagged denoised results.
 
@@ -58,7 +63,7 @@ class BatchExecutor:
             self._plan_cache[key] = _build_plan(
                 entries, self.model, self.device, self.max_total_len
             )
-        return _execute_plan(entries, self._plan_cache[key], self.model, self.device)
+        return _execute_plan(entries, self._plan_cache[key], self.model, self.device, self._n_adapter_slots)
 
     def invalidate_plan_cache(self):
         """Call after model weight changes (new LoRA, recompile, etc.)."""
@@ -169,63 +174,79 @@ def _build_plan(entries, model, device, max_total_len):
 
 
 # ------------------------------------------------------------------
-# EXECUTE + DENOISE (loop over bins)
+# EXECUTE + DENOISE
 # ------------------------------------------------------------------
 
-def _execute_plan(entries, plan, model, device):
+def execute_single_bin(
+    entries: list[dict],
+    indices: list[int],
+    state: dict,
+    model,
+    device: torch.device,
+    n_adapter_slots: int = 0,
+) -> list[dict]:
+    """Execute one packed bin. Returns list of result dicts (one per index).
+
+    Shared between BatchExecutor._execute_plan and AcceleratorPool._execute_distributed.
+    Each result dict has keys: query_id, entry_id, denoised, scores.
+    """
+    x_list = [entries[i]["x"].to(device) for i in indices]
+    sigmas = [entries[i]["sigma"] for i in indices]
+    timesteps = [torch.tensor([s], device=device, dtype=torch.float32) for s in sigmas]
+
+    # Build per-entry adapter_scales for this bin.
+    # Width is always n_adapter_slots (from pre-allocated capacity).
+    any_has_scales = any(entries[i].get("adapter_scales") is not None for i in indices)
+    if any_has_scales:
+        scale_rows = []
+        for i in indices:
+            s = entries[i].get("adapter_scales")
+            if s is not None:
+                row = s.to(device)
+                if n_adapter_slots > 0 and row.shape[-1] < n_adapter_slots:
+                    pad = torch.zeros(n_adapter_slots - row.shape[-1], device=device, dtype=row.dtype)
+                    row = torch.cat([row, pad])
+                scale_rows.append(row)
+            else:
+                scale_rows.append(torch.zeros(n_adapter_slots, device=device))
+        adapter_scales = torch.stack(scale_rows)
+    else:
+        adapter_scales = None
+
+    fields, scores = packed_forward(
+        model, x_list, timesteps,
+        state["refined_caps"], state["packing_info"],
+        state["block_mask"], state["packed_rope"],
+        adapter_scales=adapter_scales,
+    )
+
+    sigma_tensors = [
+        torch.tensor(s, device=device, dtype=x_list[j].dtype)
+        for j, s in enumerate(sigmas)
+    ]
+    denoised_list = denoise_all(x_list, fields, sigma_tensors)
+
+    results = []
+    for local_idx, global_idx in enumerate(indices):
+        e = entries[global_idx]
+        results.append({
+            "query_id": e["query_id"],
+            "entry_id": e["entry_id"],
+            "denoised": denoised_list[local_idx].cpu(),
+            "scores": scores[local_idx].cpu() if scores is not None else None,
+        })
+    return results
+
+
+def _execute_plan(entries, plan, model, device, n_adapter_slots=0):
     results = {}
-
     for bin_info in plan["bins"]:
-        indices = bin_info["indices"]
-        state = bin_info["prepared"]
-
-        x_list = [entries[i]["x"].to(device) for i in indices]
-        sigmas = [entries[i]["sigma"] for i in indices]
-        timesteps = [torch.tensor([s], device=device, dtype=torch.float32) for s in sigmas]
-
-        # Build per-entry adapter_scales for this bin
-        any_has_scales = any(entries[i].get("adapter_scales") is not None for i in indices)
-        if any_has_scales:
-            scale_rows = []
-            for i in indices:
-                s = entries[i].get("adapter_scales")
-                if s is not None:
-                    scale_rows.append(s.to(device))
-                else:
-                    # Entry has no adapter_scales — use zeros (no adapter contribution)
-                    # Infer n_adapters from a neighbor
-                    n_adapters = next(
-                        entries[j]["adapter_scales"].shape[-1]
-                        for j in indices if entries[j].get("adapter_scales") is not None
-                    )
-                    scale_rows.append(torch.zeros(n_adapters, device=device))
-            adapter_scales = torch.stack(scale_rows)  # (n_entries_in_bin, n_adapters)
-        else:
-            adapter_scales = None
-
-        fields, scores = packed_forward(
-            model, x_list, timesteps,
-            state["refined_caps"], state["packing_info"],
-            state["block_mask"], state["packed_rope"],
-            adapter_scales=adapter_scales,
+        bin_results = execute_single_bin(
+            entries, bin_info["indices"], bin_info["prepared"],
+            model, device, n_adapter_slots,
         )
-
-        # denoised = x - field * sigma
-        sigma_tensors = [
-            torch.tensor(s, device=device, dtype=x_list[j].dtype)
-            for j, s in enumerate(sigmas)
-        ]
-        denoised_list = denoise_all(x_list, fields, sigma_tensors)
-
-        for local_idx, global_idx in enumerate(indices):
-            e = entries[global_idx]
-            results[global_idx] = {
-                "query_id": e["query_id"],
-                "entry_id": e["entry_id"],
-                "denoised": denoised_list[local_idx].cpu(),
-                "scores": scores[local_idx].cpu() if scores is not None else None,
-            }
-
+        for r, idx in zip(bin_results, bin_info["indices"]):
+            results[idx] = r
     return [results[i] for i in range(len(entries))]
 
 
@@ -233,7 +254,7 @@ def _execute_plan(entries, plan, model, device):
 # KTUPLE ADAPTER (bridges ktuple executor protocol to BatchExecutor)
 # ------------------------------------------------------------------
 
-def make_executor_adapter(batch_executor, query_sigmas, device):
+class ExecutorAdapter:
     """Bridge ktuple executor protocol to BatchExecutor.execute().
 
     ktuple solve() calls: executor(x_bases, specs, step_i, adapter_scales)
@@ -242,16 +263,25 @@ def make_executor_adapter(batch_executor, query_sigmas, device):
     This adapter converts ktuple specs to BatchExecutor query dicts,
     executes, and groups results back by query.
 
+    query_sigmas is a mutable attribute: accumulate_reinforce_gradients
+    overrides it per micro-batch to supply the correct sigma subset.
+
     Args:
         batch_executor: BatchExecutor instance.
         query_sigmas: list of (n_steps+1,) tensors, one per query.
         device: Target device for returned tensors.
     """
-    def executor_fn(x_bases, specs, step_i, adapter_scales=None):
+
+    def __init__(self, batch_executor, query_sigmas, device):
+        self.batch_executor = batch_executor
+        self.query_sigmas = query_sigmas
+        self.device = device
+
+    def __call__(self, x_bases, specs, step_i, adapter_scales=None):
         queries = []
         for k, (x_base, spec) in enumerate(zip(x_bases, specs)):
             base_cond, base_res, _ = spec[0]
-            sigma = float(query_sigmas[k][step_i])
+            sigma = float(self.query_sigmas[k][step_i])
 
             forks = []
             for j, (cond, res, scale) in enumerate(spec):
@@ -272,33 +302,34 @@ def make_executor_adapter(batch_executor, query_sigmas, device):
                 "forks": forks,
             }
             if adapter_scales is not None:
-                # adapter_scales is (K, n_adapters) or (1, n_adapters)
                 if adapter_scales.shape[0] == 1:
                     q["adapter_scales"] = adapter_scales
                 else:
                     q["adapter_scales"] = adapter_scales[k:k+1]
             queries.append(q)
 
-        results = batch_executor.execute(queries)
+        results = self.batch_executor.execute(queries)
 
         # Group by query, sort by entry
         buckets = {k: [] for k in range(len(specs))}
         for r in results:
             k = int(r["query_id"][1:])
             j = int(r["entry_id"][1:])
-            buckets[k].append((j, r["denoised"].to(device), r.get("scores")))
+            buckets[k].append((j, r["denoised"].to(self.device), r.get("scores")))
 
         denoised_per_query = []
         score_rows = []
         for k in range(len(specs)):
             entries_sorted = sorted(buckets[k], key=lambda t: t[0])
             denoised_per_query.append([d for _, d, _ in entries_sorted])
-            # Take base entry (j=0) scores as query scores
             base_scores = entries_sorted[0][2]
             if base_scores is not None:
-                score_rows.append(base_scores.to(device))
+                score_rows.append(base_scores.to(self.device))
 
         scores = torch.stack(score_rows) if score_rows else None
         return denoised_per_query, scores
 
-    return executor_fn
+
+def make_executor_adapter(batch_executor, query_sigmas, device):
+    """Convenience constructor for ExecutorAdapter."""
+    return ExecutorAdapter(batch_executor, query_sigmas, device)

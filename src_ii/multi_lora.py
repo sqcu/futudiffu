@@ -1,17 +1,20 @@
 """Multi-tenant batched LoRA with per-image sparse adapter routing.
 
-Multiple named LoRA adapters coexist on the same model. Each adapter has
-independent A, B weight matrices on every target linear layer. A scale
-tensor (n_images, n_adapters) controls which adapters are active for which
-images in a packed FlexAttention batch. When scale=0 for an adapter on an
-image, that adapter's computation is skipped for that image's tokens.
+Pre-allocated adapter capacity: MultiLoRALinear is created with fixed
+max_adapters and max_rank. Adapters are assigned to explicit slot indices
+by the caller. adapter_scales is always (n_images, max_adapters) wide.
 
 Lifecycle:
-  1. install_multi_lora(model, configs) -- replace target linears with MultiLoRALinear
-  2. model.forward(..., adapter_scales=..., token_to_image=...) -- routing
-  3. save_adapter / load_adapter -- persist individual adapters
+  1. install_multi_lora(model, max_adapters, max_rank) -- pre-allocate empty slots
+  2. assign_adapter(model, slot_index, name, rank, alpha) -- populate a slot
+  3. model.forward(..., adapter_scales=..., token_to_image=...) -- routing
+  4. save_adapter / load_adapter -- persist individual adapters by name
+  5. release_adapter(model, slot_index) -- free a slot
 
-Implementation: Python loop over nonzero-scale adapters with masked
+No dynamic growth. No recompilation on assign/release. adapter_scales is
+always (n_images, max_adapters) wide, regardless of how many slots are active.
+
+Implementation: Python loop over active-flagged slots with masked
 gather/scatter for token routing. Triton kernel optimization deferred.
 
 Import constraints:
@@ -32,8 +35,8 @@ from safetensors.torch import load_file, save_file
 class MultiLoRALinear(nn.Module):
     """Drop-in replacement for nn.Linear that supports multiple LoRA adapters.
 
-    Wraps a base linear layer (nn.Linear or FP8Linear) and adds N named
-    adapters, each with its own A (down-projection) and B (up-projection)
+    Wraps a base linear layer (nn.Linear or FP8Linear) and adds N pre-allocated
+    adapter slots, each with its own A (down-projection) and B (up-projection)
     matrices. The adapter output is:
 
         sum_j[ (x @ A_j^T @ B_j^T) * (alpha_j / rank_j) * scale_j ]
@@ -41,15 +44,20 @@ class MultiLoRALinear(nn.Module):
     where scale_j comes from adapter_scales and can be per-image in a
     packed batch via token_to_image routing.
 
+    Slots are pre-allocated at construction time with fixed max_adapters and
+    max_rank. Adapters are assigned to slots via assign_adapter(). Empty slots
+    (scale=0, all-zero weights) contribute nothing and cost negligible FLOPs.
+
     When no adapter_scales are passed, returns base output only.
-    When all scales are zero, adapter contribution is zero (B is zero-init
-    by default, so even with scale=1 a fresh adapter has no effect).
     """
 
     def __init__(
         self,
         base_linear: nn.Module,
-        adapter_configs: list[dict],
+        max_adapters: int,
+        max_rank: int,
+        adapter_dtype: torch.dtype = torch.bfloat16,
+        device: torch.device | None = None,
     ):
         """Initialize MultiLoRALinear wrapping an existing linear layer.
 
@@ -57,10 +65,11 @@ class MultiLoRALinear(nn.Module):
             base_linear: The original nn.Linear or FP8Linear to wrap.
                 NOT removed from the parent -- the caller (install_multi_lora)
                 handles module replacement.
-            adapter_configs: List of dicts, each with:
-                - "name" (str): Unique adapter identifier
-                - "rank" (int): LoRA rank (bottleneck dimension)
-                - "alpha" (float): LoRA scaling factor
+            max_adapters: Number of pre-allocated adapter slots.
+            max_rank: Maximum LoRA rank across all slots.
+            adapter_dtype: dtype for adapter parameters (default bfloat16).
+            device: Device for adapter parameters. If None, inferred from
+                base_linear.weight.device.
         """
         super().__init__()
         self.base = base_linear
@@ -70,86 +79,120 @@ class MultiLoRALinear(nn.Module):
             self.in_features = base_linear.in_features
             self.out_features = base_linear.out_features
         elif hasattr(base_linear, "weight"):
-            # FP8Linear: weight is (out_features, in_features) even if quantized
             self.out_features, self.in_features = base_linear.weight.shape
         else:
             raise ValueError(f"Cannot infer dimensions from {type(base_linear)}")
 
-        self.n_adapters = len(adapter_configs)
-        self.adapter_names: list[str] = []
-        self.adapter_ranks: list[int] = []
-        self.adapter_alphas: list[float] = []
+        # Infer device from base linear if not specified
+        if device is None and hasattr(base_linear, "weight") and base_linear.weight is not None:
+            device = base_linear.weight.device
 
-        # Create A, B parameter pairs for each adapter as named sub-modules
-        # so they appear in state_dict with structured names
-        self.lora_A = nn.ParameterDict()
-        self.lora_B = nn.ParameterDict()
+        self.max_adapters = max_adapters
+        self.max_rank = max_rank
 
-        for cfg in adapter_configs:
-            name = cfg["name"]
-            rank = cfg["rank"]
-            alpha = cfg.get("alpha", float(rank))
+        # Pre-allocated per-slot parameters via ParameterList.
+        # Fixed length -> no recompilation on assign/release.
+        # Constructed on-device directly (no post-hoc migration).
+        self.lora_A = nn.ParameterList([
+            nn.Parameter(
+                torch.zeros(max_rank, self.in_features, dtype=adapter_dtype, device=device),
+                requires_grad=False,
+            )
+            for _ in range(max_adapters)
+        ])
+        self.lora_B = nn.ParameterList([
+            nn.Parameter(
+                torch.zeros(self.out_features, max_rank, dtype=adapter_dtype, device=device),
+                requires_grad=False,
+            )
+            for _ in range(max_adapters)
+        ])
 
-            self.adapter_names.append(name)
-            self.adapter_ranks.append(rank)
-            self.adapter_alphas.append(alpha)
+        # Metadata (not parameters, not compiled)
+        self._slot_names: list[str | None] = [None] * max_adapters
+        self._slot_ranks: list[int] = [0] * max_adapters
+        self._slot_alphas: list[float] = [0.0] * max_adapters
 
-            # A: (rank, in_features) -- Kaiming uniform init
-            A = nn.Parameter(torch.zeros(rank, self.in_features))
-            nn.init.kaiming_uniform_(A, a=math.sqrt(5))
-
-            # B: (out_features, rank) -- zero init (adapter starts silent)
-            B = nn.Parameter(torch.zeros(self.out_features, rank))
-
-            self.lora_A[name] = A
-            self.lora_B[name] = B
-
-        # Precompute scaling factors: alpha / rank for each adapter
         self.register_buffer(
             "_lora_scalings",
-            torch.tensor(
-                [a / r for a, r in zip(self.adapter_alphas, self.adapter_ranks)],
-                dtype=torch.float32,
-            ),
+            torch.zeros(max_adapters, dtype=torch.float32, device=device),
+        )
+        self.register_buffer(
+            "_slot_active",
+            torch.zeros(max_adapters, dtype=torch.float32, device=device),
         )
 
-    def add_adapter(self, cfg: dict) -> None:
-        """Add a new adapter to an existing MultiLoRALinear wrapper.
+    def assign_adapter(
+        self,
+        slot_index: int,
+        name: str,
+        rank: int,
+        alpha: float,
+        init_a: str = "kaiming",
+    ) -> None:
+        """Assign adapter to pre-allocated slot. No recompilation.
 
         Args:
-            cfg: Dict with "name" (str), "rank" (int), "alpha" (float, optional).
+            slot_index: Which slot to assign to (0..max_adapters-1).
+            name: Unique adapter identifier.
+            rank: LoRA rank (<= max_rank). Extra rows stay zero.
+            alpha: LoRA scaling factor.
+            init_a: Initialization for A matrix ("kaiming" or "zeros").
         """
-        name = cfg["name"]
-        if name in self.lora_A:
-            raise ValueError(f"Adapter {name!r} already exists")
+        if slot_index < 0 or slot_index >= self.max_adapters:
+            raise IndexError(
+                f"slot_index {slot_index} out of range [0, {self.max_adapters})"
+            )
+        if rank > self.max_rank:
+            raise ValueError(
+                f"rank {rank} exceeds max_rank {self.max_rank}"
+            )
+        if self._slot_names[slot_index] is not None:
+            raise ValueError(
+                f"Slot {slot_index} already occupied by {self._slot_names[slot_index]!r}"
+            )
+        # Check name uniqueness
+        if name in self._slot_names:
+            raise ValueError(
+                f"Adapter {name!r} already assigned to slot {self._slot_names.index(name)}"
+            )
 
-        rank = cfg["rank"]
-        alpha = cfg.get("alpha", float(rank))
+        self._slot_names[slot_index] = name
+        self._slot_ranks[slot_index] = rank
+        self._slot_alphas[slot_index] = alpha
 
-        self.adapter_names.append(name)
-        self.adapter_ranks.append(rank)
-        self.adapter_alphas.append(alpha)
-        self.n_adapters += 1
+        # Init A: kaiming on first `rank` rows, rest stays zero
+        self.lora_A[slot_index].data.zero_()
+        if init_a == "kaiming" and rank > 0:
+            nn.init.kaiming_uniform_(
+                self.lora_A[slot_index].data[:rank, :], a=math.sqrt(5)
+            )
 
-        A = nn.Parameter(torch.zeros(rank, self.in_features))
-        nn.init.kaiming_uniform_(A, a=math.sqrt(5))
-        B = nn.Parameter(torch.zeros(self.out_features, rank))
+        # B stays zero (silent until explicitly initialized)
+        self.lora_B[slot_index].data.zero_()
 
-        # Match device/dtype of existing adapters
-        if len(self.lora_A) > 0:
-            ref = next(iter(self.lora_A.values()))
-            A = nn.Parameter(A.to(device=ref.device, dtype=ref.dtype))
-            B = nn.Parameter(B.to(device=ref.device, dtype=ref.dtype))
+        self._lora_scalings[slot_index] = alpha / rank if rank > 0 else 0.0
+        self._slot_active[slot_index] = 1.0
 
-        self.lora_A[name] = A
-        self.lora_B[name] = B
+    def release_adapter(self, slot_index: int) -> None:
+        """Release slot, zero weights + metadata.
 
-        # Recompute scalings buffer
-        self._lora_scalings = torch.tensor(
-            [a / r for a, r in zip(self.adapter_alphas, self.adapter_ranks)],
-            dtype=torch.float32,
-            device=self._lora_scalings.device,
-        )
+        Args:
+            slot_index: Which slot to release.
+        """
+        if slot_index < 0 or slot_index >= self.max_adapters:
+            raise IndexError(
+                f"slot_index {slot_index} out of range [0, {self.max_adapters})"
+            )
+        self._slot_names[slot_index] = None
+        self._slot_ranks[slot_index] = 0
+        self._slot_alphas[slot_index] = 0.0
+        self.lora_A[slot_index].data.zero_()
+        self.lora_B[slot_index].data.zero_()
+        self.lora_A[slot_index].requires_grad = False
+        self.lora_B[slot_index].requires_grad = False
+        self._lora_scalings[slot_index] = 0.0
+        self._slot_active[slot_index] = 0.0
 
     def __getattr__(self, name: str):
         """Proxy unknown attributes to the base linear.
@@ -163,26 +206,27 @@ class MultiLoRALinear(nn.Module):
         try:
             return super().__getattr__(name)
         except AttributeError:
-            # Proxy to base linear (FP8Linear attributes, etc.)
             return getattr(self.base, name)
 
     @property
     def out_features_val(self) -> int:
         return self.out_features
 
-    def init_adapter_b(self, adapter_name: str, std: float = 0.01) -> None:
+    def init_adapter_b(self, slot_index: int, std: float = 0.01) -> None:
         """Initialize adapter B matrix with small random values.
 
         Call this to give the adapter nonzero signal at scale=1.0,
         which is needed to produce nonzero MSE gradients at training start.
 
         Args:
-            adapter_name: Which adapter to initialize.
+            slot_index: Which slot to initialize.
             std: Standard deviation for normal initialization.
         """
-        if adapter_name not in self.lora_B:
-            raise KeyError(f"No adapter named {adapter_name!r}")
-        nn.init.normal_(self.lora_B[adapter_name], std=std)
+        if slot_index < 0 or slot_index >= self.max_adapters:
+            raise IndexError(
+                f"slot_index {slot_index} out of range [0, {self.max_adapters})"
+            )
+        nn.init.normal_(self.lora_B[slot_index], std=std)
 
     def _compute_adapter_delta(
         self,
@@ -193,10 +237,14 @@ class MultiLoRALinear(nn.Module):
         """Compute adapter contribution in flattened 2D space.
 
         Shared implementation for forward() and adapter_delta().
+        Branchless: empty slots (_slot_active=0) and zero-scale adapters
+        produce zero contribution via arithmetic, not conditionals.
+        The loop over max_adapters is a compile-time constant unrolled by
+        torch.compile; no data-dependent branches remain.
 
         Args:
             x_2d: (n_tokens, in_features) flattened input.
-            adapter_scales: (n_images, n_adapters) or (n_adapters,) scales.
+            adapter_scales: (n_images, max_adapters) or (max_adapters,) scales.
             token_to_image: (seq_len,) routing or None.
 
         Returns:
@@ -204,58 +252,43 @@ class MultiLoRALinear(nn.Module):
         """
         n_tokens = x_2d.shape[0]
 
-        # Normalize scales shape
+        # Normalize to (n_images, max_adapters) -- shape guard, not data-dependent
         if adapter_scales.dim() == 1:
-            scales = adapter_scales.unsqueeze(0).expand(1, -1)
-            per_token = False
+            scales = adapter_scales.unsqueeze(0)  # (1, max_adapters)
         else:
-            scales = adapter_scales
-            per_token = token_to_image is not None
+            scales = adapter_scales  # (n_images, max_adapters)
+
+        # Build per-token routing. No token_to_image → all tokens map to image 0
+        if token_to_image is not None:
+            routing = token_to_image
+            if n_tokens > routing.shape[0]:
+                routing = routing.repeat(n_tokens // routing.shape[0])
+        else:
+            routing = torch.zeros(n_tokens, dtype=torch.long, device=x_2d.device)
+
+        # Padding sentinels get routing=-1; clamp for safe gather, zero via valid mask
+        valid = routing >= 0
+        safe_routing = routing.clamp(min=0)
+
+        # Per-token scales: (n_tokens, max_adapters)
+        token_scales = scales[safe_routing]
+        token_scales = token_scales * valid.unsqueeze(1).to(token_scales.dtype)
+
+        # Fold in slot_active and lora_scalings (both zero for empty slots)
+        # effective: (n_tokens, max_adapters)
+        effective = token_scales * (self._lora_scalings * self._slot_active).unsqueeze(0)
 
         adapter_out = x_2d.new_zeros(n_tokens, self.out_features)
 
-        for j in range(self.n_adapters):
-            name = self.adapter_names[j]
-            A = self.lora_A[name]  # (rank, in_features)
-            B = self.lora_B[name]  # (out_features, rank)
-            scaling = self._lora_scalings[j]
+        for j in range(self.max_adapters):
+            # No data-dependent branch. Empty/zero slots: effective[:,j]=0 → contribution*0=0
+            A = self.lora_A[j]   # (max_rank, in_features)
+            B = self.lora_B[j]   # (out_features, max_rank)
+            s = effective[:, j]  # (n_tokens,)
 
-            if per_token:
-                per_image_scale = scales[:, j]
-
-                if (per_image_scale.abs() < 1e-8).all():
-                    continue
-
-                routing = token_to_image
-                if n_tokens > routing.shape[0]:
-                    B_expand = n_tokens // routing.shape[0]
-                    routing = routing.repeat(B_expand)
-
-                safe_routing = routing.clamp(min=0)
-                token_scale = per_image_scale[safe_routing]
-
-                active_mask = (token_scale.abs() > 1e-8) & (routing >= 0)
-                if not active_mask.any():
-                    continue
-
-                active_idx = active_mask.nonzero(as_tuple=True)[0]
-                x_active = x_2d[active_idx]
-                scale_active = token_scale[active_idx]
-
-                h = x_active @ A.t()
-                contribution = h @ B.t()
-                contribution = contribution * (scaling * scale_active.unsqueeze(1))
-
-                adapter_out[active_idx] += contribution.to(adapter_out.dtype)
-            else:
-                scale_val = scales[0, j]
-                if scale_val.abs() < 1e-8:
-                    continue
-
-                h = x_2d @ A.t()
-                contribution = h @ B.t()
-                contribution = contribution * (scaling * scale_val)
-                adapter_out += contribution.to(adapter_out.dtype)
+            h = x_2d @ A.t()                         # (n_tokens, max_rank)
+            contribution = (h @ B.t()) * s.unsqueeze(1)  # (n_tokens, out_features)
+            adapter_out = adapter_out + contribution.to(adapter_out.dtype)
 
         return adapter_out
 
@@ -269,7 +302,7 @@ class MultiLoRALinear(nn.Module):
 
         Args:
             x: (..., in_features) input tensor.
-            adapter_scales: (n_images, n_adapters) or (n_adapters,) scale tensor.
+            adapter_scales: (n_images, max_adapters) or (max_adapters,) scale tensor.
                 If None, adapters are skipped (base output only).
             token_to_image: (total_len,) int32 tensor mapping each token position
                 to an image index for per-image routing.
@@ -279,7 +312,7 @@ class MultiLoRALinear(nn.Module):
         """
         out = self.base(x)
 
-        if adapter_scales is None or self.n_adapters == 0:
+        if adapter_scales is None:
             return out
 
         orig_shape = x.shape
@@ -306,14 +339,14 @@ class MultiLoRALinear(nn.Module):
 
         Args:
             x: (..., in_features) input tensor (BF16, pre-activation).
-            adapter_scales: (n_images, n_adapters) or (n_adapters,) scales.
+            adapter_scales: (n_images, max_adapters) or (max_adapters,) scales.
                 If None, returns zeros.
             token_to_image: (total_len,) routing or None.
 
         Returns:
             (..., out_features) adapter-only contribution.
         """
-        if adapter_scales is None or self.n_adapters == 0:
+        if adapter_scales is None:
             return x.new_zeros(*x.shape[:-1], self.out_features)
 
         orig_shape = x.shape
@@ -341,7 +374,6 @@ def _is_target_module(name: str, target_patterns: list[str] | None) -> bool:
     """
     canonical = _strip_orig_mod(name)
     if target_patterns is None:
-        # Default: target all linears in main transformer blocks
         return canonical.startswith("layers.")
     return any(pattern in canonical for pattern in target_patterns)
 
@@ -366,7 +398,7 @@ def _find_target_linears(
         "noise_refiner", "context_refiner",
         "t_embedder", "cap_embedder",
         "x_embedder", "rope_embedder",
-        "adaLN_modulation",  # timestep→modulation, not a sequence-token linear
+        "adaLN_modulation",  # timestep->modulation, not a sequence-token linear
     ]
 
     targets = {}
@@ -380,15 +412,14 @@ def _find_target_linears(
         # visible to named_modules but should not be independently targeted)
         if ".base" in canonical:
             continue
-        # Already-wrapped MultiLoRALinear — include so install can add adapters
+        # Already-wrapped MultiLoRALinear -- skip (install only replaces unwrapped linears)
         if isinstance(module, MultiLoRALinear):
-            targets[name] = module
+            continue
         # Check if it's a Linear-like layer
-        elif isinstance(module, nn.Linear):
+        if isinstance(module, nn.Linear):
             targets[name] = module
         elif hasattr(module, "weight") and hasattr(module, "__call__"):
             # FP8Linear or similar custom linear
-            # Verify it has the right shape attributes
             if hasattr(module, "in_features") or (
                 hasattr(module, "weight") and module.weight.dim() == 2
             ):
@@ -399,26 +430,21 @@ def _find_target_linears(
 
 def install_multi_lora(
     model: nn.Module,
-    adapter_configs: list[dict],
+    max_adapters: int,
+    max_rank: int,
+    adapter_dtype: torch.dtype = torch.bfloat16,
     target_patterns: list[str] | None = None,
     exclude_patterns: list[str] | None = None,
 ) -> dict[str, MultiLoRALinear]:
-    """Replace target Linear modules with MultiLoRALinear wrappers.
+    """Replace target Linear modules with pre-allocated MultiLoRALinear wrappers.
 
-    Walks the model tree, finds Linear/FP8Linear modules matching the
-    target patterns, and replaces each with a MultiLoRALinear that wraps
-    the original and adds LoRA adapter parameters.
-
-    Default targeting: all Linear layers in the 30 main transformer blocks
-    (self.layers[*]). Does NOT target: embedders, refiners, final_layer,
-    score_proj, score_norm.
+    Creates EMPTY slots. Call assign_adapter() to populate.
 
     Args:
         model: The model to modify in-place.
-        adapter_configs: List of adapter configs, each with:
-            - "name" (str): Unique adapter name
-            - "rank" (int): LoRA rank
-            - "alpha" (float): LoRA alpha (defaults to rank)
+        max_adapters: Number of adapter slots per wrapper.
+        max_rank: Maximum LoRA rank across all adapters.
+        adapter_dtype: dtype for adapter parameters (default bfloat16).
         target_patterns: Override target patterns (None = default).
         exclude_patterns: Override exclude patterns (None = default).
 
@@ -430,14 +456,6 @@ def install_multi_lora(
     wrappers: dict[str, MultiLoRALinear] = {}
 
     for name, module in targets.items():
-        if isinstance(module, MultiLoRALinear):
-            # Already wrapped — add new adapter(s) to existing wrapper
-            for cfg in adapter_configs:
-                if cfg["name"] not in module.lora_A:
-                    module.add_adapter(cfg)
-            wrappers[name] = module
-            continue
-
         # Split name into parent path and attribute name
         parts = name.rsplit(".", 1)
         if len(parts) == 2:
@@ -447,29 +465,139 @@ def install_multi_lora(
             parent = model
             attr_name = parts[0]
 
-        # Create wrapper
-        wrapper = MultiLoRALinear(module, adapter_configs)
-
-        # Move wrapper parameters to same device/dtype as base
-        if hasattr(module, "weight"):
-            device = module.weight.device
-            # Use bf16 for adapter weights regardless of base (FP8 base, bf16 adapters)
-            dtype = torch.bfloat16
-            for param_name, param in wrapper.lora_A.items():
-                wrapper.lora_A[param_name] = nn.Parameter(
-                    param.to(device=device, dtype=dtype)
-                )
-            for param_name, param in wrapper.lora_B.items():
-                wrapper.lora_B[param_name] = nn.Parameter(
-                    param.to(device=device, dtype=dtype)
-                )
-            wrapper._lora_scalings = wrapper._lora_scalings.to(device=device)
+        # Create wrapper (device inferred from module.weight automatically)
+        wrapper = MultiLoRALinear(module, max_adapters, max_rank, adapter_dtype)
 
         # Replace in parent
         setattr(parent, attr_name, wrapper)
         wrappers[name] = wrapper
 
     return wrappers
+
+
+def assign_adapter(
+    model: nn.Module,
+    slot_index: int,
+    name: str,
+    rank: int,
+    alpha: float | None = None,
+) -> int:
+    """Assign named adapter to slot_index across all wrappers.
+
+    Args:
+        model: Model with MultiLoRALinear wrappers installed.
+        slot_index: Which slot to assign to.
+        name: Unique adapter identifier.
+        rank: LoRA rank.
+        alpha: LoRA alpha (defaults to float(rank)).
+
+    Returns:
+        Number of wrappers the adapter was assigned to.
+    """
+    if alpha is None:
+        alpha = float(rank)
+    count = 0
+    for module in model.modules():
+        if isinstance(module, MultiLoRALinear):
+            module.assign_adapter(slot_index, name, rank, alpha)
+            count += 1
+    return count
+
+
+def release_adapter(model: nn.Module, slot_index: int) -> int:
+    """Release slot across all wrappers.
+
+    Args:
+        model: Model with MultiLoRALinear wrappers installed.
+        slot_index: Which slot to release.
+
+    Returns:
+        Number of wrappers the slot was released from.
+    """
+    count = 0
+    for module in model.modules():
+        if isinstance(module, MultiLoRALinear):
+            module.release_adapter(slot_index)
+            count += 1
+    return count
+
+
+def adapter_capacity(model: nn.Module) -> dict:
+    """Query capacity from the first MultiLoRALinear wrapper found.
+
+    Returns:
+        Dict with keys:
+            "max_adapters": int
+            "max_rank": int
+            "slots": list of dicts, each with:
+                "index": int
+                "name": str | None
+                "rank": int
+                "alpha": float
+                "active": bool
+    """
+    for module in model.modules():
+        if isinstance(module, MultiLoRALinear):
+            slots = []
+            for j in range(module.max_adapters):
+                slots.append({
+                    "index": j,
+                    "name": module._slot_names[j],
+                    "rank": module._slot_ranks[j],
+                    "alpha": module._slot_alphas[j],
+                    "active": module._slot_active[j].item() > 0.5,
+                })
+            return {
+                "max_adapters": module.max_adapters,
+                "max_rank": module.max_rank,
+                "slots": slots,
+            }
+    return {"max_adapters": 0, "max_rank": 0, "slots": []}
+
+
+def slot_index_for(model: nn.Module, adapter_name: str) -> int:
+    """Look up slot index for a named adapter.
+
+    Args:
+        model: Model with MultiLoRALinear wrappers installed.
+        adapter_name: Name of the adapter to find.
+
+    Returns:
+        Slot index.
+
+    Raises:
+        KeyError: If adapter_name is not assigned to any slot.
+    """
+    for module in model.modules():
+        if isinstance(module, MultiLoRALinear):
+            if adapter_name in module._slot_names:
+                return module._slot_names.index(adapter_name)
+    raise KeyError(f"Adapter {adapter_name!r} not assigned to any slot")
+
+
+def set_adapter_trainable(
+    model: nn.Module,
+    adapter_name: str,
+    trainable: bool = True,
+) -> int:
+    """Set requires_grad on all A/B params for a named adapter.
+
+    Args:
+        model: Model with MultiLoRALinear wrappers installed.
+        adapter_name: Which adapter to make trainable/frozen.
+        trainable: Whether to enable gradients.
+
+    Returns:
+        Number of parameters affected.
+    """
+    idx = slot_index_for(model, adapter_name)
+    count = 0
+    for module in model.modules():
+        if isinstance(module, MultiLoRALinear):
+            module.lora_A[idx].requires_grad = trainable
+            module.lora_B[idx].requires_grad = trainable
+            count += 2
+    return count
 
 
 def init_adapter_b_weights(
@@ -491,40 +619,33 @@ def init_adapter_b_weights(
     Returns:
         Number of modules initialized.
     """
+    idx = slot_index_for(model, adapter_name)
     count = 0
     for module in model.modules():
         if isinstance(module, MultiLoRALinear):
-            if adapter_name in module.lora_B:
-                module.init_adapter_b(adapter_name, std=std)
-                count += 1
+            module.init_adapter_b(idx, std=std)
+            count += 1
     return count
 
 
-def freeze_base_params(model: nn.Module) -> tuple[int, int]:
-    """Freeze all base model parameters, leave LoRA adapter params trainable.
+def freeze_base_params(model: nn.Module) -> int:
+    """Freeze ALL parameters (including all LoRA slots).
 
-    After calling this, only lora_A and lora_B parameters have
-    requires_grad=True. Everything else (base weights, norms, embedders,
-    score_proj, etc.) is frozen.
+    After calling this, NOTHING has requires_grad=True.
+    Callers explicitly unfreeze what they need via
+    set_adapter_trainable(model, name, True).
 
     Args:
         model: Model with MultiLoRALinear modules installed.
 
     Returns:
-        (n_frozen, n_trainable) parameter counts.
+        Number of frozen parameters.
     """
     n_frozen = 0
-    n_trainable = 0
-
-    for name, param in model.named_parameters():
-        if "lora_A." in name or "lora_B." in name:
-            param.requires_grad = True
-            n_trainable += 1
-        else:
-            param.requires_grad = False
-            n_frozen += 1
-
-    return n_frozen, n_trainable
+    for _name, param in model.named_parameters():
+        param.requires_grad = False
+        n_frozen += 1
+    return n_frozen
 
 
 def unfreeze_score_head(model: nn.Module) -> int:
@@ -550,7 +671,7 @@ def unfreeze_score_head(model: nn.Module) -> int:
 def get_adapter_params(
     model: nn.Module,
     adapter_name: str,
-) -> dict[str, torch.Tensor]:
+) -> dict[str, nn.Parameter]:
     """Collect all A, B parameters for a named adapter.
 
     Args:
@@ -558,18 +679,17 @@ def get_adapter_params(
         adapter_name: Which adapter's parameters to collect.
 
     Returns:
-        Dict mapping parameter names to tensors. Keys are like:
-        "layers.0.attention.qkv.lora_A.rtheta",
+        Dict mapping parameter names to nn.Parameter objects.
+        Keys are like: "layers.0.attention.qkv.lora_A.rtheta",
         "layers.0.attention.qkv.lora_B.rtheta", etc.
     """
+    idx = slot_index_for(model, adapter_name)
     params = {}
     for name, module in model.named_modules():
         if isinstance(module, MultiLoRALinear):
             canonical = _strip_orig_mod(name)
-            if adapter_name in module.lora_A:
-                params[f"{canonical}.lora_A.{adapter_name}"] = module.lora_A[adapter_name]
-            if adapter_name in module.lora_B:
-                params[f"{canonical}.lora_B.{adapter_name}"] = module.lora_B[adapter_name]
+            params[f"{canonical}.lora_A.{adapter_name}"] = module.lora_A[idx]
+            params[f"{canonical}.lora_B.{adapter_name}"] = module.lora_B[idx]
     return params
 
 
@@ -580,23 +700,27 @@ def save_adapter(
 ) -> None:
     """Save one adapter's A, B weights to safetensors.
 
+    Saves actual-rank-sized tensors (not max_rank padded) for backward
+    compatibility and smaller checkpoints.
+
     Args:
         model: Model with MultiLoRALinear modules installed.
         adapter_name: Which adapter to save.
         path: Output safetensors file path.
     """
+    idx = slot_index_for(model, adapter_name)
     tensors = {}
     for name, module in model.named_modules():
         if isinstance(module, MultiLoRALinear):
             canonical = _strip_orig_mod(name)
-            if adapter_name in module.lora_A:
-                tensors[f"{canonical}.lora_A.{adapter_name}"] = (
-                    module.lora_A[adapter_name].data.contiguous()
-                )
-            if adapter_name in module.lora_B:
-                tensors[f"{canonical}.lora_B.{adapter_name}"] = (
-                    module.lora_B[adapter_name].data.contiguous()
-                )
+            rank = module._slot_ranks[idx]
+            # Save only the active rank rows/cols, not the full max_rank
+            tensors[f"{canonical}.lora_A.{adapter_name}"] = (
+                module.lora_A[idx].data[:rank, :].contiguous()
+            )
+            tensors[f"{canonical}.lora_B.{adapter_name}"] = (
+                module.lora_B[idx].data[:, :rank].contiguous()
+            )
 
     if not tensors:
         raise ValueError(f"No adapter named {adapter_name!r} found in model")
@@ -615,13 +739,12 @@ def _remap_old_adapter_keys(state: dict[str, torch.Tensor]) -> dict[str, torch.T
     """
     remapped = {}
     for key, tensor in state.items():
-        # Detect old format: *.adapters.{name}.lora_{A,B}
         if ".adapters." in key:
             parts = key.split(".")
             try:
                 adapters_idx = parts.index("adapters")
                 adapter_name = parts[adapters_idx + 1]
-                lora_part = parts[adapters_idx + 2]  # lora_A or lora_B
+                lora_part = parts[adapters_idx + 2]
                 prefix = ".".join(parts[:adapters_idx])
                 new_key = f"{prefix}.{lora_part}.{adapter_name}"
                 remapped[new_key] = tensor
@@ -643,13 +766,12 @@ def load_adapter(
     new-format keys (``*.lora_{A,B}.{name}``). Old-format keys are
     remapped transparently.
 
-    Raises RuntimeError if zero tensors are loaded (mismatched checkpoint
-    or wrong adapter_name). Warns if checkpoint contains unmatched keys
-    (expected for refiner tensors excluded by install_multi_lora).
+    Checkpoint tensors may have different rank than max_rank. They are
+    loaded into the active rank region, with zero-padding to max_rank.
 
     Args:
-        model: Model with MultiLoRALinear modules installed (adapter must
-            already exist from install_multi_lora).
+        model: Model with MultiLoRALinear wrappers installed (adapter must
+            already be assigned via assign_adapter).
         adapter_name: Which adapter to load into.
         path: Input safetensors file path.
 
@@ -658,6 +780,8 @@ def load_adapter(
     """
     import logging
     log = logging.getLogger(__name__)
+
+    idx = slot_index_for(model, adapter_name)
 
     raw_state = load_file(path)
     state = _remap_old_adapter_keys(raw_state)
@@ -670,12 +794,19 @@ def load_adapter(
             a_key = f"{canonical}.lora_A.{adapter_name}"
             b_key = f"{canonical}.lora_B.{adapter_name}"
 
-            if a_key in state and adapter_name in module.lora_A:
-                module.lora_A[adapter_name].data.copy_(state[a_key])
+            if a_key in state:
+                ckpt_a = state[a_key]
+                ckpt_rank = ckpt_a.shape[0]
+                # Zero the slot then copy checkpoint data into active rows
+                module.lora_A[idx].data.zero_()
+                module.lora_A[idx].data[:ckpt_rank, :].copy_(ckpt_a)
                 loaded += 1
                 matched_keys.add(a_key)
-            if b_key in state and adapter_name in module.lora_B:
-                module.lora_B[adapter_name].data.copy_(state[b_key])
+            if b_key in state:
+                ckpt_b = state[b_key]
+                ckpt_rank = ckpt_b.shape[1]
+                module.lora_B[idx].data.zero_()
+                module.lora_B[idx].data[:, :ckpt_rank].copy_(ckpt_b)
                 loaded += 1
                 matched_keys.add(b_key)
 
@@ -694,7 +825,7 @@ def load_adapter(
             f"load_adapter loaded 0 tensors for adapter {adapter_name!r} "
             f"from {path!r}. Checkpoint keys (first 10): {file_keys}. "
             f"Ensure the model has MultiLoRALinear wrappers installed with "
-            f"adapter name {adapter_name!r}."
+            f"adapter name {adapter_name!r} assigned."
         )
 
     return loaded
@@ -707,7 +838,7 @@ def adapter_summary(model: nn.Module) -> dict:
         Dict with keys:
             "n_wrapped_layers": number of MultiLoRALinear modules
             "adapters": dict per adapter name with:
-                "rank", "alpha", "n_params", "trainable"
+                "rank", "alpha", "n_params", "trainable", "slot_index"
     """
     n_wrapped = 0
     adapter_info: dict[str, dict] = {}
@@ -715,16 +846,20 @@ def adapter_summary(model: nn.Module) -> dict:
     for module in model.modules():
         if isinstance(module, MultiLoRALinear):
             n_wrapped += 1
-            for i, name in enumerate(module.adapter_names):
+            for j in range(module.max_adapters):
+                name = module._slot_names[j]
+                if name is None:
+                    continue
                 if name not in adapter_info:
                     adapter_info[name] = {
-                        "rank": module.adapter_ranks[i],
-                        "alpha": module.adapter_alphas[i],
+                        "rank": module._slot_ranks[j],
+                        "alpha": module._slot_alphas[j],
+                        "slot_index": j,
                         "n_params": 0,
                         "trainable": 0,
                     }
-                A = module.lora_A[name]
-                B = module.lora_B[name]
+                A = module.lora_A[j]
+                B = module.lora_B[j]
                 n_a = A.numel()
                 n_b = B.numel()
                 adapter_info[name]["n_params"] += n_a + n_b

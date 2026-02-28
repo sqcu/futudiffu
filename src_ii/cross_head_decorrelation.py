@@ -84,7 +84,7 @@ def _spearman_rho(x: list[float], y: list[float]) -> float:
 def measure_cross_head_decorrelation(
     model,
     latent_cache: dict[str, dict],
-    head_names: Sequence[str] = ("pinkify", "thisnotthat"),
+    head_names: Sequence[str],
     device: torch.device | None = None,
 ) -> dict:
     """Measure Spearman rank correlation between head pairs on cached latents.
@@ -166,7 +166,7 @@ def measure_cross_head_decorrelation(
 
 def measure_cross_head_from_pixel_scores(
     head_scores: dict[str, dict[str, float]],
-    head_names: Sequence[str] = ("pinkify", "thisnotthat"),
+    head_names: Sequence[str],
 ) -> dict:
     """Compute cross-head Spearman rho from pre-computed pixel-space scores.
 

@@ -2,17 +2,22 @@
 
 Validates the full lifecycle that _run_policy_intervention exercises:
   1. Compile model (layers become OptimizedModule with _orig_mod paths)
-  2. install_multi_lora finds targets through _orig_mod
-  3. load_adapter matches checkpoint keys to canonical (non-_orig_mod) names
-  4. Second install_multi_lora adds adapter to existing wrappers (no re-wrap)
+  2. install_multi_lora pre-allocates capacity through _orig_mod
+  3. assign_adapter populates slots in pre-allocated wrappers
+  4. load_adapter matches checkpoint keys to canonical (non-_orig_mod) names
   5. save_adapter produces canonical keys (no _orig_mod in output)
   6. get_adapter_params keys are canonical
 """
 
 import gc
 import os
+import sys
 import shutil
 from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 import torch
 import torch.nn as nn
@@ -21,10 +26,12 @@ from safetensors.torch import save_file, load_file
 from src_ii.multi_lora import (
     MultiLoRALinear,
     install_multi_lora,
+    assign_adapter,
     load_adapter,
     save_adapter,
     get_adapter_params,
     _strip_orig_mod,
+    slot_index_for,
 )
 
 # Project-local scratch dir (Windows tempdir + safetensors mmap = PermissionError)
@@ -133,8 +140,8 @@ def test_install_on_compiled_model():
     model = FakeModel()
     model = compile_model(model)
 
-    configs = [{"name": "rtheta", "rank": 4, "alpha": 8.0}]
-    wrappers = install_multi_lora(model, configs)
+    wrappers = install_multi_lora(model, max_adapters=4, max_rank=8)
+    assign_adapter(model, 0, "rtheta", 4, 8.0)
 
     assert len(wrappers) > 0, "No wrappers installed"
 
@@ -146,10 +153,10 @@ def test_install_on_compiled_model():
     assert not isinstance(model.score_proj, MultiLoRALinear)
     assert not isinstance(model.final_layer, MultiLoRALinear)
 
-    # Verify each wrapper has the adapter
+    # Verify each wrapper has the adapter in slot 0
     for name, wrapper in wrappers.items():
-        assert "rtheta" in wrapper.lora_A, f"Missing rtheta in {name}"
-        assert wrapper.n_adapters == 1
+        assert wrapper._slot_names[0] == "rtheta", f"Missing rtheta in slot 0 of {name}"
+        assert wrapper.max_adapters == 4
 
     print(f"[PASS] install_on_compiled_model: {len(wrappers)} wrappers")
 
@@ -161,10 +168,10 @@ def test_load_adapter_compiled():
     # Create checkpoint BEFORE compile (uses canonical names)
     ckpt_path = make_fake_checkpoint(model, "rtheta", SCRATCH)
 
-    # Now compile and install
+    # Now compile, install capacity, and assign adapter
     model = compile_model(model)
-    configs = [{"name": "rtheta", "rank": 4, "alpha": 8.0}]
-    install_multi_lora(model, configs)
+    install_multi_lora(model, max_adapters=4, max_rank=8)
+    assign_adapter(model, 0, "rtheta", 4, 8.0)
 
     n_loaded = load_adapter(model, "rtheta", str(ckpt_path))
     assert n_loaded > 0, f"Loaded 0 tensors"
@@ -174,28 +181,30 @@ def test_load_adapter_compiled():
     print(f"[PASS] load_adapter_compiled: {n_loaded} tensors loaded")
 
 
-def test_second_install_adds_adapter():
-    """Second install_multi_lora should add adapter to existing wrappers."""
+def test_assign_adapter_fills_slots():
+    """assign_adapter populates named slots in pre-allocated wrappers."""
     model = FakeModel()
     model = compile_model(model)
 
-    # First install
-    configs1 = [{"name": "rtheta", "rank": 4, "alpha": 8.0}]
-    wrappers1 = install_multi_lora(model, configs1)
+    wrappers = install_multi_lora(model, max_adapters=4, max_rank=8)
 
-    # Second install with different adapter
-    configs2 = [{"name": "policy_pinkify", "rank": 4, "alpha": 8.0}]
-    wrappers2 = install_multi_lora(model, configs2)
+    # Assign two adapters to different slots
+    assign_adapter(model, 0, "rtheta", 4, 8.0)
+    assign_adapter(model, 1, "policy_pinkify", 4, 8.0)
 
-    assert len(wrappers2) == len(wrappers1), "Different wrapper count on second install"
+    # Verify each wrapper has both adapters in the right slots
+    for name, wrapper in wrappers.items():
+        assert wrapper._slot_names[0] == "rtheta", f"Missing rtheta in slot 0 of {name}"
+        assert wrapper._slot_names[1] == "policy_pinkify", f"Missing policy_pinkify in slot 1 of {name}"
+        assert wrapper._slot_names[2] is None, f"Slot 2 should be empty in {name}"
+        assert wrapper._slot_names[3] is None, f"Slot 3 should be empty in {name}"
+        assert wrapper.max_adapters == 4
 
-    # Each wrapper should now have both adapters
-    for name, wrapper in wrappers2.items():
-        assert "rtheta" in wrapper.lora_A, f"Missing rtheta in {name}"
-        assert "policy_pinkify" in wrapper.lora_A, f"Missing policy_pinkify in {name}"
-        assert wrapper.n_adapters == 2, f"Expected 2 adapters, got {wrapper.n_adapters}"
+    # Verify slot lookup
+    assert slot_index_for(model, "rtheta") == 0
+    assert slot_index_for(model, "policy_pinkify") == 1
 
-    print(f"[PASS] second_install_adds_adapter: {len(wrappers2)} wrappers, 2 adapters each")
+    print(f"[PASS] assign_adapter_fills_slots: {len(wrappers)} wrappers, 2 adapters each")
 
 
 def test_save_adapter_canonical_keys():
@@ -203,8 +212,8 @@ def test_save_adapter_canonical_keys():
     model = FakeModel()
     model = compile_model(model)
 
-    configs = [{"name": "rtheta", "rank": 4, "alpha": 8.0}]
-    install_multi_lora(model, configs)
+    install_multi_lora(model, max_adapters=4, max_rank=8)
+    assign_adapter(model, 0, "rtheta", 4, 8.0)
 
     path = str(SCRATCH / "test_save_adapter.safetensors")
     save_adapter(model, "rtheta", path)
@@ -226,8 +235,8 @@ def test_get_adapter_params_canonical():
     model = FakeModel()
     model = compile_model(model)
 
-    configs = [{"name": "rtheta", "rank": 4, "alpha": 8.0}]
-    install_multi_lora(model, configs)
+    install_multi_lora(model, max_adapters=4, max_rank=8)
+    assign_adapter(model, 0, "rtheta", 4, 8.0)
 
     params = get_adapter_params(model, "rtheta")
     for key in params:
@@ -239,36 +248,39 @@ def test_get_adapter_params_canonical():
 
 def test_roundtrip_save_load_compiled():
     """Full roundtrip: install -> save -> new model -> compile -> install -> load."""
-    # Model A: install adapter, modify weights, save
+    # Model A: install capacity, assign adapter, modify weights, save
     model_a = FakeModel()
     model_a = compile_model(model_a)
-    configs = [{"name": "rtheta", "rank": 4, "alpha": 8.0}]
-    install_multi_lora(model_a, configs)
+    install_multi_lora(model_a, max_adapters=4, max_rank=8)
+    assign_adapter(model_a, 0, "rtheta", 4, 8.0)
 
-    # Set A matrices to known values
+    # Set A and B matrices to known values (slot 0, first `rank` rows/cols)
+    idx = slot_index_for(model_a, "rtheta")
     for module in model_a.modules():
         if isinstance(module, MultiLoRALinear):
-            module.lora_A["rtheta"].data.fill_(1.0)
-            module.lora_B["rtheta"].data.fill_(2.0)
+            module.lora_A[idx].data[:4, :].fill_(1.0)  # rank=4 rows
+            module.lora_B[idx].data[:, :4].fill_(2.0)  # rank=4 cols
 
     path = str(SCRATCH / "roundtrip.safetensors")
     save_adapter(model_a, "rtheta", path)
     del model_a
     gc.collect()
 
-    # Model B: fresh compile, install, load
+    # Model B: fresh compile, install capacity, assign adapter, load
     model_b = FakeModel()
     model_b = compile_model(model_b)
-    install_multi_lora(model_b, configs)
+    install_multi_lora(model_b, max_adapters=4, max_rank=8)
+    assign_adapter(model_b, 0, "rtheta", 4, 8.0)
     n_loaded = load_adapter(model_b, "rtheta", path)
 
     assert n_loaded == 18
 
-    # Verify values match
+    # Verify values match (active rank region only)
+    idx_b = slot_index_for(model_b, "rtheta")
     for module in model_b.modules():
         if isinstance(module, MultiLoRALinear):
-            assert torch.all(module.lora_A["rtheta"] == 1.0)
-            assert torch.all(module.lora_B["rtheta"] == 2.0)
+            assert torch.all(module.lora_A[idx_b][:4, :] == 1.0), "A matrix mismatch"
+            assert torch.all(module.lora_B[idx_b][:, :4] == 2.0), "B matrix mismatch"
 
     del model_b
     gc.collect()
@@ -282,7 +294,7 @@ if __name__ == "__main__":
         test_strip_orig_mod()
         test_install_on_compiled_model()
         test_load_adapter_compiled()
-        test_second_install_adds_adapter()
+        test_assign_adapter_fills_slots()
         test_save_adapter_canonical_keys()
         test_get_adapter_params_canonical()
         test_roundtrip_save_load_compiled()

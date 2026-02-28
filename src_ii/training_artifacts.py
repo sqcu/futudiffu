@@ -319,8 +319,8 @@ class TrainingArtifacts:
     def __init__(
         self,
         output_dir: str | Path,
+        head_names: Sequence[str],
         run_name: str = "btrm_training",
-        head_names: Sequence[str] = ("pinkify", "thisnotthat"),
     ):
         self.output_dir = Path(output_dir)
         self.run_name = run_name
@@ -449,7 +449,7 @@ class TrainingArtifacts:
 
         ckpt_dir = self.output_dir / f"checkpoint_step{step:03d}"
         ckpt_dir.mkdir(parents=True, exist_ok=True)
-        persist_btrm(model, adapter_name, str(ckpt_dir))
+        persist_btrm(model, adapter_name, str(ckpt_dir), head_names=self.head_names)
         return ckpt_dir
 
     # -----------------------------------------------------------------------

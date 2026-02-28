@@ -218,7 +218,7 @@ def main() -> int:
     print("\n[Phase 4] Loading backbone and compound BTRM model...")
     from src_ii.zimage_model import load_zimage_rlaif
     from src_ii.btrm_lifecycle import load_btrm, score_serial
-    from src_ii.multi_lora import install_multi_lora
+    from src_ii.multi_lora import install_multi_lora, assign_adapter
     from src_ii.sigma_schedule import build_sigma_schedule, resolution_shift
 
     raw_model = load_zimage_rlaif(
@@ -227,7 +227,8 @@ def main() -> int:
     )
     print(f"  VRAM after backbone: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
-    install_multi_lora(raw_model, [{"name": "rtheta", "rank": 8, "alpha": 16.0}])
+    install_multi_lora(raw_model, max_adapters=3, max_rank=16)
+    assign_adapter(raw_model, 0, "rtheta", 8, 16.0)
     load_btrm(raw_model, "rtheta", str(COMPOUND_MODEL_DIR))
     raw_model.gradient_checkpointing = False
     raw_model.eval()

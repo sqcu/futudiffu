@@ -198,7 +198,7 @@ class AdapterConfigRequest(BaseModel):
 
 class BTRMHeadRequest(BaseModel):
     """Inject BTRM scoring head."""
-    head_names: list[str] = Field(default_factory=lambda: ["bit_quality", "step_quality"])
+    head_names: list[str]
     logit_cap: float = 10.0
     lr: float | None = None
     hidden_dim: int = 3840

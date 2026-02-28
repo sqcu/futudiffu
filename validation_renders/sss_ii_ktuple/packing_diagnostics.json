@@ -7,26 +7,25 @@
           1,
           2,
           0,
+          3
+        ],
+        "n_entries": 4,
+        "queries": [
+          "shrimp"
+        ]
+      },
+      {
+        "indices": [
+          4,
+          5,
+          6,
           7,
           8
         ],
         "n_entries": 5,
         "queries": [
-          "shrimp",
-          "tiny"
-        ]
-      },
-      {
-        "indices": [
-          3,
-          4,
-          5,
-          6
-        ],
-        "n_entries": 4,
-        "queries": [
           "banana",
-          "shrimp"
+          "tiny"
         ]
       }
     ]

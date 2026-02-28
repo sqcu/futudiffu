@@ -27,10 +27,12 @@ from __future__ import annotations
 
 import torch._dynamo
 torch._dynamo.config.suppress_errors = False
+torch._dynamo.config.verbose = True  # Log all graph breaks and compilation issues
 torch._dynamo.config.cache_size_limit = 64  # 4 linear dims × 2 requires_grad × headroom
 
 import torch._inductor.config
 torch._inductor.config.triton.persistent_reductions = False  # torch 2.10.0 sympy Infinity bug
+torch._inductor.config.debug = True  # Show inductor compilation diagnostics
 
 import ctypes
 import itertools

@@ -404,14 +404,14 @@ class InferenceBridge:
 
     def inject_btrm_head(
         self,
-        head_names: list[str] | None = None,
+        head_names: list[str],
         logit_cap: float = 10.0,
         lr: float | None = None,
         hidden_dim: int = 3840,
     ) -> dict[str, Any]:
         """Create a BTRM scoring head on the inference server."""
         params: dict[str, Any] = {
-            "head_names": head_names or ["bit_quality", "step_quality"],
+            "head_names": head_names,
             "logit_cap": logit_cap,
             "hidden_dim": hidden_dim,
         }

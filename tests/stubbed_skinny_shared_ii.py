@@ -29,7 +29,9 @@ from src_ii.transformer import (
     _strip_diffusion_prefix,
     fuse_model,
 )
-from src_ii.attention_srcii import patch_sage_for_compile
+# attention_srcii registers custom_ops with autograd at import time;
+# no explicit patch call needed for torch.compile compatibility.
+import src_ii.attention_srcii  # noqa: F401  -- trigger op registration
 
 
 # S-S-S config constants
@@ -415,8 +417,7 @@ def load_sss_model(
     # Apply model fusions (w1+w3, FP8 chain, batched adaLN)
     fuse_model(model)
 
-    # Patch sage attention backward for torch.compile compatibility
-    patch_sage_for_compile()
+    # sage attention custom_ops registered at import time (attention_srcii)
 
     return model
 

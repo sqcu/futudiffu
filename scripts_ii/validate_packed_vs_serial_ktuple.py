@@ -524,14 +524,13 @@ def main() -> int:
     _log("=" * 60)
 
     from src_ii.zimage_model import load_zimage_rlaif
-    from src_ii.attention_srcii import patch_sage_for_compile
+    import src_ii.attention_srcii  # noqa: F401  -- trigger op registration
 
     t0 = time.perf_counter()
     model = load_zimage_rlaif(
         FP8_PATH, device=DEVICE, dtype=DTYPE,
         compile_model=True, fuse=True,
     )
-    patch_sage_for_compile()
     _log(f"  Loaded + compiled in {time.perf_counter() - t0:.1f}s")
     _log(f"  VRAM: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 

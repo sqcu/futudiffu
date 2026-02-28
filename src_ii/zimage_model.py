@@ -200,11 +200,7 @@ class ZImageRLAIF(nn.Module):
         """
         import itertools
 
-        try:
-            from futudiffu.fp8 import FP8Linear, dequantize_fp8_blockwise
-            has_fp8 = True
-        except ImportError:
-            has_fp8 = False
+        from futudiffu.fp8 import FP8Linear, dequantize_fp8_blockwise
 
         weights = []
         biases = []
@@ -212,7 +208,7 @@ class ZImageRLAIF(nn.Module):
         for block in itertools.chain(self.noise_refiner, self.layers):
             if block.modulation:
                 linear = block.adaLN_modulation[0]
-                if has_fp8 and hasattr(linear, 'weight_scale'):
+                if hasattr(linear, 'weight_scale'):
                     # FP8Linear: dequantize for batched F.linear
                     w_bf16 = dequantize_fp8_blockwise(
                         linear.weight, linear.weight_scale,
@@ -928,11 +924,8 @@ def load_zimage_rlaif(
 
     # Configure SageAttention if the model uses it
     if use_sage:
-        try:
-            from futudiffu.sage_attention import configure_sage
-            configure_sage(smooth_k=True, qk_quant="int8", pv_quant="bf16")
-        except ImportError:
-            pass
+        from futudiffu.sage_attention import configure_sage
+        configure_sage(smooth_k=True, qk_quant="int8", pv_quant="bf16")
 
     if fuse:
         fuse_model(model)

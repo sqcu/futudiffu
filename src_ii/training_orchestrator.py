@@ -37,24 +37,35 @@ class TrainingOrchestrator:
 
     def __init__(self):
         self._run_id: str | None = None
-        self._task: asyncio.Task | None = None
+        self._task: asyncio.Future | None = None
         self._subscribers: list[asyncio.Queue] = []
         self._status: dict[str, Any] = {"active": False, "phase": "idle"}
         self._stop_requested = False
         self._output_dir: Path | None = None
+        self._event_loop: asyncio.AbstractEventLoop | None = None
 
     # ------------------------------------------------------------------
     # SSE event publishing
     # ------------------------------------------------------------------
 
     def _publish(self, event_type: str, data: dict[str, Any]) -> None:
-        """Push an SSE event to all subscribers."""
+        """Push an SSE event to all subscribers. Thread-safe.
+
+        Training runs execute in a worker thread (via run_in_executor).
+        Queue operations must be scheduled on the event loop thread via
+        call_soon_threadsafe so the async event loop stays responsive
+        while GPU work proceeds uninterrupted.
+        """
         event = {"type": event_type, "data": data}
+        loop = self._event_loop
         dead = []
         for i, q in enumerate(self._subscribers):
             try:
-                q.put_nowait(event)
-            except asyncio.QueueFull:
+                if loop is not None and loop.is_running():
+                    loop.call_soon_threadsafe(q.put_nowait, event)
+                else:
+                    q.put_nowait(event)
+            except (asyncio.QueueFull, RuntimeError):
                 dead.append(i)
         for i in reversed(dead):
             self._subscribers.pop(i)
@@ -129,8 +140,9 @@ class TrainingOrchestrator:
         }
 
         loop = asyncio.get_event_loop()
-        self._task = loop.create_task(
-            self._run_btrm(config, backend),
+        self._event_loop = loop
+        self._task = loop.run_in_executor(
+            None, self._run_btrm, config, backend,
         )
 
         return {
@@ -139,33 +151,32 @@ class TrainingOrchestrator:
             "output_dir": str(self._output_dir),
         }
 
-    async def _run_btrm(self, config: dict[str, Any], backend) -> None:
-        """Background coroutine for BTRM training."""
-        import torch
-        from src_ii.btrm_training import train_btrm_differentiable
-        from src_ii.btrm_lifecycle import (
-            setup_btrm_training, persist_btrm,
-        )
-        from src_ii.pair_sampler import BTRMPairSampler, build_positions_from_v2
-        from src_ii.dataset_io import (
-            make_load_latent_fn,
-            make_reward_manifest_preference_fn,
-        )
-        from src_ii.training_setup import encode_training_prompts
-        from src_ii.training_artifacts import TrainingArtifacts
-        from src_ii.incremental_save import TrainingCurveWriter
-
+    def _run_btrm(self, config: dict[str, Any], backend) -> None:
+        """Background thread for BTRM training."""
         run_id = self._run_id
         output_dir = self._output_dir
         t_start = time.monotonic()
 
         try:
+            import torch
+            from src_ii.btrm_training import train_btrm_differentiable
+            from src_ii.btrm_lifecycle import (
+                setup_btrm_training, persist_btrm,
+            )
+            from src_ii.pair_sampler import BTRMPairSampler, build_positions_from_v2
+            from src_ii.dataset_io import (
+                make_load_latent_fn,
+                make_reward_manifest_preference_fn,
+            )
+            from src_ii.training_setup import encode_training_prompts
+            from src_ii.training_artifacts import TrainingArtifacts
+            from src_ii.incremental_save import TrainingCurveWriter
             # --- Extract config with defaults ---
             dataset_path = config.get("dataset_path", "multi_res_trajectories")
             n_steps = config.get("n_steps", 100)
             lr = config.get("lr", 3e-4)
-            head_names = tuple(config.get("head_names", ["pinkify", "thisnotthat"]))
-            pref_keys = tuple(config.get("pref_keys", ["pinkify_pref", "thisnotthat_pref"]))
+            head_names = tuple(config["head_names"])
+            pref_keys = tuple(config["pref_keys"])
             gradient_checkpointing = config.get("gradient_checkpointing", True)
             max_grad_norm = config.get("max_grad_norm", 0.1)
             warmup_steps = config.get("warmup_steps", 5)
@@ -181,31 +192,57 @@ class TrainingOrchestrator:
             self._status["phase"] = "loading_dataset"
             self._publish("status", {"phase": "loading_dataset"})
 
+            # --- Open dataset reader ---
+            from futudiffu.dataset_v2 import DatasetReader
+            reader = DatasetReader(str(dataset_path))
+            n_available = len(reader)
+            traj_ids = list(range(n_available))
+            logger.info(f"Dataset: {dataset_path}, {n_available} trajectories")
+
             # --- Build pair sampler ---
-            positions = build_positions_from_v2(dataset_path)
+            positions = build_positions_from_v2(reader, traj_ids=traj_ids)
             pair_sampler = BTRMPairSampler(
                 positions,
                 clean_fraction=clean_fraction,
             )
 
-            # --- Build preference function ---
-            preference_fn = make_reward_manifest_preference_fn(
-                dataset_path, pref_keys=pref_keys,
-            )
-
-            # --- Build load_latent_fn ---
-            load_latent_fn = make_load_latent_fn(dataset_path)
-
             self._status["phase"] = "encoding_prompts"
             self._publish("status", {"phase": "encoding_prompts"})
 
             # --- Encode prompts (needs TE loaded) ---
-            # The backend manages model lifecycle; we call it for text encoding
-            unique_prompts = list(pair_sampler.unique_prompts)
+            # Collect unique prompts from dataset metadata
+            unique_prompts = set()
+            for tid in traj_ids:
+                meta, _ = reader[tid]
+                p = meta.get("prompt", "")
+                if p:
+                    unique_prompts.add(p)
+            unique_prompts = sorted(unique_prompts)
+            logger.info(f"Encoding {len(unique_prompts)} unique prompts")
+
             prompt_cache = {}
             for p in unique_prompts:
                 result = backend.encode_prompt(p, layer_idx=-2)
                 prompt_cache[p] = result["conditioning"]
+
+            # --- Build load_latent_fn ---
+            load_latent_fn = make_load_latent_fn(
+                reader, prompt_cache, device="cuda",
+            )
+
+            # --- Build preference function (sigma-based: cleaner wins) ---
+            def preference_fn(pair: dict) -> dict:
+                prefs = {}
+                for pref_key in pref_keys:
+                    sigma_a = pair.get("sigma_a", 0.5)
+                    sigma_b = pair.get("sigma_b", 0.5)
+                    if sigma_a < sigma_b - 0.001:
+                        prefs[pref_key] = 1
+                    elif sigma_b < sigma_a - 0.001:
+                        prefs[pref_key] = -1
+                    else:
+                        prefs[pref_key] = 0
+                return prefs
 
             self._status["phase"] = "loading_model"
             self._publish("status", {"phase": "loading_model"})
@@ -216,6 +253,7 @@ class TrainingOrchestrator:
             optimizer = setup_btrm_training(
                 model,
                 adapter_name=adapter_name,
+                adapter_slot=0,
                 adapter_rank=adapter_rank,
                 adapter_alpha=adapter_alpha,
                 lr=lr,
@@ -246,45 +284,41 @@ class TrainingOrchestrator:
 
             # --- Checkpoint callback ---
             def checkpoint_cb(step: int, _model) -> None:
-                persist_btrm(model, adapter_name, str(output_dir / f"checkpoint_step{step:03d}"))
+                persist_btrm(model, adapter_name, str(output_dir / f"checkpoint_step{step:03d}"), head_names=head_names)
                 self._publish("checkpoint", {"step": step})
 
             self._status["phase"] = "training"
             self._publish("status", {"phase": "training"})
 
             # --- Run training ---
-            # train_btrm_differentiable is synchronous and GPU-bound.
-            # We run it in the event loop's executor to avoid blocking.
-            loop = asyncio.get_event_loop()
-            step_metrics = await loop.run_in_executor(
-                None,
-                lambda: train_btrm_differentiable(
-                    model=model,
-                    pair_sampler=pair_sampler,
-                    preference_fn=preference_fn,
-                    load_latent_fn=load_latent_fn,
-                    n_steps=n_steps,
-                    lr=lr,
-                    head_names=head_names,
-                    pref_keys=pref_keys,
-                    gradient_checkpointing=gradient_checkpointing,
-                    max_grad_norm=max_grad_norm,
-                    warmup_steps=warmup_steps,
-                    lr_schedule=lr_schedule,
-                    callback=step_callback,
-                    checkpoint_fn=checkpoint_cb,
-                    checkpoint_steps=checkpoint_steps,
-                    output_dir=str(output_dir),
-                    artifacts=artifacts,
-                    macrobatch_budget=macrobatch_budget,
-                    megapixel_flops_fraction=megapixel_flops_fraction,
-                    curve_writer=curve_writer,
-                    adapter_name=adapter_name,
-                ),
+            # Already in a worker thread (run_in_executor from start_btrm_run),
+            # so call directly. The event loop stays responsive for status/SSE.
+            step_metrics = train_btrm_differentiable(
+                model=model,
+                pair_sampler=pair_sampler,
+                preference_fn=preference_fn,
+                load_latent_fn=load_latent_fn,
+                n_steps=n_steps,
+                lr=lr,
+                head_names=head_names,
+                pref_keys=pref_keys,
+                gradient_checkpointing=gradient_checkpointing,
+                max_grad_norm=max_grad_norm,
+                warmup_steps=warmup_steps,
+                lr_schedule=lr_schedule,
+                callback=step_callback,
+                checkpoint_fn=checkpoint_cb,
+                checkpoint_steps=checkpoint_steps,
+                output_dir=str(output_dir),
+                artifacts=artifacts,
+                macrobatch_budget=macrobatch_budget,
+                megapixel_flops_fraction=megapixel_flops_fraction,
+                curve_writer=curve_writer,
+                adapter_name=adapter_name,
             )
 
             # --- Persist final ---
-            persist_btrm(model, adapter_name, str(output_dir))
+            persist_btrm(model, adapter_name, str(output_dir), head_names=head_names)
 
             # --- Generate analysis ---
             if hasattr(artifacts, "generate_analysis"):
@@ -374,8 +408,9 @@ class TrainingOrchestrator:
         }
 
         loop = asyncio.get_event_loop()
-        self._task = loop.create_task(
-            self._run_ddgrpo(config, backend),
+        self._event_loop = loop
+        self._task = loop.run_in_executor(
+            None, self._run_ddgrpo, config, backend,
         )
 
         return {
@@ -384,31 +419,31 @@ class TrainingOrchestrator:
             "output_dir": str(self._output_dir),
         }
 
-    async def _run_ddgrpo(self, config: dict[str, Any], backend) -> None:
-        """Background coroutine for DDGRPO policy optimization.
+    def _run_ddgrpo(self, config: dict[str, Any], backend) -> None:
+        """Background thread for DDGRPO policy optimization.
 
         This is structurally parallel to _run_btrm but uses the REINFORCE +
         sparse-step policy gradient pipeline instead of supervised BT loss.
         """
-        import torch
-        from src_ii.btrm_lifecycle import setup_btrm_training, load_btrm
-        from src_ii.multi_lora import (
-            install_multi_lora, init_adapter_b_weights,
-            freeze_base_params, save_adapter,
-        )
-        from src_ii.ddreinforce import compute_eta_schedule, group_advantages
-        from src_ii.policy_step import (
-            accumulate_reinforce_gradients, policy_optimizer_step,
-        )
-        from src_ii.sigma_schedule import build_sigma_schedule, resolution_shift
-        from src_ii.resolution_sampling import sample_random_resolution
-        from src_ii.incremental_save import TrainingCurveWriter, atomic_json_save
-
         run_id = self._run_id
         output_dir = self._output_dir
         t_start = time.monotonic()
 
         try:
+            import torch
+            from src_ii.btrm_lifecycle import load_btrm
+            from src_ii.multi_lora import (
+                assign_adapter, init_adapter_b_weights,
+                freeze_base_params, set_adapter_trainable,
+                save_adapter, adapter_capacity,
+            )
+            from src_ii.ddreinforce import compute_eta_schedule, group_advantages
+            from src_ii.policy_step import (
+                accumulate_reinforce_gradients, policy_optimizer_step,
+            )
+            from src_ii.sigma_schedule import build_sigma_schedule, resolution_shift
+            from src_ii.resolution_sampling import sample_random_resolution
+            from src_ii.incremental_save import TrainingCurveWriter, atomic_json_save
             # --- Config ---
             btrm_checkpoint = config.get("btrm_checkpoint", "training_output/reward_function_run")
             n_iters = config.get("n_iters", 100)
@@ -440,19 +475,42 @@ class TrainingOrchestrator:
             # --- Load model + adapters ---
             backend._ensure_diffusion()
             model = backend._diff_model
+            device = model.score_proj.weight.device
 
-            # Install BTRM adapter + load checkpoint
-            btrm_configs = [{"name": btrm_adapter, "rank": adapter_rank, "alpha": adapter_alpha}]
-            install_multi_lora(model, btrm_configs)
+            # Assign adapters to explicit pre-allocated slots.
+            # Capacity was pre-allocated by server's _ensure_diffusion().
+            BTRM_SLOT = 0
+            POLICY_SLOT = 1
+            assign_adapter(model, BTRM_SLOT, btrm_adapter, adapter_rank, adapter_alpha)
             load_btrm(model, btrm_adapter, btrm_checkpoint)
 
-            # Install policy adapter
-            policy_configs = [{"name": policy_adapter, "rank": adapter_rank, "alpha": adapter_alpha}]
-            install_multi_lora(model, policy_configs)
+            assign_adapter(model, POLICY_SLOT, policy_adapter, adapter_rank, adapter_alpha)
             freeze_base_params(model)
+            set_adapter_trainable(model, policy_adapter, True)
             init_adapter_b_weights(model, policy_adapter, std=init_b_std)
 
-            # Policy optimizer
+            # --- Adapter scale mapping ---
+            # Scales are always max_adapters wide (pre-allocated capacity).
+            # Explicit slot indices: BTRM_SLOT=0, POLICY_SLOT=1.
+            #   scales_policy: policy adapter active. Valid diffusion field.
+            #   scales_reward: reward adapter active. Valid BTRM scores.
+            cap = adapter_capacity(model)
+            n_slots = cap["max_adapters"]
+            scales_policy = torch.zeros(1, n_slots, device=device, dtype=torch.bfloat16)
+            scales_policy[0, POLICY_SLOT] = 1.0
+            scales_reward = torch.zeros(1, n_slots, device=device, dtype=torch.bfloat16)
+            scales_reward[0, BTRM_SLOT] = 1.0
+
+            adapter_mapping = {
+                "slots": {btrm_adapter: BTRM_SLOT, policy_adapter: POLICY_SLOT},
+                "max_adapters": n_slots,
+            }
+
+            # Persist adapter mapping for debugging / checkpoint interpretation
+            from src_ii.incremental_save import atomic_json_save
+            atomic_json_save(adapter_mapping, str(output_dir / "adapter_mapping.json"))
+
+            # Policy optimizer — only policy adapter params receive gradients.
             from src_ii.multi_lora import get_adapter_params
             policy_params = list(get_adapter_params(model, policy_adapter).values())
             optimizer = torch.optim.AdamW(policy_params, lr=policy_lr)
@@ -479,67 +537,155 @@ class TrainingOrchestrator:
 
                 # Build sigma schedule
                 shift = resolution_shift(w, h)
-                sigmas = build_sigma_schedule(rollout_steps, shift=shift)
-                eta_schedule = compute_eta_schedule(rollout_steps, scale=eta_scale)
+                sigmas = build_sigma_schedule(
+                    rollout_steps, sampling_shift=shift,
+                    device=device, dtype=torch.bfloat16,
+                )
+                eta_schedule = compute_eta_schedule(sigmas, eta_scale=eta_scale)
 
-                # Generate rollouts and accumulate gradients
+                # Zero gradients before accumulation
+                optimizer.zero_grad()
+
+                # Generate rollouts, score, compute advantages, accumulate grads
+                #
+                # Memory lifecycle discipline (2 compilation contexts):
+                #  - Rollouts + Scoring: inference_mode. No autograd graph.
+                #    Rollouts run the full Euler chain; scoring runs one forward
+                #    per clean final. Both are queries to the same BatchExecutor.
+                #    Scoring uses adapter_scales=scales_reward (BTRM on, policy off)
+                #    so the score head sees hidden states shaped by the reward
+                #    adapter, producing semantically valid BTRM predictions.
+                #  - Gradient accumulation: grad-enabled + gradient_checkpointing=True.
+                #    Only the micro-batch backward retains activations (~500MB with gc).
+                #    adapter_scales=scales_policy gates BTRM gradient to zero.
+                from src_ii.batch_executor import BatchExecutor, ExecutorAdapter
+                from src_ii.inference_sampling import run_trajectory_packed
+                from src_ii.triumphant_future_reduction_ops import cfg2
+
+                # gradient_checkpointing=True for grad accumulation.
+                # During inference_mode (rollouts, scoring), checkpointing is
+                # irrelevant since autograd is disabled. Stays True throughout.
+                model.gradient_checkpointing = True
+
+                # One BatchExecutor for the entire iteration. Plan cache is
+                # reused within rollouts+scoring (both inference_mode), then
+                # invalidated before gradient accumulation (needs autograd).
+                iter_be = BatchExecutor(model, device)
+
                 all_rewards = []
+                all_rollout_data = []  # Collect across prompts for scoring
+
                 for prompt in batch_prompts:
-                    cond = prompt_conds[prompt].to(model.score_proj.weight.device)
-                    nc = neg_cond.to(model.score_proj.weight.device)
+                    cond = prompt_conds[prompt].to(device)
+                    nc = neg_cond.to(device)
 
                     group_rollouts = []
                     for k in range(n_rollouts):
                         seed = rng.randint(0, 2**32 - 1)
-                        # Use backend for rollout generation
-                        result = backend.sample_trajectory(
-                            params={
-                                "seed": seed, "n_steps": rollout_steps,
-                                "cfg": 4.0, "width": w, "height": h,
-                                "attention_backend": "sage",
-                                "sampling_shift": shift,
-                                "save_steps": list(range(rollout_steps)),
-                            },
-                            tensors={
-                                "pos_cond": cond.cpu(),
-                                "neg_cond": nc.cpu(),
-                            },
-                        )
-                        group_rollouts.append(result)
+                        # Rollouts via run_trajectory_packed directly:
+                        # inference_mode wrapping, adapter_scales=scales_policy
+                        # (policy adapter active for on-policy sampling).
+                        params = {
+                            "n_images": 1, "seeds": [seed],
+                            "n_steps": rollout_steps,
+                            "cfg": 4.0, "width": w, "height": h,
+                            "save_steps": list(range(rollout_steps)),
+                        }
+                        tensors_in = {
+                            "neg_cond": nc, "pos_cond_0": cond,
+                        }
+                        with torch.inference_mode():
+                            result_tensors, metadata = run_trajectory_packed(
+                                model, device, torch.bfloat16,
+                                params, tensors_in,
+                                adapter_scales=scales_policy,
+                                batch_executor=iter_be,
+                            )
+                        group_rollouts.append(result_tensors)
 
-                    # Score finals via BTRM
-                    from src_ii.btrm_lifecycle import score_serial
+                    # --- Score finals via BatchExecutor (NOT score_serial) ---
+                    # Build scoring queries: clean final latents at sigma=0
+                    # with adapter_scales=scales_reward (BTRM adapter active).
+                    # All queries submitted at once — executor bin-packs them.
+                    scoring_queries = []
+                    for k, result_tensors in enumerate(group_rollouts):
+                        final = result_tensors["final_0"].to(device)
+                        scoring_queries.append({
+                            "query_id": f"score_{k}",
+                            "base_latent": final,
+                            "base_cond": cond,
+                            "base_cap_len": cond.shape[1],
+                            "base_resolution": (w, h),
+                            "sigma": 0.0,
+                            "forks": [{"entry_id": "e0"}],
+                            "adapter_scales": scales_reward,
+                        })
+
+                    with torch.inference_mode():
+                        score_results = iter_be.execute(scoring_queries)
+
                     rewards = []
-                    for rollout in group_rollouts:
-                        final = rollout[0]["final"].to(cond.device)
-                        scores = score_serial(
-                            model, final.unsqueeze(0),
-                            torch.zeros(1, device=cond.device),
-                            cond.unsqueeze(0), cond.shape[-2],
-                        )
-                        rewards.append(scores[0, 0].item())
+                    for r in score_results:
+                        # scores: (n_heads,) per entry. Head 0 is the reward signal.
+                        rewards.append(r["scores"][0].item())
                     all_rewards.extend(rewards)
 
-                    # Compute advantages
+                    # Compute group advantages
                     advantages = group_advantages(torch.tensor(rewards))
 
-                    # Accumulate gradients
-                    for k, (rollout, adv) in enumerate(zip(group_rollouts, advantages)):
+                    # Build trajectory dicts + specs for high-advantage rollouts
+                    grad_trajectories = []
+                    grad_specs = []
+                    grad_sigmas = []
+                    grad_advantages = []
+
+                    for k, (result_tensors, adv) in enumerate(zip(group_rollouts, advantages)):
                         if abs(adv.item()) < advantage_threshold:
                             continue
+                        traj_dict = {"eta_used": eta_schedule}
+                        for step_i in range(rollout_steps):
+                            step_key = f"step_{step_i:02d}_0"
+                            if step_key in result_tensors:
+                                # .clone() exits inference_mode tensor — required
+                                # because accumulate_reinforce_gradients runs a
+                                # differentiable forward from these checkpoints.
+                                traj_dict[f"checkpoint_{step_i}"] = result_tensors[step_key].clone()
+                        traj_dict[f"checkpoint_{rollout_steps}"] = result_tensors["final_0"].clone()
+
+                        grad_trajectories.append(traj_dict)
+                        grad_specs.append(cfg2(cond, nc, (w, h), 4.0))
+                        grad_sigmas.append(sigmas)
+                        grad_advantages.append(adv.item())
+
+                    if grad_trajectories:
+                        step_stride = max(1, rollout_steps // 5)
+                        gradient_steps = list(range(0, rollout_steps, step_stride))
+
+                        # Invalidate plan cache: rollout/scoring ran under
+                        # inference_mode, so cached tensors (refined_caps,
+                        # packed_rope, block_mask) are inference tensors.
+                        # Gradient accumulation needs autograd-compatible
+                        # tensors — force rebuild on next execute().
+                        iter_be.invalidate_plan_cache()
+
+                        grad_executor = ExecutorAdapter(iter_be, grad_sigmas, device)
+
+                        # adapter_scales=scales_policy: policy adapter active,
+                        # BTRM adapter scale=0 → zero gradient via chain rule.
+                        # Only policy params receive gradient signal.
                         accumulate_reinforce_gradients(
-                            model=model,
-                            checkpoints=rollout[0],
-                            sigmas=sigmas,
-                            conditioning=cond,
-                            adapter_name=policy_adapter,
-                            advantage=adv.item(),
-                            eta_used=eta_schedule,
+                            executor=grad_executor,
+                            specs=grad_specs,
+                            query_sigmas=grad_sigmas,
+                            trajectories=grad_trajectories,
+                            gradient_steps=gradient_steps,
+                            advantages=grad_advantages,
+                            adapter_scales=scales_policy,
                         )
 
                 # Optimizer step
                 step_info = policy_optimizer_step(
-                    model, policy_adapter, optimizer,
+                    optimizer,
                     max_grad_norm=max_grad_norm,
                 )
 
@@ -637,8 +783,9 @@ class TrainingOrchestrator:
         }
 
         loop = asyncio.get_event_loop()
-        self._task = loop.create_task(
-            self._run_policy_intervention(config, backend),
+        self._event_loop = loop
+        self._task = loop.run_in_executor(
+            None, self._run_policy_intervention, config, backend,
         )
 
         return {
@@ -647,25 +794,24 @@ class TrainingOrchestrator:
             "output_dir": str(self._output_dir),
         }
 
-    async def _run_policy_intervention(self, config: dict[str, Any], backend) -> None:
+    def _run_policy_intervention(self, config: dict[str, Any], backend) -> None:
         """Background coroutine for policy intervention A/B generation."""
-        import gc
-        import torch
-        from src_ii.btrm_lifecycle import setup_btrm_training, load_btrm
-        from src_ii.multi_lora import install_multi_lora
-        from src_ii.inference_sampling import run_trajectory_packed
-        from src_ii.infer.charts import draw_score_chart
-        from src_ii.infer.composites import build_comparison_composite
-        from src_ii.infer.diff_analysis import compute_pixel_diff_stats, make_false_color_diff
-        from src_ii.sigma_schedule import sigma_to_logsnr
-        from src_ii.vae_utils import load_vae, decode_latent_to_pil
-        from src_ii.model_paths import VAE_PATH
-
         run_id = self._run_id
         output_dir = self._output_dir
         t_start = time.monotonic()
 
         try:
+            import gc
+            import torch
+            from src_ii.btrm_lifecycle import load_btrm
+            from src_ii.multi_lora import assign_adapter, adapter_capacity
+            from src_ii.inference_sampling import run_trajectory_packed
+            from src_ii.infer.charts import draw_score_chart
+            from src_ii.infer.composites import build_comparison_composite
+            from src_ii.infer.diff_analysis import compute_pixel_diff_stats, make_false_color_diff
+            from src_ii.sigma_schedule import sigma_to_logsnr
+            from src_ii.vae_utils import load_vae, decode_latent_to_pil
+            from src_ii.model_paths import VAE_PATH
             # --- Config ---
             prompts = config.get("prompts", ["a beautiful landscape"])
             seeds = config.get("seeds", [42])
@@ -706,44 +852,51 @@ class TrainingOrchestrator:
 
             # Read BTRM config for head names and adapter params
             btrm_config_path = Path(btrm_dir) / "btrm_compound_config.json"
-            head_names = ["pinkify", "thisnotthat"]
-            if btrm_config_path.exists():
-                with open(btrm_config_path) as f:
-                    btrm_cfg = json.load(f)
-                head_names = btrm_cfg.get("head_names", head_names)
-                adapter_rank = btrm_cfg.get("adapter_rank", adapter_rank)
-                adapter_alpha = btrm_cfg.get("adapter_alpha", adapter_alpha)
+            if not btrm_config_path.exists():
+                raise FileNotFoundError(
+                    f"BTRM config not found: {btrm_config_path}. "
+                    f"Cannot determine head_names without a persisted config."
+                )
+            with open(btrm_config_path) as f:
+                btrm_cfg = json.load(f)
+            if "head_names" not in btrm_cfg:
+                raise KeyError(
+                    f"'head_names' missing from {btrm_config_path}. "
+                    f"Re-persist the BTRM checkpoint with head_names."
+                )
+            head_names = btrm_cfg["head_names"]
+            adapter_rank = btrm_cfg.get("adapter_rank", adapter_rank)
+            adapter_alpha = btrm_cfg.get("adapter_alpha", adapter_alpha)
 
-            # Install BTRM adapter + load weights
-            adapter_configs = [{"name": adapter_name, "rank": adapter_rank, "alpha": adapter_alpha}]
-            install_multi_lora(model, adapter_configs)
+            # Assign BTRM adapter to slot 0 + load weights
+            BTRM_SLOT = 0
+            POLICY_SLOT = 1
+            assign_adapter(model, BTRM_SLOT, adapter_name, adapter_rank, adapter_alpha)
             load_btrm(model, adapter_name, btrm_dir)
 
-            # Optional: install and load policy adapter
+            # Optional: assign and load policy adapter to slot 1
             if policy_checkpoint:
                 from src_ii.infer.model_setup import load_policy_adapter
-                policy_configs = [{"name": policy_adapter_name, "rank": adapter_rank, "alpha": adapter_alpha}]
-                install_multi_lora(model, policy_configs)
+                assign_adapter(model, POLICY_SLOT, policy_adapter_name, adapter_rank, adapter_alpha)
                 load_policy_adapter(model, policy_adapter_name, policy_checkpoint)
 
             # --- Phase 3: Generate trajectories ---
             self._status["phase"] = "sampling"
 
-            # Build adapter scale tensors matching installed adapter count.
-            # With policy checkpoint: 2 adapters [rtheta, policy_pinkify]
-            #   ref  = [1.0, 0.0] (reward adapter on, policy off)
-            #   policy = [1.0, 1.0] (both on — diff shows policy effect)
-            # Without policy checkpoint: 1 adapter [rtheta]
-            #   ref  = [0.0] (adapter off)
-            #   policy = [1.0] (adapter on — diff shows reward adapter effect)
+            # Build adapter scale tensors — always max_adapters wide.
+            cap = adapter_capacity(model)
+            n_slots = cap["max_adapters"]
             if policy_checkpoint:
-                scales_ref = torch.tensor([[1.0, 0.0]], device=device)
-                scales_policy = torch.tensor([[1.0, 1.0]], device=device)
+                scales_ref = torch.zeros(1, n_slots, device=device)
+                scales_ref[0, BTRM_SLOT] = 1.0
+                scales_policy = torch.zeros(1, n_slots, device=device)
+                scales_policy[0, BTRM_SLOT] = 1.0
+                scales_policy[0, POLICY_SLOT] = 1.0
             else:
-                scales_ref = torch.tensor([[0.0]], device=device)
-                scales_policy = torch.tensor([[1.0]], device=device)
+                scales_ref = torch.zeros(1, n_slots, device=device)
+                scales_policy = torch.zeros(1, n_slots, device=device)
+                scales_policy[0, BTRM_SLOT] = 1.0
 
-            loop = asyncio.get_event_loop()
             all_results: dict[str, dict] = {}
             pair_idx = 0
 
@@ -780,7 +933,7 @@ class TrainingOrchestrator:
                             "seed": seed,
                         }
 
-                    result = await loop.run_in_executor(None, _sample_pair)
+                    result = _sample_pair()
                     all_results[slug] = result
                     pair_idx += 1
                     self._status["step"] = pair_idx
@@ -907,7 +1060,7 @@ class TrainingOrchestrator:
 
                 return diff_stats_all
 
-            diff_stats = await loop.run_in_executor(None, _decode_and_composite)
+            diff_stats = _decode_and_composite()
 
             # --- Phase 5: Complete ---
             elapsed = round(time.monotonic() - t_start, 1)

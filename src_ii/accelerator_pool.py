@@ -64,6 +64,11 @@ class AcceleratorPool:
         self._streams = [torch.cuda.Stream(device=d) for d in devices]
         self._plan_cache: dict[str, dict] = {}
 
+        # Query adapter capacity from primary model
+        from src_ii.multi_lora import adapter_capacity
+        cap = adapter_capacity(self._models[0])
+        self._n_adapter_slots = cap["max_adapters"]
+
     @property
     def primary_model(self) -> nn.Module:
         """The model on devices[0]. Used for optimizer, parameter access."""
@@ -212,6 +217,8 @@ class AcceleratorPool:
         self, entries: list[dict], plan: dict,
     ) -> list[dict]:
         """Execute all bins across devices using CUDA streams."""
+        from src_ii.batch_executor import execute_single_bin
+
         results: dict[int, dict] = {}
 
         for dev_idx, bins_for_device in enumerate(plan["per_device"]):
@@ -221,79 +228,14 @@ class AcceleratorPool:
 
             with torch.cuda.stream(stream):
                 for bin_info in bins_for_device:
-                    _execute_bin(
+                    bin_results = execute_single_bin(
                         entries, bin_info["indices"], bin_info["prepared"],
-                        model, device, results,
+                        model, device, self._n_adapter_slots,
                     )
+                    for r, idx in zip(bin_results, bin_info["indices"]):
+                        results[idx] = r
 
         for stream in self._streams:
             stream.synchronize()
 
         return [results[i] for i in range(len(entries))]
-
-
-# ------------------------------------------------------------------
-# Bin execution (module-level, shared with BatchExecutor's pattern)
-# ------------------------------------------------------------------
-
-def _execute_bin(
-    entries: list[dict],
-    indices: list[int],
-    state: dict,
-    model: nn.Module,
-    device: torch.device,
-    results: dict[int, dict],
-) -> None:
-    """Execute one bin on one device. Populates results dict in-place."""
-    from src_ii.forward_packed import packed_forward
-    from src_ii.triumphant_future_reduction_ops import denoise_all
-
-    x_list = [entries[i]["x"].to(device) for i in indices]
-    sigmas = [entries[i]["sigma"] for i in indices]
-    timesteps = [
-        torch.tensor([s], device=device, dtype=torch.float32)
-        for s in sigmas
-    ]
-
-    # Build per-entry adapter_scales for this bin
-    any_has_scales = any(
-        entries[i].get("adapter_scales") is not None for i in indices
-    )
-    adapter_scales = None
-    if any_has_scales:
-        scale_rows = []
-        for i in indices:
-            s = entries[i].get("adapter_scales")
-            if s is not None:
-                scale_rows.append(s.to(device))
-            else:
-                n_adapters = next(
-                    entries[j]["adapter_scales"].shape[-1]
-                    for j in indices
-                    if entries[j].get("adapter_scales") is not None
-                )
-                scale_rows.append(torch.zeros(n_adapters, device=device))
-        adapter_scales = torch.stack(scale_rows)
-
-    fields, scores = packed_forward(
-        model, x_list, timesteps,
-        state["refined_caps"], state["packing_info"],
-        state["block_mask"], state["packed_rope"],
-        adapter_scales=adapter_scales,
-    )
-
-    # denoised = x - field * sigma
-    sigma_tensors = [
-        torch.tensor(s, device=device, dtype=x_list[j].dtype)
-        for j, s in enumerate(sigmas)
-    ]
-    denoised_list = denoise_all(x_list, fields, sigma_tensors)
-
-    for local_idx, global_idx in enumerate(indices):
-        e = entries[global_idx]
-        results[global_idx] = {
-            "query_id": e["query_id"],
-            "entry_id": e["entry_id"],
-            "denoised": denoised_list[local_idx].cpu(),
-            "scores": scores[local_idx].cpu() if scores is not None else None,
-        }
