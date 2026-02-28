@@ -143,7 +143,7 @@ def make_packed_model_fn(
     multiplier: float,
     adapter_scales: torch.Tensor | None = None,
 ):
-    """Create a packed model callable for sample_euler_packed().
+    """Create a packed model callable for Euler sampling.
 
     Returns fn(x_cfg_list, t_batch, caps, info, mask, rope) -> (list[Tensor], Tensor).
     """

@@ -653,12 +653,11 @@ class TrainingOrchestrator:
         import torch
         from src_ii.btrm_lifecycle import setup_btrm_training, load_btrm
         from src_ii.multi_lora import install_multi_lora
-        from src_ii.infer.trajectory import sample_trajectory
+        from src_ii.inference_sampling import run_trajectory_packed
         from src_ii.infer.charts import draw_score_chart
         from src_ii.infer.composites import build_comparison_composite
         from src_ii.infer.diff_analysis import compute_pixel_diff_stats, make_false_color_diff
-        from src_ii.forward_packed import prepare_packed_forward
-        from src_ii.sigma_schedule import build_sigma_schedule, resolution_shift
+        from src_ii.sigma_schedule import sigma_to_logsnr
         from src_ii.vae_utils import load_vae, decode_latent_to_pil
         from src_ii.model_paths import VAE_PATH
 
@@ -673,6 +672,8 @@ class TrainingOrchestrator:
             width = config.get("width", 1280)
             height = config.get("height", 832)
             n_steps = config.get("n_steps", 20)
+            cfg = config.get("cfg", 4.0)
+            negative_prompt = config.get("negative_prompt", "")
             btrm_dir = config.get("btrm_dir", "training_output/reward_function_run_tnt_v2")
             adapter_name = config.get("adapter_name", "rtheta")
             policy_checkpoint = config.get("policy_checkpoint")
@@ -692,6 +693,9 @@ class TrainingOrchestrator:
             for p in prompts:
                 result = backend.encode_prompt(p, layer_idx=-2)
                 prompt_conds[p] = result["conditioning"]
+
+            neg_result = backend.encode_prompt(negative_prompt, layer_idx=-2)
+            neg_cond = neg_result["conditioning"]
 
             # --- Phase 2: Prepare model ---
             self._status["phase"] = "model_ready"
@@ -725,10 +729,6 @@ class TrainingOrchestrator:
             # --- Phase 3: Generate trajectories ---
             self._status["phase"] = "sampling"
 
-            alpha = resolution_shift(width, height)
-            sigmas = build_sigma_schedule(n_steps, sampling_shift=alpha, device=device, dtype=dtype)
-            lh, lw = height // 8, width // 8
-
             # Build adapter scale tensors matching installed adapter count.
             # With policy checkpoint: 2 adapters [rtheta, policy_pinkify]
             #   ref  = [1.0, 0.0] (reward adapter on, policy off)
@@ -755,16 +755,27 @@ class TrainingOrchestrator:
 
                     def _sample_pair(prompt=prompt, seed=seed, slug=slug):
                         cond = prompt_conds[prompt].to(device)
-                        plan = prepare_packed_forward(model, [cond], [(lh, lw)], [cond.shape[1]], device)
-                        gen = torch.Generator(device=device).manual_seed(seed)
-                        x_init = sigmas[0] * torch.randn(1, 16, lh, lw, dtype=dtype, device=device, generator=gen)
-                        lat_ref, recs_ref = sample_trajectory(model, plan, sigmas, x_init, scales_ref)
-                        lat_pol, recs_pol = sample_trajectory(model, plan, sigmas, x_init, scales_policy)
+                        neg = neg_cond.to(device)
+                        params = {
+                            "n_images": 1, "seeds": [seed], "n_steps": n_steps,
+                            "cfg": cfg, "multiplier": 1.0, "denoise": 1.0,
+                            "width": width, "height": height,
+                        }
+                        tensors = {"neg_cond": neg, "pos_cond_0": cond}
+
+                        result_ref, meta_ref = run_trajectory_packed(
+                            model, device, dtype, params, tensors,
+                            adapter_scales=scales_ref,
+                        )
+                        result_pol, meta_pol = run_trajectory_packed(
+                            model, device, dtype, params, tensors,
+                            adapter_scales=scales_policy,
+                        )
                         return {
-                            "latent_ref": lat_ref.cpu(),
-                            "latent_policy": lat_pol.cpu(),
-                            "recs_ref": recs_ref,
-                            "recs_policy": recs_pol,
+                            "latent_ref": result_ref["final_0"],
+                            "latent_policy": result_pol["final_0"],
+                            "recs_ref": meta_ref.get("step_scores", []),
+                            "recs_policy": meta_pol.get("step_scores", []),
                             "prompt": prompt,
                             "seed": seed,
                         }
@@ -816,8 +827,8 @@ class TrainingOrchestrator:
                     diff_img.save(str(output_dir / f"{slug}_diff.png"))
 
                     # Score charts
-                    logsnrs = [r["logsnr"] for r in recs_ref]
-                    n_heads = len(recs_ref[0]["scores"])
+                    logsnrs = [sigma_to_logsnr(r["sigma"]) for r in recs_ref]
+                    n_heads = len(recs_ref[0]["scores"]) if recs_ref else 0
                     charts = []
                     for head_idx in range(n_heads):
                         head_name = head_names[head_idx] if head_idx < len(head_names) else f"head_{head_idx}"
@@ -863,9 +874,10 @@ class TrainingOrchestrator:
 
                     # Score log
                     for step_i, (r_ref, r_pol) in enumerate(zip(recs_ref, recs_pol)):
+                        sigma = r_ref["sigma"]
                         scores_log.append({
                             "slug": slug, "step": step_i,
-                            "sigma": r_ref["sigma"], "logsnr": r_ref["logsnr"],
+                            "sigma": sigma, "logsnr": sigma_to_logsnr(sigma),
                             "scores_ref": r_ref["scores"], "scores_policy": r_pol["scores"],
                         })
 

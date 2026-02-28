@@ -187,6 +187,17 @@ def build_sigma_schedule_py(
 
 # --- CONST noise model functions ---
 
+def sigma_to_logsnr(sigma: float) -> float:
+    """Convert a noise level sigma to log signal-to-noise ratio.
+
+    Clamps sigma to (0.001, 0.999) before computing to avoid log(0).
+    Returns logSNR = 2 * log((1 - sigma) / sigma), which is negative
+    in the high-noise regime and positive near sigma=0.
+    """
+    s = max(0.001, min(0.999, sigma))
+    return 2.0 * math.log((1.0 - s) / s)
+
+
 def const_noise_scaling(sigma: torch.Tensor, noise: torch.Tensor, latent_image: torch.Tensor) -> torch.Tensor:
     """CONST.noise_scaling: sigma * noise + (1 - sigma) * latent_image"""
     sigma = sigma.view(sigma.shape[:1] + (1,) * (noise.ndim - 1))

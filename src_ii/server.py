@@ -105,7 +105,6 @@ class ModelBackend(Protocol):
     def encode_prompt(self, prompt: str, layer_idx: int) -> dict: ...
 
     # Sampling
-    def sample_trajectory(self, params: dict, tensors: dict) -> tuple[dict, dict]: ...
     def sample_trajectory_packed(self, params: dict, tensors: dict) -> tuple[dict, dict]: ...
 
     # VAE
@@ -1209,17 +1208,28 @@ class GPUModelBackend:
     # --- Sampling ---
 
     def sample_trajectory(self, params: dict, tensors: dict) -> tuple[dict, dict]:
-        self._ensure_diffusion()
-        attn = params.get("attention_backend", "sdpa")
-        self._configure_sage_if_needed(attn)
+        """Single-image sampling -- normalizes to packed contract."""
+        p = dict(params)
+        t = dict(tensors)
+        if "n_images" not in p:
+            p["n_images"] = 1
+        if "seeds" not in p and "seed" in p:
+            p["seeds"] = [p.pop("seed")]
+        if "pos_cond" in t and "pos_cond_0" not in t:
+            t["pos_cond_0"] = t.pop("pos_cond")
+        if "clean_latent" in t and "clean_latent_0" not in t:
+            t["clean_latent_0"] = t.pop("clean_latent")
 
-        from futudiffu.sampling import run_trajectory
+        result_tensors, metadata = self.sample_trajectory_packed(p, t)
 
-        result_tensors, metadata = run_trajectory(
-            self._diff_compiled, self._diff_model,
-            self._device, self._dtype, params, tensors,
-            btrm_head=self._btrm_head,
-        )
+        # Remap output: callers expect "final" not "final_0"
+        if "final_0" in result_tensors and "final" not in result_tensors:
+            result_tensors["final"] = result_tensors["final_0"]
+        # Remap step intermediates: "step_XX_0" -> "step_XX"
+        for k in list(result_tensors.keys()):
+            if k.startswith("step_") and k.endswith("_0"):
+                result_tensors[k[:-2]] = result_tensors[k]
+
         return result_tensors, metadata
 
     def sample_trajectory_packed(
@@ -1227,6 +1237,7 @@ class GPUModelBackend:
     ) -> tuple[dict, dict]:
         import torch
         self._ensure_diffusion()
+        self._ensure_batch_executor()
         attn = params.get("attention_backend", "sdpa")
         self._configure_sage_if_needed(attn)
 
@@ -1237,6 +1248,7 @@ class GPUModelBackend:
                 self._diff_model,
                 self._device, self._dtype, params, tensors,
                 callback=callback,
+                batch_executor=self._batch_executor,
             )
         return result_tensors, metadata
 

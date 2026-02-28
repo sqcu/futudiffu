@@ -36,11 +36,10 @@ if str(REPO_ROOT) not in sys.path:
 import torch
 from src_ii.infer.text_encoding  import encode_prompts
 from src_ii.infer.model_setup    import load_and_prepare_model
-from src_ii.infer.trajectory     import sample_trajectory
+from src_ii.inference_sampling   import run_trajectory_packed
 from src_ii.infer.charts         import draw_score_chart
 from src_ii.infer.composites     import build_comparison_composite
-from src_ii.forward_packed       import prepare_packed_forward
-from src_ii.sigma_schedule       import build_sigma_schedule, resolution_shift
+from src_ii.sigma_schedule       import sigma_to_logsnr
 from src_ii.vae_utils            import load_vae, decode_latent_to_pil
 
 # ---------------------------------------------------------------------------
@@ -86,29 +85,41 @@ def main() -> int:
         FP8_PATH, adapter_configs, BTRM_DIR, ADAPTER_NAME, device=DEVICE, dtype=DTYPE,
     )
 
-    # Phase 3: Dual-Scale Euler Sampling
+    # Phase 3: Dual-Scale Euler Sampling (via authoritative CFG path)
     hdr("PHASE 3: DUAL-SCALE EULER SAMPLING")
-    alpha  = resolution_shift(RES_W, RES_H)
-    sigmas = build_sigma_schedule(N_STEPS, sampling_shift=alpha, device=DEVICE, dtype=DTYPE)
-    lh, lw = RES_H // 8, RES_W // 8
     scales_ref    = torch.tensor([[0.0]], device=DEVICE)
     scales_rtheta = torch.tensor([[1.0]], device=DEVICE)
+
+    # Encode empty negative prompt for CFG
+    from src_ii.infer.text_encoding import encode_prompts as _ep
+    neg_cond = _ep([("_neg", "")], TE_PATH, DEVICE, DTYPE)["_neg"]
 
     all_results: dict[str, dict] = {}
     for slug, cond_cpu in conds.items():
         print(f"\n  --- {slug} ---", flush=True)
-        t0   = time.perf_counter()
+        t0 = time.perf_counter()
         cond = cond_cpu.to(DEVICE)
-        plan = prepare_packed_forward(model, [cond], [(lh, lw)], [cond.shape[1]], DEVICE)
-        gen  = torch.Generator(device=DEVICE).manual_seed(SEED)
-        x_init = sigmas[0] * torch.randn(1, 16, lh, lw, dtype=DTYPE, device=DEVICE, generator=gen)
-        lat_ref,    recs_ref    = sample_trajectory(model, plan, sigmas, x_init, scales_ref)
-        lat_rtheta, recs_rtheta = sample_trajectory(model, plan, sigmas, x_init, scales_rtheta)
+        params = {
+            "n_images": 1, "seeds": [SEED], "n_steps": N_STEPS,
+            "cfg": 4.0, "multiplier": 1.0, "denoise": 1.0,
+            "width": RES_W, "height": RES_H,
+        }
+        tensors = {"neg_cond": neg_cond, "pos_cond_0": cond}
+
+        result_ref, meta_ref = run_trajectory_packed(
+            model, DEVICE, DTYPE, params, tensors,
+            adapter_scales=scales_ref,
+        )
+        result_rth, meta_rth = run_trajectory_packed(
+            model, DEVICE, DTYPE, params, tensors,
+            adapter_scales=scales_rtheta,
+        )
         elapsed = time.perf_counter() - t0
         print(f"  {slug}: {elapsed:.1f}s ({elapsed/N_STEPS:.2f}s/step)", flush=True)
         all_results[slug] = {
-            "latent_ref": lat_ref.cpu(), "latent_rtheta": lat_rtheta.cpu(),
-            "recs_ref": recs_ref,        "recs_rtheta":   recs_rtheta,
+            "latent_ref": result_ref["final_0"], "latent_rtheta": result_rth["final_0"],
+            "recs_ref": meta_ref.get("step_scores", []),
+            "recs_rtheta": meta_rth.get("step_scores", []),
         }
 
     del model, raw_model
@@ -141,8 +152,8 @@ def main() -> int:
         img_ref.save(OUTPUT_DIR / f"{slug}_ref.png")
         img_rtheta.save(OUTPUT_DIR / f"{slug}_rtheta.png")
 
-        logsnrs = [r["logsnr"] for r in recs_ref]
-        n_heads = len(recs_ref[0]["scores"])
+        logsnrs = [sigma_to_logsnr(r["sigma"]) for r in recs_ref]
+        n_heads = len(recs_ref[0]["scores"]) if recs_ref else 0
         charts  = []
         for head_idx in range(n_heads):
             head_name = head_names[head_idx] if head_idx < len(head_names) else f"head_{head_idx}"
@@ -163,8 +174,9 @@ def main() -> int:
         print(f"  {slug}: composite {composite.size[0]}x{composite.size[1]} -> {composite_path.name}", flush=True)
 
         for step_i, (r_ref, r_rth) in enumerate(zip(recs_ref, recs_rtheta)):
+            sigma = r_ref["sigma"]
             scores_log.append({"slug": slug, "step": step_i,
-                                "sigma": r_ref["sigma"], "logsnr": r_ref["logsnr"],
+                                "sigma": sigma, "logsnr": sigma_to_logsnr(sigma),
                                 "scores_ref": r_ref["scores"], "scores_rtheta": r_rth["scores"]})
 
     scores_path = OUTPUT_DIR / "scores_per_step.jsonl"

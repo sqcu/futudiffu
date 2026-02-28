@@ -227,3 +227,78 @@ def _execute_plan(entries, plan, model, device):
             }
 
     return [results[i] for i in range(len(entries))]
+
+
+# ------------------------------------------------------------------
+# KTUPLE ADAPTER (bridges ktuple executor protocol to BatchExecutor)
+# ------------------------------------------------------------------
+
+def make_executor_adapter(batch_executor, query_sigmas, device):
+    """Bridge ktuple executor protocol to BatchExecutor.execute().
+
+    ktuple solve() calls: executor(x_bases, specs, step_i, adapter_scales)
+    Returns: (denoised_per_query: list[list[Tensor]], scores: Tensor | None)
+
+    This adapter converts ktuple specs to BatchExecutor query dicts,
+    executes, and groups results back by query.
+
+    Args:
+        batch_executor: BatchExecutor instance.
+        query_sigmas: list of (n_steps+1,) tensors, one per query.
+        device: Target device for returned tensors.
+    """
+    def executor_fn(x_bases, specs, step_i, adapter_scales=None):
+        queries = []
+        for k, (x_base, spec) in enumerate(zip(x_bases, specs)):
+            base_cond, base_res, _ = spec[0]
+            sigma = float(query_sigmas[k][step_i])
+
+            forks = []
+            for j, (cond, res, scale) in enumerate(spec):
+                fork = {"entry_id": f"e{j}"}
+                if j > 0:
+                    fork["cond"] = cond
+                if res != base_res:
+                    fork["resolution"] = res
+                forks.append(fork)
+
+            q = {
+                "query_id": f"q{k}",
+                "base_latent": x_base,
+                "base_cond": base_cond,
+                "base_cap_len": base_cond.shape[1],
+                "base_resolution": base_res,
+                "sigma": sigma,
+                "forks": forks,
+            }
+            if adapter_scales is not None:
+                # adapter_scales is (K, n_adapters) or (1, n_adapters)
+                if adapter_scales.shape[0] == 1:
+                    q["adapter_scales"] = adapter_scales
+                else:
+                    q["adapter_scales"] = adapter_scales[k:k+1]
+            queries.append(q)
+
+        results = batch_executor.execute(queries)
+
+        # Group by query, sort by entry
+        buckets = {k: [] for k in range(len(specs))}
+        for r in results:
+            k = int(r["query_id"][1:])
+            j = int(r["entry_id"][1:])
+            buckets[k].append((j, r["denoised"].to(device), r.get("scores")))
+
+        denoised_per_query = []
+        score_rows = []
+        for k in range(len(specs)):
+            entries_sorted = sorted(buckets[k], key=lambda t: t[0])
+            denoised_per_query.append([d for _, d, _ in entries_sorted])
+            # Take base entry (j=0) scores as query scores
+            base_scores = entries_sorted[0][2]
+            if base_scores is not None:
+                score_rows.append(base_scores.to(device))
+
+        scores = torch.stack(score_rows) if score_rows else None
+        return denoised_per_query, scores
+
+    return executor_fn

@@ -5,6 +5,8 @@
   "width": 1280,
   "height": 832,
   "n_steps": 20,
+  "cfg": 4.0,
+  "negative_prompt": "",
   "btrm_dir": "training_output/reward_function_run_tnt_v2",
   "adapter_name": "rtheta",
   "diff_scale": 10.0
